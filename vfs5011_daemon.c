@@ -1,0 +1,1366 @@
+/*
+ * vfs5011_daemon.c
+ *
+ * Background authentication daemon: idles until the screen locks, polls
+ * the sensor for a match while locked, and auto-types the stored
+ * password on success. Shares the exact same capture/matcher/volume
+ * code as vfs_client.c — this is the CLI's proven pipeline wired to a
+ * lock/unlock trigger instead of a menu.
+ *
+ * This is a STANDALONE TEST HARNESS for the daemon logic — not yet a
+ * real installed LaunchDaemon (no plist, not backgrounded via launchd
+ * yet). Run it directly in a terminal to validate the full lock ->
+ * poll -> match -> auto-type -> unlock cycle before wrapping it in a
+ * LaunchDaemon.
+ *
+ * IMPORTANT CAVEAT: macOS's Secure Input protection may block synthetic
+ * CGEventPost keystrokes from reaching the lock screen's password
+ * field specifically (this exists to stop exactly this kind of
+ * synthetic injection from malware). This has NOT been confirmed
+ * working on real hardware yet. If auto-type silently does nothing at
+ * the lock screen, that's Secure Input blocking it, not a bug in this
+ * code — the fallback would be a lower-level virtual HID device
+ * instead of CGEventPost.
+ *
+ * Build:
+ *   clang vfs5011_daemon.c vfs5011_matcher.c \
+ *       nbis/mindtct/*.c nbis/bozorth3/*.c \
+ *       -o vfs5011_daemon \
+ *       -I. -Inbis/include \
+ *       -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
+ *       -framework CoreFoundation -framework ApplicationServices \
+ *       -lm -lpthread \
+ *       -Wno-implicit-function-declaration
+ *
+ * (build_daemon.sh runs this exact command.)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <libgen.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <time.h>
+#include <libusb.h>
+#include <libproc.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ApplicationServices/ApplicationServices.h>
+
+#include "vfs5011_proto.h"
+#include "vfs5011_matcher.h"
+
+#define VFS5011_VID 0x138a
+#define VFS5011_PID 0x0018
+
+enum action_type { ACTION_SEND, ACTION_RECEIVE };
+struct usb_action {
+    enum action_type type;
+    const char *name;
+    int endpoint;
+    int size;
+    unsigned char *data;
+    int correct_reply_size;
+};
+
+#define SEND(ENDPOINT, COMMAND) \
+    { ACTION_SEND, #COMMAND, ENDPOINT, sizeof(COMMAND), COMMAND, 0 },
+#define RECV(ENDPOINT, SIZE) \
+    { ACTION_RECEIVE, "recv", ENDPOINT, SIZE, NULL, 0 },
+#define RECV_CHECK(ENDPOINT, SIZE, EXPECTED) \
+    { ACTION_RECEIVE, "recv_check", ENDPOINT, SIZE, EXPECTED, sizeof(EXPECTED) },
+
+static struct usb_action vfs5011_initialization[] = {
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_19)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_00)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_02)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_04)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 256)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_05)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_06)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 17216)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 32)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_07)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 45056)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_08)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 16896)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_09)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4928)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_10)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 5632)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_11)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 5632)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_12)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 3328)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_13)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_14)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_02)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_27)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_15)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_16)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 2368)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_17)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_18)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+};
+
+static struct usb_action vfs5011_initiate_capture[] = {
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_04)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 84032)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_00)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_01)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_02)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 2368)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_04)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 2368, VFS5011_NORMAL_CONTROL_REPLY)
+};
+
+/* Attempts a bulk transfer; on LIBUSB_ERROR_PIPE (stall left over from a
+ * previous run, or a transient firmware hiccup), clears the halt on that
+ * endpoint and retries exactly once before giving up. This is what lets
+ * the program recover on its own instead of needing a manual rerun. */
+static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpoint,
+                                          unsigned char *data, int size, int *transferred,
+                                          unsigned int timeout) {
+    int r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    if (r == LIBUSB_ERROR_PIPE) {
+        fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
+        libusb_clear_halt(handle, endpoint);
+        r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    }
+    return r;
+}
+
+static int run_sequence(libusb_device_handle *handle, struct usb_action *seq, int count) {
+    unsigned char recv_buf[VFS5011_RECEIVE_BUF_SIZE];
+    int r, transferred, i;
+    for (i = 0; i < count; i++) {
+        struct usb_action *a = &seq[i];
+        if (a->type == ACTION_SEND) {
+            r = bulk_transfer_with_pipe_retry(handle, a->endpoint, a->data, a->size,
+                                               &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
+            if (r != 0 || transferred != a->size) {
+                fprintf(stderr, "SEND failed at step %d (%s): %s\n", i + 1, a->name, libusb_error_name(r));
+                return -1;
+            }
+        } else {
+            r = bulk_transfer_with_pipe_retry(handle, a->endpoint, recv_buf, a->size,
+                                               &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
+            if (r != 0) {
+                fprintf(stderr, "RECV failed at step %d: %s\n", i + 1, libusb_error_name(r));
+                return -1;
+            }
+            if (a->data != NULL) {
+                if (transferred != a->correct_reply_size ||
+                    memcmp(recv_buf, a->data, a->correct_reply_size) != 0) {
+                    fprintf(stderr, "RECV_CHECK mismatch at step %d\n", i + 1);
+                    return -1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+#define CAPTURE_LINES   256
+#define MAX_LINES_TOTAL 2000
+#define MAX_LINES_READ  100000
+#define DEVIATION_THRESHOLD (15*15)
+#define DIFFERENCE_THRESHOLD 600
+#define STOP_CHECK_LINES 50
+#define ASM_RESOLUTION 10
+#define ASM_MEDIAN_FILTER_SIZE 25
+#define ASM_MAX_SEARCH_OFFSET 30
+
+static int get_deviation(unsigned char *buf, int size) {
+    int mean = 0, res = 0, i;
+    for (i = 0; i < size; i++) mean += buf[i];
+    mean /= size;
+    for (i = 0; i < size; i++) { int d = (int)buf[i] - mean; res += d * d; }
+    return res / size;
+}
+static int get_diff_norm(unsigned char *a, unsigned char *b, int size) {
+    int res = 0, i;
+    for (i = 0; i < size; i++) { int d = (int)a[i] - (int)b[i]; res += d * d; }
+    return res / size;
+}
+static unsigned char get_pixel(unsigned char *line, int x) { return line[8 + x]; }
+static int get_deviation2(unsigned char *row1, unsigned char *row2) {
+    unsigned char *buf1 = row1 + 56;
+    unsigned char *buf2 = row2 + 168;
+    const int size = 64;
+    int mean = 0, res = 0, i;
+    for (i = 0; i < size; i++) mean += (int)buf1[i] + (int)buf2[i];
+    mean /= size;
+    for (i = 0; i < size; i++) { int d = (int)buf1[i] + (int)buf2[i] - mean; res += d * d; }
+    return res / size;
+}
+static int cmpint(const void *a, const void *b) { return (*(const int *)a) - (*(const int *)b); }
+static void median_filter(int *data, int size, int filtersize) {
+    int *result = calloc(size, sizeof(int));
+    int *sortbuf = calloc(filtersize, sizeof(int));
+    for (int i = 0; i < size; i++) {
+        int i1 = i - (filtersize - 1) / 2, i2 = i + (filtersize - 1) / 2;
+        if (i1 < 0) i1 = 0;
+        if (i2 >= size) i2 = size - 1;
+        memmove(sortbuf, data + i1, (size_t)(i2 - i1 + 1) * sizeof(int));
+        qsort(sortbuf, i2 - i1 + 1, sizeof(int), cmpint);
+        result[i] = sortbuf[(i2 - i1 + 1) / 2];
+    }
+    memmove(data, result, (size_t)size * sizeof(int));
+    free(result); free(sortbuf);
+}
+static void interpolate_lines(unsigned char *line1, float y1, unsigned char *line2,
+                               float y2, unsigned char *output, float yi, int size) {
+    if (!line1 || !line2) return;
+    for (int i = 0; i < size; i++) {
+        unsigned char p1 = get_pixel(line1, i), p2 = get_pixel(line2, i);
+        output[i] = (unsigned char)((float)p1 + (yi - y1) / (y2 - y1) * ((float)p2 - (float)p1));
+    }
+}
+static unsigned char *assemble_lines(unsigned char *lines, int lines_len, int max_height, int *out_height) {
+    int line_stride = VFS5011_LINE_SIZE, width = VFS5011_IMAGE_WIDTH;
+    int *offsets = calloc((size_t)(lines_len / 2), sizeof(int));
+    unsigned char *output = calloc((size_t)width * max_height, 1);
+    float y = 0.0f; int line_ind = 0;
+    for (int i = 0; i < lines_len - 1; i += 2) {
+        int bestmatch = i, bestdiff = 0;
+        int firstrow = i + 1;
+        int lastrow = (i + ASM_MAX_SEARCH_OFFSET < lines_len - 1) ? i + ASM_MAX_SEARCH_OFFSET : lines_len - 1;
+        for (int j = firstrow; j <= lastrow; j++) {
+            int diff = get_deviation2(lines + (size_t)i * line_stride, lines + (size_t)j * line_stride);
+            if (j == firstrow || diff < bestdiff) { bestdiff = diff; bestmatch = j; }
+        }
+        offsets[i / 2] = bestmatch - i;
+    }
+    int off_count = (lines_len / 2) - 1;
+    if (off_count > 0) median_filter(offsets, off_count, ASM_MEDIAN_FILTER_SIZE);
+    for (int i = 0; i < lines_len - 1; i++) {
+        int offset = offsets[i / 2];
+        unsigned char *row1 = lines + (size_t)i * line_stride;
+        unsigned char *row2 = lines + (size_t)(i + 1) * line_stride;
+        if (offset > 0) {
+            float ynext = y + (float)ASM_RESOLUTION / (float)offset;
+            while ((float)line_ind < ynext) {
+                if (line_ind > max_height - 1) goto out;
+                interpolate_lines(row1, y, row2, ynext, output + (size_t)line_ind * width, (float)line_ind, width);
+                line_ind++;
+            }
+            y = ynext;
+        }
+    }
+out:
+    free(offsets);
+    *out_height = line_ind;
+    return output;
+}
+
+/* Runs the full pipeline: init -> initiate-capture -> swipe capture ->
+ * alignment. Returns a malloc'd VFS5011_IMAGE_WIDTH x *out_height
+ * grayscale buffer, or NULL on failure. Caller must libusb_init/open
+ * the device and pass a claimed handle. */
+static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    if (run_sequence(handle, vfs5011_initialization,
+                      sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
+        fprintf(stderr, "Init sequence failed\n");
+        return NULL;
+    }
+    if (run_sequence(handle, vfs5011_initiate_capture,
+                      sizeof(vfs5011_initiate_capture)/sizeof(vfs5011_initiate_capture[0])) != 0) {
+        fprintf(stderr, "Initiate-capture sequence failed\n");
+        return NULL;
+    }
+    printf("Swipe your finger across the sensor now...\n");
+
+    unsigned char *recorded = malloc((size_t)MAX_LINES_TOTAL * VFS5011_LINE_SIZE);
+    int lines_recorded = 0, lines_captured = 0, empty_lines = 0;
+    unsigned char *lastline = NULL;
+    unsigned char *chunk_buf = malloc((size_t)CAPTURE_LINES * VFS5011_LINE_SIZE);
+    int finished = 0, r;
+
+    while (!finished) {
+        int transferred = 0;
+        r = libusb_bulk_transfer(handle, VFS5011_IN_ENDPOINT_DATA, chunk_buf,
+                                  CAPTURE_LINES * VFS5011_LINE_SIZE, &transferred, 0);
+        if (r != 0 && r != LIBUSB_ERROR_TIMEOUT) {
+            fprintf(stderr, "Capture read failed: %s\n", libusb_error_name(r));
+            break;
+        }
+        if (transferred <= 0) continue;
+        int lines_in_chunk = transferred / VFS5011_LINE_SIZE;
+        for (int i = 0; i < lines_in_chunk; i++) {
+            unsigned char *line = chunk_buf + i * VFS5011_LINE_SIZE;
+            if (get_deviation(line + 8, VFS5011_IMAGE_WIDTH) < DEVIATION_THRESHOLD) {
+                if (lines_captured == 0) continue;
+                empty_lines++;
+            } else empty_lines = 0;
+            if (empty_lines >= STOP_CHECK_LINES) { finished = 1; break; }
+            lines_captured++;
+            if (lines_captured > MAX_LINES_READ) { finished = 1; break; }
+            if (lastline == NULL || get_diff_norm(lastline + 8, line + 8, VFS5011_IMAGE_WIDTH) >= DIFFERENCE_THRESHOLD) {
+                if (lines_recorded >= MAX_LINES_TOTAL) { finished = 1; break; }
+                lastline = recorded + (size_t)lines_recorded * VFS5011_LINE_SIZE;
+                memcpy(lastline, line, VFS5011_LINE_SIZE);
+                lines_recorded++;
+            }
+        }
+    }
+    free(chunk_buf);
+
+    if (lines_recorded < 2) {
+        fprintf(stderr, "Not enough lines captured (%d) — try a slower, fuller swipe.\n", lines_recorded);
+        free(recorded);
+        return NULL;
+    }
+
+    int height = 0;
+    unsigned char *aligned = assemble_lines(recorded, lines_recorded, MAX_LINES_TOTAL, &height);
+    free(recorded);
+
+    if (height <= 0) {
+        fprintf(stderr, "Alignment produced no output rows.\n");
+        free(aligned);
+        return NULL;
+    }
+    *out_height = height;
+    return aligned;
+}
+
+static libusb_context *g_ctx = NULL;
+static libusb_device_handle *g_handle = NULL;
+
+static int open_device(void) {
+    if (libusb_init(&g_ctx) < 0) return -1;
+    libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    /* Right after a close_device() from a previous attempt, macOS
+     * sometimes hasn't finished settling the device back into a
+     * re-openable state yet — libusb_open_device_with_vid_pid can
+     * transiently return NULL even though the device is still
+     * physically present. Retry a few times with backoff before
+     * treating it as a genuine "device not found". */
+    for (int i = 0; i < 5; i++) {
+        g_handle = libusb_open_device_with_vid_pid(g_ctx, VFS5011_VID, VFS5011_PID);
+        if (g_handle) break;
+        usleep(300000); /* 300ms between open attempts */
+    }
+    if (!g_handle) { fprintf(stderr, "Device not found\n"); return -1; }
+
+    /* Tell libusb to forcibly detach whatever kernel driver has grabbed
+     * this interface (common on macOS for HID-ish USB devices) BEFORE we
+     * try to claim it. Without this, claim_interface loses the race
+     * against the OS almost every time, and we were papering over that
+     * with a full device reset on every single run — which was hurting
+     * capture quality (device never fully settled before the swipe). */
+    libusb_set_auto_detach_kernel_driver(g_handle, 1);
+
+    if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+
+    /* Before resorting to a full device reset (which is known to hurt
+     * capture quality on the next swipe), try a few quick re-claims —
+     * a lot of "Claim failed" cases on macOS are IOKit holding the
+     * interface exclusively for a brief moment right after enumeration
+     * or after a previous close, and that clears on its own within a
+     * few hundred ms without needing a disruptive reset. */
+    for (int i = 0; i < 3; i++) {
+        usleep(150000);
+        if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+    }
+
+    /* Still failed after quick retries — now fall back to reset. This
+     * should be the rare case, not the common one. */
+    fprintf(stderr, "Claim failed, resetting device and retrying...\n");
+    int reset_r = libusb_reset_device(g_handle);
+    if (reset_r != 0) {
+        fprintf(stderr, "Device reset failed: %s\n", libusb_error_name(reset_r));
+    }
+    usleep(500000);
+
+    if (libusb_claim_interface(g_handle, 0) != 0) {
+        fprintf(stderr, "Claim failed again after reset\n");
+        return -1;
+    }
+    return 0;
+}
+static void close_device(void) {
+    if (g_handle) {
+        /* Proactively clear any halt on the endpoints we use before
+         * releasing, so the *next* run doesn't inherit a stalled pipe
+         * from this session (this is what caused the PIPE error /
+         * cascading Claim failed seen after a previous run). */
+        libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_CTRL);
+        libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_DATA);
+        libusb_clear_halt(g_handle, VFS5011_OUT_ENDPOINT);
+        libusb_release_interface(g_handle, 0);
+        libusb_close(g_handle);
+    }
+    if (g_ctx) libusb_exit(g_ctx);
+}
+
+#define MATCH_THRESHOLD 20       /* testing lower vs. confirmed impostor ceiling of ~18 */
+#define ENROLL_SWIPES 5          /* how many good swipes make up one enrollment */
+#define MAX_STORED_TEMPLATES 8   /* array bound for save/load */
+#define MIN_MINUTIAE 20          /* below this, a capture is too weak to trust */
+#define MAX_SWIPE_RETRIES 3      /* re-prompt this many times before giving up on one swipe */
+#define MIN_SELF_CONSISTENCY 15  /* a new enroll swipe must score at least this well against
+                                    at least one already-saved swipe from this same session,
+                                    or it's treated as an outlier capture and re-prompted */
+
+/* Built-in macOS system sound, not a bundled asset -- keeps the repo
+ * asset-free for open sourcing and works on every Mac out of the box.
+ * "Basso" is the classic short error/failure tone. */
+#define FAILURE_SOUND_PATH "/System/Library/Sounds/Basso.aiff"
+/* Bright, distinct confirmation tone -- deliberately different from
+ * the failure sound so the two are unmistakable from across a room,
+ * not just on close listening. */
+#define SUCCESS_SOUND_PATH "/System/Library/Sounds/Glass.aiff"
+
+/* Fires a short audible cue on a rejected (below-threshold) swipe, so
+ * a failed attempt gives the same kind of immediate feedback real
+ * Touch ID gives (a buzz/reject tone) instead of silently waiting for
+ * another swipe. Backgrounded with `&` so afplay's ~1s runtime never
+ * blocks the polling loop from immediately trying the next swipe.
+ * Runs in the same GUI session as the daemon (that's the whole reason
+ * this is a LaunchAgent and not a LaunchDaemon -- see the top-of-file
+ * notes on session-scoped notification delivery), so audio output
+ * goes to whatever device the user is actually using. Best-effort:
+ * if afplay isn't available or the sound file is missing for some
+ * reason, this silently does nothing rather than treating a failed
+ * *swipe* as a reason to fail the whole daemon. */
+static void play_failure_sound(void) {
+    int status = system("afplay " FAILURE_SOUND_PATH " > /dev/null 2>&1 &");
+    (void)status; /* best-effort — a missing sound file shouldn't affect matching */
+}
+
+static void play_success_sound(void) {
+    int status = system("afplay " SUCCESS_SOUND_PATH " > /dev/null 2>&1 &");
+    (void)status; /* best-effort, same reasoning as play_failure_sound() */
+}
+
+/* Captures one swipe and extracts its template, re-prompting the user
+ * up to MAX_SWIPE_RETRIES times if the capture comes back too weak
+ * (too few minutiae) to be worth keeping.
+ *
+ * IMPORTANT: this opens and closes the device fresh for EVERY attempt.
+ * Testing showed the sensor's internal state doesn't tolerate two
+ * initiate-capture sequences back-to-back on the same open handle —
+ * the second swipe stalls both endpoints and never recovers, even
+ * with clear_halt. A full close+reopen between swipes is what was
+ * actually working in the separate-process-per-swipe testing, so we
+ * do that here automatically instead of relying on one long-lived
+ * handle across multiple swipes. */
+static int capture_quality_template(struct xyt_struct *out_tmpl) {
+    for (int attempt = 1; attempt <= MAX_SWIPE_RETRIES; attempt++) {
+        if (open_device() != 0) {
+            close_device();
+            fprintf(stderr, "Could not open device (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+
+        int height = 0;
+        unsigned char *image = capture_fingerprint_image(g_handle, &height);
+        if (!image) {
+            close_device();
+            fprintf(stderr, "Capture failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+
+        memset(out_tmpl, 0, sizeof(*out_tmpl));
+        int r = vfs5011_extract_template(image, VFS5011_IMAGE_WIDTH, height, out_tmpl);
+        free(image);
+        close_device();
+
+        if (r != 0) {
+            fprintf(stderr, "Minutiae extraction failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+        if (out_tmpl->nrows < MIN_MINUTIAE) {
+            fprintf(stderr, "Swipe too weak (%d minutiae, need %d) — swipe again, slower and fuller.\n",
+                    out_tmpl->nrows, MIN_MINUTIAE);
+            usleep(500000);
+            continue;
+        }
+        return 0;
+    }
+    fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
+    return -1;
+}
+
+/* ------------------------------------------------------------------ *
+ * VFS CLIENT — interactive menu shell
+ *
+ * Everything above this point is the untouched enroll/verify pipeline
+ * from vfs5011_enroll_verify.c. Below is the menu wrapper: it calls
+ * straight into capture_quality_template(), vfs5011_save_templates(),
+ * vfs5011_load_templates(), and vfs5011_match_score() — no duplicated
+ * capture logic, no reinvented constants.
+ * ------------------------------------------------------------------ */
+
+#define VFSC_RULE "--------------------------------------------------------------------"
+#define TEMPLATE_FILENAME "template.dat"
+#define MOUNT_SCRIPT_NAME "vfs5011_volume_mount.sh"
+#define UNMOUNT_SCRIPT_NAME "vfs5011_volume_unmount.sh"
+
+/* Directory this binary is running from, resolved once at startup, so
+ * the mount/unmount scripts can be found by absolute path regardless
+ * of the caller's current working directory. */
+static char g_exec_dir[PATH_MAX];
+
+static void init_exec_dir(const char *argv0) {
+    char resolved[PATH_MAX];
+    if (realpath(argv0, resolved) == NULL) {
+        /* Fall back to argv0 as-is if realpath fails (unusual, but
+         * don't crash the whole menu over a cosmetic path lookup). */
+        strncpy(resolved, argv0, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
+    char *dir = dirname(resolved); /* may alias into `resolved` — copy immediately */
+    strncpy(g_exec_dir, dir, sizeof(g_exec_dir) - 1);
+    g_exec_dir[sizeof(g_exec_dir) - 1] = '\0';
+}
+
+/* Cached template count for the status line. NOT re-checked on every
+ * menu redraw on purpose — the templates volume is unmounted at rest,
+ * and mounting it just to paint a status line would mean mounting
+ * constantly while someone sits at the menu, defeating the point of
+ * per-operation mounting. Enroll/Verify update this for free as a
+ * side effect since they already have the volume mounted anyway. */
+static int g_cached_template_count = -1; /* -1 = not checked yet this session */
+
+/* Mounts the encrypted template volume via vfs5011_volume_mount.sh,
+ * capturing the mount point path it prints on success. Echoes the
+ * script's own diagnostic lines so the behavior looks the same as
+ * running it directly. Returns 0 and fills out_path on success. */
+static int mount_template_volume(char *out_path, size_t out_path_size) {
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\"", g_exec_dir, MOUNT_SCRIPT_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "Failed to run volume mount script: %s\n", strerror(errno));
+        return -1;
+    }
+
+    char line[PATH_MAX];
+    char last_line[PATH_MAX] = {0};
+    while (fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        if (len > 0) {
+            strncpy(last_line, line, sizeof(last_line) - 1);
+            last_line[sizeof(last_line) - 1] = '\0';
+            printf("  %s\n", line);
+        }
+    }
+    int status = pclose(fp);
+
+    /* The script's last printed line is the mount path on success — a
+     * plain absolute path starting with '/'. Anything else (empty, an
+     * error message, non-zero exit) means mounting failed. */
+    if (status != 0 || last_line[0] != '/') {
+        fprintf(stderr, "Volume mount failed (exit status %d).\n", status);
+        return -1;
+    }
+    strncpy(out_path, last_line, out_path_size - 1);
+    out_path[out_path_size - 1] = '\0';
+    return 0;
+}
+
+static void unmount_template_volume(void) {
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\"", g_exec_dir, UNMOUNT_SCRIPT_NAME);
+    int status = system(cmd);
+    if (status != 0) {
+        fprintf(stderr,
+                "Warning: volume unmount script exited with status %d — the volume may "
+                "still be mounted. Run vfs5011_volume_unmount.sh manually to check.\n",
+                status);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Daemon logic: lock/unlock state machine, sensor polling, auto-type
+ * ------------------------------------------------------------------ */
+
+#define PASSWORD_FILENAME "password.txt"
+#define POLL_RETRY_DELAY_USEC 400000  /* 400ms between failed swipes while polling */
+#define MAX_PASSWORD_LEN 256
+
+typedef enum {
+    STATE_IDLE,
+    STATE_POLLING
+} daemon_state_t;
+
+static atomic_int g_state = STATE_IDLE;
+static atomic_int g_running = 1;
+
+/* ------------------------------------------------------------------ *
+ * Auth-prompt watcher: extends the same lock/poll/type pipeline to
+ * fire on one more trigger besides the lock screen --
+ *
+ *   TRIGGER_PADLOCK -- a SecurityAgent/authorizationhost dialog
+ *                       (System Settings padlocks, installer auth,
+ *                       etc) appeared with a secure text field.
+ *                       Detected via the same 300ms CFRunLoopTimer
+ *                       poll used for the lock screen, checking
+ *                       whatever currently has system-wide keyboard
+ *                       focus.
+ *
+ * (A terminal-sudo trigger -- detecting a "Password:" prompt in a
+ * frontmost terminal emulator's scrollback -- was designed and built
+ * alongside this, but deliberately removed: not a priority right now,
+ * and diagnosing it surfaced a real AX API issue (see ax_probe.c
+ * findings) that also affects this padlock path, since both rely on
+ * the same AXUIElementCopyAttributeValue calls to read the focused
+ * element.)
+ *
+ * Reuses load_templates_for_episode(), polling_thread_main()'s
+ * capture/match loop, and type_password_and_enter() completely
+ * unchanged -- CGEventPost always goes to whatever currently has
+ * keyboard focus, so no new typing logic is needed, only new
+ * *detection* logic plus a refocus safety check right before typing
+ * (see arm_polling_for_trigger and the success branch in
+ * polling_thread_main). */
+typedef enum {
+    TRIGGER_NONE,
+    TRIGGER_LOCK_SCREEN,
+    TRIGGER_PADLOCK
+} trigger_source_t;
+
+static atomic_int g_trigger_source = TRIGGER_NONE;
+
+/* pid that must still be focused/frontmost right before we type -- if
+ * the user alt-tabbed away mid-swipe, we abort instead of typing into
+ * whatever now has focus. Not used for TRIGGER_LOCK_SCREEN (there's
+ * only ever one thing focused at the lock screen). */
+static pid_t g_trigger_target_pid = 0;
+
+/* Only populated for TRIGGER_PADLOCK -- the specific secure field to
+ * focus right before typing, found once at detection time so we don't
+ * have to re-walk the AX tree at match time. Retained on set, released
+ * when the episode ends. */
+static AXUIElementRef g_trigger_secure_field = NULL;
+
+/* Loaded once per lock episode (in on_screen_locked, while the volume
+ * is briefly mounted), then matched against repeatedly in memory while
+ * polling -- so the volume does NOT stay mounted for the whole time
+ * the screen is locked, only for the brief load. */
+static struct xyt_struct g_enrolled_templates[MAX_STORED_TEMPLATES];
+static int g_enrolled_count = 0;
+
+/* Cached alongside the templates during the same lock-time mount, so a
+ * match doesn't require a second mount/unmount round trip just to read
+ * password.txt. Lives only as long as g_enrolled_templates does --
+ * populated in load_templates_for_episode(), zeroed in
+ * on_screen_unlocked(). Same trust model as before: still only ever
+ * sits in root process memory, just for one lock episode instead of a
+ * few hundred extra ms at match time. */
+static char g_cached_password[MAX_PASSWORD_LEN + 1];
+static int g_cached_password_valid = 0;
+
+static void print_timestamp(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CFDateFormatterRef fmt = CFDateFormatterCreate(NULL, CFLocaleCopyCurrent(),
+                                                    kCFDateFormatterNoStyle,
+                                                    kCFDateFormatterMediumStyle);
+    CFDateRef date = CFDateCreate(NULL, now);
+    CFStringRef str = CFDateFormatterCreateStringWithDate(NULL, fmt, date);
+    char buf[64];
+    CFStringGetCString(str, buf, sizeof(buf), kCFStringEncodingUTF8);
+    printf("[%s] ", buf);
+    CFRelease(str);
+    CFRelease(date);
+    CFRelease(fmt);
+}
+
+/* Types a UTF-8 string via synthetic keyboard events, then presses
+ * Return. Uses CGEventKeyboardSetUnicodeString rather than per-key
+ * virtual keycodes, so it doesn't need to know the active keyboard
+ * layout -- it injects the literal characters directly.
+ *
+ * SEE FILE-HEADER CAVEAT: this may be blocked by Secure Input at the
+ * lock screen. This function will report success/failure of the
+ * *posting* call, which is NOT the same as confirming the OS actually
+ * accepted it into the password field -- that can only be confirmed
+ * by watching whether the screen actually unlocks. */
+static void type_password_and_enter(const char *password) {
+    size_t len = strlen(password);
+    if (len == 0 || len > MAX_PASSWORD_LEN) {
+        fprintf(stderr, "Refusing to type password: invalid length (%zu).\n", len);
+        return;
+    }
+
+    UniChar unichars[MAX_PASSWORD_LEN];
+    for (size_t i = 0; i < len; i++) {
+        unichars[i] = (UniChar)(unsigned char)password[i]; /* ASCII passwords only */
+    }
+
+    CGEventRef key_down = CGEventCreateKeyboardEvent(NULL, 0, true);
+    CGEventKeyboardSetUnicodeString(key_down, (UniCharCount)len, unichars);
+    CGEventPost(kCGSessionEventTap, key_down);
+    CFRelease(key_down);
+
+    CGEventRef key_up = CGEventCreateKeyboardEvent(NULL, 0, false);
+    CGEventKeyboardSetUnicodeString(key_up, (UniCharCount)len, unichars);
+    CGEventPost(kCGSessionEventTap, key_up);
+    CFRelease(key_up);
+
+    /* Small delay before Return -- typing the whole password as one
+     * event and immediately submitting can race the field's own
+     * internal handling on some macOS versions. */
+    usleep(150000);
+
+    CGEventRef return_down = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x24 /* kVK_Return */, true);
+    CGEventPost(kCGSessionEventTap, return_down);
+    CFRelease(return_down);
+
+    CGEventRef return_up = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x24, false);
+    CGEventPost(kCGSessionEventTap, return_up);
+    CFRelease(return_up);
+}
+
+/* ------------------------------------------------------------------ *
+ * Accessibility helpers used by the padlock watcher
+ * ------------------------------------------------------------------ */
+
+/* Looks up a process's name (e.g. "SecurityAgent") via libproc -- no
+ * Cocoa/NSRunningApplication needed. Returns 0 on success. */
+static int get_process_name(pid_t pid, char *out, size_t out_size) {
+    char buf[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_name(pid, buf, sizeof(buf)) <= 0) return -1;
+    strncpy(out, buf, out_size - 1);
+    out[out_size - 1] = '\0';
+    return 0;
+}
+
+/* Looks up a process's full executable path via libproc. Returns 0 on
+ * success. Used to catch System Settings pane extensions by location
+ * rather than by name -- see is_system_auth_process's comment. */
+static int get_process_path(pid_t pid, char *out, size_t out_size) {
+    char buf[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, buf, sizeof(buf)) <= 0) return -1;
+    strncpy(out, buf, out_size - 1);
+    out[out_size - 1] = '\0';
+    return 0;
+}
+
+/* Returns the frontmost on-screen window's owning PID by walking the
+ * window list front-to-back and taking the first real (layer-0,
+ * non-desktop) window's owner. Doesn't touch Accessibility at all --
+ * no TCC grant needed for this part; only window titles are gated
+ * behind Screen Recording on modern macOS, and we don't read titles. */
+static pid_t get_frontmost_window_owner_pid(void) {
+    CFArrayRef window_list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+    if (!window_list) return 0;
+
+    pid_t result_pid = 0;
+    CFIndex count = CFArrayGetCount(window_list);
+    for (CFIndex i = 0; i < count; i++) {
+        CFDictionaryRef entry = (CFDictionaryRef)CFArrayGetValueAtIndex(window_list, i);
+        CFNumberRef layer_num = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowLayer);
+        int layer = -1;
+        if (layer_num) CFNumberGetValue(layer_num, kCFNumberIntType, &layer);
+        if (layer != 0) continue;
+
+        CFNumberRef pid_num = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowOwnerPID);
+        if (!pid_num) continue;
+        int pid_val = 0;
+        CFNumberGetValue(pid_num, kCFNumberIntType, &pid_val);
+        result_pid = (pid_t)pid_val;
+        break;
+    }
+    CFRelease(window_list);
+    return result_pid;
+}
+
+/* Fills candidate_pids (capacity max_count) with every currently-live
+ * process whose executable lives under a given app bundle's PlugIns
+ * directory -- i.e. its active pane extensions. Returns the count
+ * found. Used because a System Settings pane's actual keyboard focus
+ * and AX tree live in its extension process, not in "System Settings"
+ * itself, and there's no reliable window-based way to discover which
+ * extension is currently active -- but there are only ever a couple
+ * running at once, so just checking each one directly is cheap. */
+static int find_live_pids_under_path(const char *path_substring, pid_t *candidate_pids, int max_count) {
+    int found = 0;
+    int num_pids = proc_listallpids(NULL, 0);
+    if (num_pids <= 0) return 0;
+    pid_t *all_pids = malloc(sizeof(pid_t) * (num_pids + 64));
+    if (!all_pids) return 0;
+    num_pids = proc_listallpids(all_pids, sizeof(pid_t) * (num_pids + 64));
+
+    for (int i = 0; i < num_pids && found < max_count; i++) {
+        char path_buf[1024];
+        if (proc_pidpath(all_pids[i], path_buf, sizeof(path_buf)) <= 0) continue;
+        if (strstr(path_buf, path_substring) != NULL) {
+            candidate_pids[found++] = all_pids[i];
+        }
+    }
+    free(all_pids);
+    return found;
+}
+
+/* Returns the AX application element (CFRetain'd -- caller releases)
+ * for whichever process is most likely to hold the currently-relevant
+ * auth prompt, or NULL if nothing auth-relevant is in play this tick.
+ *
+ * Deliberately avoids AXUIElementCreateSystemWide() +
+ * kAXFocusedApplicationAttribute entirely -- confirmed, via live
+ * [DIAG] logging in this exact daemon, to fail unconditionally with
+ * kAXErrorCannotComplete on this hardware, not just transiently during
+ * testing as first suspected. Direct by-PID AXUIElementCreateApplication()
+ * calls are confirmed reliable (see ax_probe.c's Dock control test),
+ * so this builds the candidate list a different way:
+ *   1. The frontmost window's owning PID (via CGWindowList) --
+ *      correctly covers SecurityAgent, authorizationhost, coreauthd,
+ *      loginwindow, and non-extension-hosted System Settings/System
+ *      Preferences windows directly.
+ *   2. If that owner is System Settings or System Preferences, ALSO
+ *      every live PlugInKit extension process under its bundle --
+ *      correctly covers extension-hosted panes (e.g. Users & Groups),
+ *      where the window owner and the actually-focused process are
+ *      different PIDs entirely.
+ * The caller checks each candidate against the auth-process allowlist
+ * and only proceeds with ones that pass. */
+static int get_auth_candidate_pids(pid_t *candidate_pids, int max_count) {
+    if (max_count < 1) return 0;
+    int count = 0;
+
+    pid_t frontmost = get_frontmost_window_owner_pid();
+    if (frontmost != 0) {
+        candidate_pids[count++] = frontmost;
+
+        char name_buf[256];
+        if (count < max_count && get_process_name(frontmost, name_buf, sizeof(name_buf)) == 0
+            && (strcmp(name_buf, "System Settings") == 0 || strcmp(name_buf, "System Preferences") == 0)) {
+            pid_t ext_pids[8];
+            int ext_count = find_live_pids_under_path("System Settings.app/Contents/PlugIns/", ext_pids, 8);
+            if (ext_count == 0) {
+                ext_count = find_live_pids_under_path("System Preferences.app/Contents/PlugIns/", ext_pids, 8);
+            }
+            for (int i = 0; i < ext_count && count < max_count; i++) {
+                candidate_pids[count++] = ext_pids[i];
+            }
+        }
+    }
+    return count;
+}
+
+/* Loads enrolled templates into memory for the duration of one lock
+ * episode. Mounts/unmounts once, not per-swipe. */
+static int load_templates_for_episode(void) {
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        fprintf(stderr, "Could not mount volume to load templates for this lock episode.\n");
+        return -1;
+    }
+    char template_path[PATH_MAX];
+    snprintf(template_path, sizeof(template_path), "%s/%s", mount_path, TEMPLATE_FILENAME);
+
+    int rc = vfs5011_load_templates(template_path, g_enrolled_templates, MAX_STORED_TEMPLATES, &g_enrolled_count);
+
+    /* Piggyback the password read onto this same mount, so match time
+     * only has to touch the sensor -- not the volume. Failure to find a
+     * stored password doesn't block polling; it just means a later
+     * match will report "no password available" same as before. */
+    g_cached_password_valid = 0;
+    char password_path[PATH_MAX];
+    snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+    FILE *pf = fopen(password_path, "r");
+    if (pf) {
+        size_t n = fread(g_cached_password, 1, MAX_PASSWORD_LEN, pf);
+        g_cached_password[n] = '\0';
+        fclose(pf);
+        g_cached_password_valid = 1;
+    } else {
+        fprintf(stderr, "No stored password found (run vfs5011_store_password.sh first).\n");
+    }
+
+    unmount_template_volume();
+
+    if (rc != 0 || g_enrolled_count == 0) {
+        fprintf(stderr, "No enrolled templates available -- polling will not start.\n");
+        g_enrolled_count = 0;
+        return -1;
+    }
+    return 0;
+}
+
+/* Forward declaration -- defined further down alongside the padlock
+ * watcher, but on_screen_locked (right here) needs to call it too. */
+static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
+                                     AXUIElementRef secure_field, const char *label);
+
+static void on_screen_locked(void) {
+    if (atomic_load(&g_state) != STATE_IDLE) return; /* shouldn't happen, but don't interrupt an episode */
+    arm_polling_for_trigger(TRIGGER_LOCK_SCREEN, 0, NULL, "Screen lock");
+}
+
+static void on_screen_unlocked(void) {
+    atomic_store(&g_state, STATE_IDLE);
+    atomic_store(&g_trigger_source, TRIGGER_NONE);
+    if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+    g_enrolled_count = 0; /* don't keep templates resident in memory once idle */
+    memset(g_cached_password, 0, sizeof(g_cached_password)); /* don't leave it sitting in memory either */
+    g_cached_password_valid = 0;
+    print_timestamp();
+    printf("Screen UNLOCKED -> entering IDLE state.\n");
+}
+
+/* Shared by both triggers: loads templates for one episode and flips
+ * into POLLING, tagged with which trigger armed it and (for the
+ * padlock trigger) what must still be focused right before we type. */
+static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
+                                     AXUIElementRef secure_field, const char *label) {
+    print_timestamp();
+    printf("%s detected -> loading templates for this episode...\n", label);
+
+    if (load_templates_for_episode() != 0) {
+        print_timestamp();
+        printf("Staying IDLE (no templates available).\n");
+        atomic_store(&g_state, STATE_IDLE);
+        if (secure_field) CFRelease(secure_field);
+        return;
+    }
+
+    g_trigger_target_pid = target_pid;
+    if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+    g_trigger_secure_field = secure_field; /* already retained by caller */
+    atomic_store(&g_trigger_source, source);
+
+    print_timestamp();
+    printf("Templates loaded (%d). Entering POLLING state.\n", g_enrolled_count);
+    atomic_store(&g_state, STATE_POLLING);
+}
+
+/* Process names that legitimately ask for the macOS LOGIN password via
+ * a secure field -- as opposed to some arbitrary app's own unrelated
+ * password prompt (a website login form, a mail account password, a
+ * VPN client, etc), which we must never auto-type the login password
+ * into. "System Settings" replaced "SecurityAgent" for most padlocks
+ * as of the redesigned Settings app -- but as of the PlugInKit-based
+ * pane architecture, the padlock sheet's actual keyboard focus lives
+ * in that pane's own extension PROCESS, not the "System Settings"
+ * host process itself. Each pane's extension has its own distinct
+ * name (e.g. "UsersGroups", "GeneralSettings", "PrivacySecurity") --
+ * too many, and too likely to change/add more, to hardcode by name.
+ * Instead, check the executable's actual path: any pane extension
+ * lives under System Settings.app's own PlugIns directory, regardless
+ * of what it's individually called. */
+static bool is_system_auth_process(const char *name, const char *path) {
+    static const char *allowlist[] = {
+        "SecurityAgent", "authorizationhost", "coreauthd",
+        "System Settings", "System Preferences", "loginwindow"
+    };
+    for (size_t i = 0; i < sizeof(allowlist) / sizeof(allowlist[0]); i++) {
+        if (strcmp(name, allowlist[i]) == 0) return true;
+    }
+    if (path && (strstr(path, "/System Settings.app/Contents/PlugIns/") != NULL
+                 || strstr(path, "/System Preferences.app/Contents/PlugIns/") != NULL)) {
+        return true;
+    }
+    return false;
+}
+
+/* Like get_focused_element_role_and_text, but also hands back the
+ * element itself (retained) so the padlock path can keep it around to
+ * re-focus right before typing. */
+/* Fallback for windows that don't support kAXFocusedUIElementAttribute
+ * (observed on modern System Settings panes -- e.g. Users & Groups --
+ * which are rendered by a separate PlugInKit extension process via a
+ * remote view; that window returns kAXErrorAttributeUnsupported for
+ * "what's focused" even though the window and its children are
+ * otherwise perfectly queryable). Walks the AX tree looking for the
+ * first AXSecureTextField, since that's specifically what we're after
+ * here -- not a general "find whatever's focused" replacement.
+ * Capped by both depth and total node budget so a pathological view
+ * hierarchy can't make this poll callback hang. Returns a retained
+ * element the caller must release, or NULL. */
+static AXUIElementRef find_secure_text_field(AXUIElementRef element, int depth, int *budget) {
+    if (!element || depth <= 0 || *budget <= 0) return NULL;
+    (*budget)--;
+
+    /* NOTE: secure fields in these SwiftUI-hosted System Settings
+     * sheets report role=AXTextField with subrole=AXSecureTextField --
+     * NOT role=AXSecureTextField directly, despite that being the
+     * commonly-assumed check (and what every version of this function
+     * checked until a full AX tree dump proved otherwise). Check
+     * subrole; fall back to role for compatibility with any other
+     * context that genuinely does use it as the role. */
+    CFStringRef subrole = NULL, role = NULL;
+    AXUIElementCopyAttributeValue(element, kAXSubroleAttribute, (CFTypeRef *)&subrole);
+    bool is_secure = subrole && CFStringCompare(subrole, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo;
+    if (subrole) CFRelease(subrole);
+    if (!is_secure) {
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute, (CFTypeRef *)&role);
+        is_secure = role && CFStringCompare(role, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo;
+        if (role) CFRelease(role);
+    }
+    if (is_secure) {
+        CFRetain(element);
+        return element;
+    }
+
+    CFArrayRef children = NULL;
+    if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, (CFTypeRef *)&children) != kAXErrorSuccess || !children) {
+        return NULL;
+    }
+
+    CFIndex count = CFArrayGetCount(children);
+    AXUIElementRef found = NULL;
+    for (CFIndex i = 0; i < count && !found && *budget > 0; i++) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+        found = find_secure_text_field(child, depth - 1, budget);
+    }
+    CFRelease(children);
+    return found;
+}
+
+static void get_focused_element_full(AXUIElementRef focused_app, bool allow_expensive_fallback,
+                                      CFStringRef *out_role, CFStringRef *out_subrole,
+                                      CFStringRef *out_value, AXUIElementRef *out_element) {
+    *out_role = NULL;
+    *out_subrole = NULL;
+    *out_value = NULL;
+    *out_element = NULL;
+    if (!focused_app) return;
+
+    AXUIElementRef focused_window = NULL;
+    if (AXUIElementCopyAttributeValue(focused_app, kAXFocusedWindowAttribute,
+                                       (CFTypeRef *)&focused_window) != kAXErrorSuccess || !focused_window) {
+        return;
+    }
+
+    AXUIElementRef focused_element = NULL;
+    AXError err = AXUIElementCopyAttributeValue(focused_window, kAXFocusedUIElementAttribute,
+                                                 (CFTypeRef *)&focused_element);
+
+    if ((err != kAXErrorSuccess || !focused_element) && allow_expensive_fallback) {
+        /* Fallback path -- see find_secure_text_field's comment above.
+         * Gated behind allow_expensive_fallback: only worth paying for
+         * when we already know this process is on the auth allowlist,
+         * so we don't tree-walk whatever ordinary app happens to be
+         * frontmost on every single 300ms tick all day. */
+        int budget = 500; /* generous but bounded node visit cap */
+        focused_element = find_secure_text_field(focused_window, 8, &budget);
+    }
+    CFRelease(focused_window);
+    if (!focused_element) return;
+
+    AXUIElementCopyAttributeValue(focused_element, kAXRoleAttribute, (CFTypeRef *)out_role);
+    AXUIElementCopyAttributeValue(focused_element, kAXSubroleAttribute, (CFTypeRef *)out_subrole);
+    AXUIElementCopyAttributeValue(focused_element, kAXValueAttribute, (CFTypeRef *)out_value);
+    *out_element = focused_element; /* transfer ownership to caller */
+}
+
+/* Debounce for the padlock watcher -- without it, a padlock sheet
+ * sitting on screen mid-swipe would re-arm on every 300ms tick. */
+static atomic_bool g_padlock_prompt_already_armed = false;
+
+/* Single poll, checked every 300ms on the main run loop. Checks each
+ * candidate PID from get_auth_candidate_pids() (usually just one or
+ * two) directly by PID, classifying any secure text field owned by a
+ * system-auth process as a padlock. Clears the debounce flag when
+ * nothing currently matches, so a resolved/cancelled prompt can re-arm
+ * cleanly next time. */
+static void auth_prompt_poll_callback(CFRunLoopTimerRef timer, void *info) {
+    (void)timer; (void)info;
+    if (atomic_load(&g_state) != STATE_IDLE) return; /* already mid-episode elsewhere */
+
+    pid_t candidates[8];
+    int candidate_count = get_auth_candidate_pids(candidates, 8);
+
+    if (candidate_count == 0) {
+        atomic_store(&g_padlock_prompt_already_armed, false);
+        return;
+    }
+
+    for (int i = 0; i < candidate_count; i++) {
+        pid_t pid = candidates[i];
+
+        char proc_name_buf[256];
+        char proc_path_buf[1024];
+        bool got_name = get_process_name(pid, proc_name_buf, sizeof(proc_name_buf)) == 0;
+        bool got_path = get_process_path(pid, proc_path_buf, sizeof(proc_path_buf)) == 0;
+        bool is_auth_process = got_name && is_system_auth_process(proc_name_buf, got_path ? proc_path_buf : NULL);
+        if (!is_auth_process) continue; /* not worth an AX round-trip at all */
+
+        AXUIElementRef app = AXUIElementCreateApplication(pid);
+        CFStringRef role = NULL, subrole = NULL, value = NULL;
+        AXUIElementRef focused_element = NULL;
+        get_focused_element_full(app, true /* always allow fallback -- already confirmed auth process */,
+                                  &role, &subrole, &value, &focused_element);
+        CFRelease(app);
+
+        /* Secure fields in these SwiftUI-hosted sheets report
+         * role=AXTextField, subrole=AXSecureTextField -- not
+         * role=AXSecureTextField directly (confirmed via a full AX
+         * tree dump). Check subrole; fall back to role for any other
+         * context that genuinely uses it as the role. */
+        bool is_secure_field = (subrole && CFStringCompare(subrole, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo)
+                                || (role && CFStringCompare(role, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo);
+
+        if (role) CFRelease(role);
+        if (subrole) CFRelease(subrole);
+        if (value) CFRelease(value);
+
+        if (!is_secure_field) {
+            if (focused_element) CFRelease(focused_element);
+            continue;
+        }
+
+        /* Found a live padlock among the candidates. */
+        if (!atomic_load(&g_padlock_prompt_already_armed)) {
+            atomic_store(&g_padlock_prompt_already_armed, true);
+            arm_polling_for_trigger(TRIGGER_PADLOCK, pid, focused_element, "System auth padlock");
+        } else if (focused_element) {
+            CFRelease(focused_element);
+        }
+        return; /* stop checking other candidates once we've found/confirmed one */
+    }
+
+    /* No candidate this tick matched a live padlock. */
+    atomic_store(&g_padlock_prompt_already_armed, false);
+}
+
+static void notification_callback(CFNotificationCenterRef center,
+                                   void *observer,
+                                   CFStringRef name,
+                                   const void *object,
+                                   CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)object; (void)userInfo;
+    if (CFStringCompare(name, CFSTR("com.apple.screenIsLocked"), 0) == kCFCompareEqualTo) {
+        on_screen_locked();
+    } else if (CFStringCompare(name, CFSTR("com.apple.screenIsUnlocked"), 0) == kCFCompareEqualTo) {
+        on_screen_unlocked();
+    }
+}
+
+/* Runs on its own thread so the main thread stays free to run
+ * CFRunLoopRun() and receive lock/unlock notifications. Reads
+ * g_enrolled_templates (populated once per episode by the
+ * notification thread before flipping state to POLLING) -- benign
+ * single-writer/single-reader pattern since the poller only ever
+ * reads it while POLLING, and it's only rewritten while IDLE. */
+static void *polling_thread_main(void *arg) {
+    (void)arg;
+    while (atomic_load(&g_running)) {
+        if (atomic_load(&g_state) != STATE_POLLING) {
+            usleep(200000);
+            continue;
+        }
+
+        struct xyt_struct probe;
+        if (capture_quality_template(&probe) != 0) {
+            /* Weak/failed swipe -- or nobody swiped at all yet. Back
+             * off briefly and try again as long as we're still locked. */
+            usleep(POLL_RETRY_DELAY_USEC);
+            continue;
+        }
+
+        int best_score = -1;
+        for (int i = 0; i < g_enrolled_count; i++) {
+            int score = vfs5011_match_score(&probe, &g_enrolled_templates[i]);
+            if (score > best_score) best_score = score;
+        }
+
+        print_timestamp();
+        printf("Poll swipe scored %d (threshold %d)\n", best_score, MATCH_THRESHOLD);
+
+        if (best_score >= MATCH_THRESHOLD) {
+            print_timestamp();
+            printf("MATCH -- checking target is still focused before typing...\n");
+
+            trigger_source_t source = atomic_load(&g_trigger_source);
+            bool ok_to_type = true;
+
+            if (source == TRIGGER_PADLOCK) {
+                /* Re-verify right now, not at detection time -- capture
+                 * takes a couple seconds, plenty of time for the user
+                 * to have alt-tabbed away. Directly re-query the
+                 * target PID (not "whatever's frontmost" -- there's no
+                 * single reliable call for that anymore, see
+                 * get_auth_candidate_pids' comment) and confirm it
+                 * still shows a secure field. If the process is gone,
+                 * or it no longer reports one (e.g. because it lost
+                 * key window status when the user switched away),
+                 * refuse to type. */
+                AXUIElementRef target_app = AXUIElementCreateApplication(g_trigger_target_pid);
+                CFStringRef role = NULL, subrole = NULL, value = NULL;
+                AXUIElementRef elem = NULL;
+                get_focused_element_full(target_app, true, &role, &subrole, &value, &elem);
+                CFRelease(target_app);
+                bool still_secure_field = (subrole && CFStringCompare(subrole, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo)
+                                           || (role && CFStringCompare(role, CFSTR("AXSecureTextField"), 0) == kCFCompareEqualTo);
+                if (role) CFRelease(role);
+                if (subrole) CFRelease(subrole);
+                if (value) CFRelease(value);
+                if (elem) CFRelease(elem);
+
+                if (!still_secure_field) {
+                    ok_to_type = false;
+                    print_timestamp();
+                    printf("ABORTED -- focus moved away from the target window since detection. Not typing.\n");
+                }
+            }
+
+            if (ok_to_type) play_success_sound();
+
+            if (ok_to_type && source == TRIGGER_PADLOCK && g_trigger_secure_field) {
+                /* Belt-and-suspenders: explicitly focus the secure
+                 * field before typing, in case something else in the
+                 * dialog grabbed focus first. */
+                AXUIElementSetAttributeValue(g_trigger_secure_field, kAXFocusedAttribute, kCFBooleanTrue);
+                usleep(50000);
+            }
+
+            if (ok_to_type && g_cached_password_valid) {
+                type_password_and_enter(g_cached_password);
+                print_timestamp();
+                printf("Typed.\n");
+            } else if (ok_to_type) {
+                print_timestamp();
+                printf("Match succeeded but no stored password was available -- cannot auto-type.\n");
+            }
+
+            if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+            atomic_store(&g_trigger_source, TRIGGER_NONE);
+
+            /* Stop hammering the sensor until the next trigger. For
+             * the lock screen specifically, on_screen_unlocked will
+             * also fire and re-confirm IDLE -- harmless overlap. */
+            atomic_store(&g_state, STATE_IDLE);
+        } else {
+            /* A real swipe was captured (capture_quality_template
+             * succeeded above) but didn't match any enrolled finger
+             * well enough -- give an audible reject cue and let the
+             * loop immediately try the next swipe. */
+            play_failure_sound();
+        }
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+
+    /* Force line-buffered stdout regardless of whether it's a tty.
+     * Interactively, stdout is line-buffered automatically. But under
+     * launchd, StandardOutPath redirects stdout to a plain file, which
+     * makes libc switch to fully-buffered mode by default — every
+     * printf() then sits in an internal buffer and never reaches the
+     * log until it fills (often several KB) or the process exits.
+     * That makes `tail -f` on the log look completely dead even while
+     * the daemon is actively running and working correctly. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "Root privileges are required to access the USB device — requesting via sudo...\n");
+        char *sudo_argv[3];
+        sudo_argv[0] = "sudo";
+        sudo_argv[1] = argv[0];
+        sudo_argv[2] = NULL;
+        execvp("sudo", sudo_argv);
+        fprintf(stderr, "Failed to re-exec with sudo: %s\n", strerror(errno));
+        return 1;
+    }
+
+    init_exec_dir(argv[0]);
+
+    printf("VFS5011 authentication daemon running -- idle until screen locks.\n");
+    printf("Ctrl+C to quit.\n\n");
+
+    pthread_t poll_thread;
+    if (pthread_create(&poll_thread, NULL, polling_thread_main, NULL) != 0) {
+        fprintf(stderr, "Failed to start polling thread: %s\n", strerror(errno));
+        return 1;
+    }
+
+    CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
+    CFNotificationCenterAddObserver(center, NULL, notification_callback,
+                                     CFSTR("com.apple.screenIsLocked"), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, notification_callback,
+                                     CFSTR("com.apple.screenIsUnlocked"), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    CFRunLoopTimerRef auth_prompt_timer = CFRunLoopTimerCreate(
+        NULL, CFAbsoluteTimeGetCurrent(), 0.3 /* every 300ms */, 0, 0,
+        auth_prompt_poll_callback, NULL);
+    CFRunLoopAddTimer(CFRunLoopGetCurrent(), auth_prompt_timer, kCFRunLoopDefaultMode);
+    printf("Auth-prompt watcher registered (padlock, polling every 300ms).\n");
+
+    CFRunLoopRun();
+
+    atomic_store(&g_running, 0);
+    pthread_join(poll_thread, NULL);
+    return 0;
+}
