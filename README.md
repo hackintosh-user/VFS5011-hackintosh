@@ -48,9 +48,10 @@ Ivy Bridge Hackintosh laptop.
 
 ## Requirements
 
-- A Mac or Hackintosh running macOS Sequoia or later
+- A Hackintosh running macOS Sequoia or macOS Tahoe (Sequoia is the minimum version)
 - A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
 - Xcode Command Line Tools (`xcode-select --install`)
+- [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
