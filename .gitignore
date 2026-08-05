@@ -12,7 +12,7 @@ ax_probe
 .idea/
 *.swp
 
-# Object files (in case of future incremental builds)
+# Object files
 *.o
 *.out
 
