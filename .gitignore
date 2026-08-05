@@ -3,7 +3,7 @@ vfs_client
 vfs5011_daemon
 ax_probe
 
-# macOS junk
+# macOS Finder Files
 .DS_Store
 **/.DS_Store
 
