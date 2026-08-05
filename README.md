@@ -48,7 +48,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 
   ## Screenshots
 
-  <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia (left) and macOS Tahoe 26.6 (right)</em></p>
+  <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia 15.7.8 (24G824) (left) and macOS Tahoe 26.6 (25G72) (right)</em></p>
 
 ## Requirements
 
