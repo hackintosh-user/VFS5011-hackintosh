@@ -135,7 +135,7 @@ password automatically.
 - **Storage**: enrolled templates and the authentication password live
   on a dedicated, encrypted APFS volume rather than in a plaintext file
   on the boot volume. The passphrase for that volume is stored in the
-  System keychain.
+  System keychain.(Not seen by finder or the user)
 - **Detection**: the daemon polls the system's focused UI element via
   the Accessibility APIs to recognize when a lock screen or System
   Settings password field is active, rather than hooking or patching
