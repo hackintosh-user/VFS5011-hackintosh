@@ -1,0 +1,22 @@
+# Compiled binaries
+vfs_client
+vfs5011_daemon
+ax_probe
+
+# macOS junk
+.DS_Store
+**/.DS_Store
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# Object files (in case of future incremental builds)
+*.o
+*.out
+
+# Enrolled fingerprint data / secrets (should never be committed)
+fingers/
+*.keychain
+*.pem
