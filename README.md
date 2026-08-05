@@ -46,6 +46,10 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 - Interactive terminal client (`vfs_client`) for enrollment, verification,
   and one-command deployment of the background daemon
 
+  ## Screenshots
+
+  <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia (left) and macOS Tahoe 26.6 (right)</em></p>
+
 ## Requirements
 
 - A Hackintosh running macOS Sequoia or macOS Tahoe (Sequoia is the minimum version)
