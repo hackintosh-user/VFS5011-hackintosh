@@ -26,3 +26,20 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+This project incorporates the following third-party components:
+
+* NBIS (mindtct, bozorth3) — developed by the National Institute of
+  Standards and Technology (NIST). Created by employees of the U.S.
+  Federal Government in the course of their official duties and, per
+  17 U.S.C. §105, not subject to copyright protection in the United
+  States; released to the public domain.
+  https://www.nist.gov/services-resources/software/nist-biometric-image-software-nbis
+
+* VFS5011 capture protocol — originally implemented as a libfprint
+  driver by Arseniy Lartsev and AceLan Kao (Canonical), licensed under
+  the GNU Lesser General Public License v2.1. This project's macOS
+  capture pipeline was independently reimplemented in C, informed by
+  that original driver's protocol logic.
+  https://github.com/ars3niy/fprint_vfs5011
