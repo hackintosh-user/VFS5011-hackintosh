@@ -50,6 +50,9 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 
   <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia 15.7.8 (24G824) (left), and macOS Tahoe 26.6 (25G72) (right)</em></p>
 
+
+  * Please keep in mind that macOS tahoe Currently is **NOT supported by OpenCore legacy patcher.** Things may change when we have graphic acceleration But until then, the image for tahoe is a **proof-of-concept.**
+
 ## Requirements
 
 - A Hackintosh running macOS Sequoia or macOS Tahoe (Sequoia is the minimum version)
