@@ -29,7 +29,7 @@ against enrolled templates, and — on a match — types the stored password
 into the prompt automatically.
 
 Confirmed working end-to-end on macOS Sequoia and macOS Tahoe, on an
-Ivy Bridge Hackintosh laptop.
+Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint Sensor)
 
 ## Features
 
