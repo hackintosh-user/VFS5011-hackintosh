@@ -90,7 +90,9 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 
 ## Usage
 
-Run the interactive client:
+**WARINING**: On macOS 14 sonoma And older you will be shown a message that clearly stats there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
+
+Run the client with this command:
 
 ```bash
 sudo ./vfs_client
