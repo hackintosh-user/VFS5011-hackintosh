@@ -67,7 +67,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 
 ```bash
 git clone https://github.com/hackintosh-user/vfs5011_matcher.git
-cd vfs5011_matcher
+cd vfs5011-hackintosh-main
 chmod +x build.sh build_client.sh build_daemon.sh
 ./build.sh
 ```
