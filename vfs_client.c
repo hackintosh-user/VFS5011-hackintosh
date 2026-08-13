@@ -630,7 +630,7 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sValidity VFS5011 Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s\n", VFSC_RESET);
+    printf("         `\"Y8888P\"'%s                              %sv1.0.1%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
 }
 
 /* Multi-finger storage: each enrolled finger gets its own file of
@@ -1607,6 +1607,14 @@ int main(int argc, char **argv) {
     init_color_support();
     print_banner();
     check_macos_version_warning();
+
+    /* Mount the template volume once up front to find out what's
+     * actually enrolled, so the status line below doesn't have to
+     * show "Unknown" until the user happens to hit Enroll/Verify.
+     * Failure here (e.g. volume not set up yet) just leaves the
+     * count at 0/unset -- Settings will explain why if relevant. */
+    printf("Checking enrolled fingers...\n");
+    refresh_finger_cache();
 
     char line[64];
     for (;;) {
