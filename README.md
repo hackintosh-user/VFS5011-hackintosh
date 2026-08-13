@@ -41,6 +41,8 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 - Lock screen unlock via fingerprint swipe
 - System Settings / System Preferences authentication sheet ("padlock")
   unlock via fingerprint swipe
+- Passwords.app lock screen unlock via fingerprint swipe
+- Keychain Access "confidential information" consent prompt unlock via fingerprint swipe
 - Enrolled templates and the stored password are kept on a dedicated,
   encrypted APFS volume, not in plaintext on the boot volume
 - Self-elevating daemon with a narrowly scoped, single-purpose sudoers
