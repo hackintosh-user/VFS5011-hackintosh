@@ -41,7 +41,7 @@ I'll do my best to respond and patch promptly, but please keep in mind this is a
 
 ## Recommendations for Users
 
-- Only build and install from source (Only this repo!! if anyone claims anything outside this repo its most likely fake!!) you've reviewed, or from official tagged releases — not random forks.
+- Only build and install from source (Only this repo!! if anyone claims anything outside this repo its most likely fake!!).
 - Review the `sudoers` rule and `LaunchAgent` plist before installing; don't run install scripts blindly.
 - Don't rely on this as your *only* layer of security on a machine with sensitive data — treat it as a convenience layer on top of FileVault + a strong login password, not a replacement for either.
 - Keep your enrolled templates private — don't share your `fingers/` directory or `VFSStore` volume.
