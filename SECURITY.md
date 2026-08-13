@@ -1,0 +1,51 @@
+# Security Policy
+
+## Overview
+
+VFS5011-hackintosh is a fingerprint authentication daemon that intercepts macOS system authentication prompts (login screen, System Settings/Preferences padlock, and — as of v1.0.2 — Keychain autofill prompts) and satisfies them using a fingerprint swipe captured from a Validity VFS5011 USB sensor, matched against locally stored templates.
+
+This project interacts with sensitive parts of macOS (authentication, sudoers, LaunchAgents, Keychain) and is built and maintained by a hobbyist as an open-source community project. It is **not audited by Apple or any third-party security firm**, and it should be evaluated accordingly before you trust it with anything you care about.
+
+## Threat Model / What This Project Does and Does Not Protect Against
+
+**Intended use case:** convenience authentication on a personal Hackintosh, replacing password entry with a fingerprint swipe, on a machine you physically control.
+
+**This project does NOT claim to:**
+- Match the security guarantees of Apple's Secure Enclave-backed Touch ID (there is no secure enclave on Hackintosh hardware; matching happens in userspace).
+- Protect against a sophisticated attacker with physical access and time (e.g. someone who can dump the encrypted volume and brute-force the passphrase, or replace the daemon binary).
+- Defend against fingerprint spoofing (fake/molded fingerprints). The VFS5011 is a swipe sensor with no liveness detection.
+
+**Known-sensitive components:**
+- **Fingerprint templates** are stored in an encrypted APFS volume (`VFSStore`), with the passphrase held in the System keychain. If your System keychain or FileVault is compromised, this volume's protection is only as strong as that.
+- **The daemon runs with elevated privileges** and includes a narrowly-scoped `sudoers` `NOPASSWD` rule to allow it to interact with authentication prompts without repeatedly asking for a password itself. It is scoped to `vfs5011_daemon` only — review the rule before installing. Any `NOPASSWD` rule increases attack surface if the daemon binary itself is compromised, so keep the daemon's file permissions locked down (root-owned, not writable by your user).
+- **The auth-prompt watcher** (`is_system_auth_process()`) is allow-listed to specific system processes (login window, System Settings/Preferences padlock, and Keychain-related prompts). It is deliberately *not* wired up to arbitrary third-party app password fields or terminal `sudo` prompts (that watcher was built and intentionally removed — see CHANGELOG).
+
+## Supported Versions
+
+Only the most recent tagged release receives security fixes. This is a hobbyist project maintained in spare time — there's no LTS branch, so please update before reporting an issue.
+
+## Reporting a Vulnerability
+
+If you find a security issue (privilege escalation, sudoers misconfiguration, template/passphrase exposure, daemon impersonation, etc.), please **do not open a public GitHub issue**.
+
+Instead:
+1. Open a [GitHub Security Advisory](../../security/advisories/new) on this repo (preferred), or
+2. Contact the maintainer directly via the contact info on the GitHub profile.
+
+Please include:
+- macOS version and hardware (Hackintosh or real Mac)
+- Steps to reproduce
+- Impact you believe it has (e.g. local privilege escalation vs. denial of service)
+
+I'll do my best to respond and patch promptly, but please keep in mind this is a solo/community-maintained project — response times won't match a corporate bug bounty program.
+
+## Recommendations for Users
+
+- Only build and install from source you've reviewed, or from official tagged releases — not random forks.
+- Review the `sudoers` rule and `LaunchAgent` plist before installing; don't run install scripts blindly.
+- Don't rely on this as your *only* layer of security on a machine with sensitive data — treat it as a convenience layer on top of FileVault + a strong login password, not a replacement for either.
+- Keep your enrolled templates private — don't share your `fingers/` directory or `VFSStore` volume.
+
+## Disclaimer
+
+This software interacts with macOS authentication internals on unsupported (Hackintosh) hardware. It is provided **as-is, without warranty of any kind** (see LICENSE). Use at your own risk, particularly on machines you use for sensitive work.
