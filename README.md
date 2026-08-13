@@ -65,7 +65,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 - `libusb` (`brew install libusb`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
-- OpenCore v1.0.6 or later (For maximum Security | Release or Debug are fine)
+- OpenCore v1.0.6 or later (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
 
 ## Building
 
