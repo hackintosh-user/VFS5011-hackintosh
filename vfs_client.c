@@ -637,6 +637,20 @@ static void print_banner(void) {
     printf("         `\"Y8888P\"'%s                              %sv1.0.2%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
 }
 
+/* Clears the terminal and homes the cursor, then redraws the banner --
+ * used when returning to the main menu after an action completes, so
+ * the screen doesn't accumulate every enroll/verify/settings output
+ * from the whole session. Gated on g_color_enabled (same isatty()
+ * check used for color) since clearing a piped/redirected output
+ * stream makes no sense and would just inject garbage escape codes
+ * into a log file. */
+static void clear_screen_and_redraw_banner(void) {
+    if (!g_color_enabled) return;
+    printf("\033[2J\033[H");
+    fflush(stdout);
+    print_banner();
+}
+
 /* Multi-finger storage: each enrolled finger gets its own file of
  * ENROLL_SWIPES templates, named "<label>.dat", inside a "fingers/"
  * subdirectory on the encrypted volume. This replaces the old single
@@ -1737,6 +1751,7 @@ int main(int argc, char **argv) {
 
         char cmd = line[0];
         printf("\n");
+        bool ran_action = true;
         switch (cmd) {
             case '1': do_enroll(); break;
             case '2': do_verify(); break;
@@ -1748,6 +1763,10 @@ int main(int argc, char **argv) {
                 return 0;
             default:
                 printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                ran_action = false;
+        }
+        if (ran_action) {
+            clear_screen_and_redraw_banner();
         }
     }
     return 0;
