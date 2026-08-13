@@ -8,7 +8,7 @@ clang vfs5011_daemon.c vfs5011_matcher.c \
     -o vfs5011_daemon \
     -I. -Inbis/include \
     -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
-    -framework CoreFoundation -framework ApplicationServices \
+    -framework CoreFoundation -framework ApplicationServices -framework IOKit \
     -lm -lpthread \
     -Wno-implicit-function-declaration
 
