@@ -93,7 +93,9 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 
 ## Usage
 
-**WARINING**: On macOS 14 sonoma And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
+**WARINING 1**: On macOS 14 sonoma And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
+
+**WARNING 2** Same goes for the OpenCore Boot loader: the minimum version is OpenCore v1.0.6 or later. v1.0.5 and older are officially not supported. You are on your own if you encounter any issues on v1.0.5 or older.
 
 Run the client with this command:
 
