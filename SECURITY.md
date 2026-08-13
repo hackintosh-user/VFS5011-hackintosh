@@ -18,7 +18,7 @@ This project interacts with sensitive parts of macOS (authentication, sudoers, L
 **Known-sensitive components:**
 - **Fingerprint templates** are stored in an encrypted APFS volume (`VFSStore`), with the passphrase held in the System keychain. If your System keychain or FileVault is compromised, this volume's protection is only as strong as that.
 - **The daemon runs with elevated privileges** and includes a narrowly-scoped `sudoers` `NOPASSWD` rule to allow it to interact with authentication prompts without repeatedly asking for a password itself. It is scoped to `vfs5011_daemon` only — review the rule before installing. Any `NOPASSWD` rule increases attack surface if the daemon binary itself is compromised, so keep the daemon's file permissions locked down (root-owned, not writable by your user).
-- **The auth-prompt watcher** (`is_system_auth_process()`) is allow-listed to specific system processes (login window, System Settings/Preferences padlock, and Keychain-related prompts). It is deliberately *not* wired up to arbitrary third-party app password fields or terminal `sudo` prompts (that watcher was built and intentionally removed — see CHANGELOG).
+- **The auth-prompt watcher** (`is_system_auth_process()`) is allow-listed to specific system processes (login window, System Settings/Preferences padlock, and Keychain-related prompts). It is deliberately *not* wired up to arbitrary third-party app password fields or terminal `sudo` prompts.
 
 ## Supported Versions
 
