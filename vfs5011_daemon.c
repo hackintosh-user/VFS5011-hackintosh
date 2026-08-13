@@ -46,6 +46,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>
+#include <dirent.h>
 #include <libusb.h>
 #include <libproc.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -563,7 +564,8 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
  * ------------------------------------------------------------------ */
 
 #define VFSC_RULE "--------------------------------------------------------------------"
-#define TEMPLATE_FILENAME "template.dat"
+#define TEMPLATE_FILENAME "template.dat"  /* legacy single-finger fallback only */
+#define FINGERS_DIRNAME "fingers"
 #define MOUNT_SCRIPT_NAME "vfs5011_volume_mount.sh"
 #define UNMOUNT_SCRIPT_NAME "vfs5011_volume_unmount.sh"
 
@@ -914,18 +916,68 @@ static int get_auth_candidate_pids(pid_t *candidate_pids, int max_count) {
     return count;
 }
 
-/* Loads enrolled templates into memory for the duration of one lock
- * episode. Mounts/unmounts once, not per-swipe. */
+/* Loads every enrolled finger's templates into memory for the duration
+ * of one lock episode. Mounts/unmounts once, not per-swipe.
+ *
+ * The client enrolls fingers into fingers/<label>.dat (one file per
+ * named finger, each holding up to MAX_STORED_TEMPLATES swipes) so
+ * multiple fingers can be enrolled and matched against. This scans
+ * that directory and pools every finger's templates into one flat
+ * array for matching, up to the array's total capacity.
+ *
+ * NOTE: g_enrolled_templates is sized MAX_STORED_TEMPLATES (8), the
+ * same constant used as the per-finger swipe cap. With only one
+ * enrolled finger (<=8 templates) this is fine, but enrolling several
+ * fingers can exceed total capacity -- extras are silently dropped
+ * (see the count>=MAX_STORED_TEMPLATES check in the loop below). If
+ * more than one finger gets enrolled, bump g_enrolled_templates to a
+ * larger fixed size (e.g. MAX_ENROLLED_FINGERS * MAX_STORED_TEMPLATES)
+ * so nothing gets silently dropped. */
 static int load_templates_for_episode(void) {
     char mount_path[PATH_MAX];
     if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
         fprintf(stderr, "Could not mount volume to load templates for this lock episode.\n");
         return -1;
     }
-    char template_path[PATH_MAX];
-    snprintf(template_path, sizeof(template_path), "%s/%s", mount_path, TEMPLATE_FILENAME);
 
-    int rc = vfs5011_load_templates(template_path, g_enrolled_templates, MAX_STORED_TEMPLATES, &g_enrolled_count);
+    char fingers_dir[PATH_MAX];
+    snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
+
+    g_enrolled_count = 0;
+    int rc = -1;
+
+    DIR *d = opendir(fingers_dir);
+    if (d) {
+        struct dirent *entry;
+        while ((entry = readdir(d)) != NULL && g_enrolled_count < MAX_STORED_TEMPLATES) {
+            size_t len = strlen(entry->d_name);
+            if (len <= 4 || strcmp(entry->d_name + len - 4, ".dat") != 0) continue;
+
+            char finger_path[PATH_MAX];
+            snprintf(finger_path, sizeof(finger_path), "%s/%s", fingers_dir, entry->d_name);
+
+            struct xyt_struct finger_templates[MAX_STORED_TEMPLATES];
+            int finger_count = 0;
+            if (vfs5011_load_templates(finger_path, finger_templates, MAX_STORED_TEMPLATES, &finger_count) != 0) {
+                fprintf(stderr, "Warning: could not load templates from %s, skipping.\n", entry->d_name);
+                continue;
+            }
+
+            for (int i = 0; i < finger_count && g_enrolled_count < MAX_STORED_TEMPLATES; i++) {
+                g_enrolled_templates[g_enrolled_count++] = finger_templates[i];
+            }
+            rc = 0; /* loaded at least one finger's templates */
+        }
+        closedir(d);
+    }
+
+    /* Legacy fallback: pre-multi-finger installs may still have a flat
+     * template.dat sitting in the volume root instead of fingers/. */
+    if (rc != 0) {
+        char template_path[PATH_MAX];
+        snprintf(template_path, sizeof(template_path), "%s/%s", mount_path, TEMPLATE_FILENAME);
+        rc = vfs5011_load_templates(template_path, g_enrolled_templates, MAX_STORED_TEMPLATES, &g_enrolled_count);
+    }
 
     /* Piggyback the password read onto this same mount, so match time
      * only has to touch the sensor -- not the volume. Failure to find a
