@@ -8,6 +8,7 @@ clang vfs_client.c vfs5011_matcher.c \
     -o vfs_client \
     -I. -Inbis/include \
     -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
+    -framework CoreFoundation -framework IOKit \
     -lm \
     -Wno-implicit-function-declaration
 
