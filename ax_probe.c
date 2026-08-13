@@ -6,6 +6,20 @@
  * value (truncated). Run this while a Terminal "Password:" prompt
  * is on screen to find out what role it actually reports.
  *
+ * Also dumps the full AX tree for EVERY layer-0 on-screen window's
+ * owning process (deduped by pid) -- not just System Settings. This
+ * is the section to watch when diagnosing the v1.0.2 Keychain-autofill
+ * watcher: trigger a Safari/Chrome "Touch ID to autofill" sheet, or a
+ * "App wants to use your confidential information stored in keychain"
+ * popup, during the 5-second countdown, and this dump will show
+ * exactly which process actually owns the resulting secure field --
+ * whether that's SecurityAgent (already allowlisted for the padlock
+ * watcher) or something else entirely (Safari/Chrome itself, or a
+ * private helper process neither of us has seen the name of yet). No
+ * guessing needed; this is ground truth, same philosophy as the
+ * System Settings dump below (which was originally built for the same
+ * reason, before the padlock watcher shipped).
+ *
  * Needs the same Accessibility grant the daemon has -- run it from
  * the SAME terminal app you're testing against isn't required, but
  * the process running ax_probe itself needs Accessibility access.
@@ -16,8 +30,9 @@
  * Build:
  *   clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationServices
  *
- * Run (in a loop so you can watch it update every second):
- *   while true; do ./ax_probe; sleep 1; done
+ * Run (5-second countdown before it dumps -- trigger the prompt
+ * you're diagnosing during that window):
+ *   sudo ./ax_probe
  */
 #include <ApplicationServices/ApplicationServices.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -194,6 +209,84 @@ int main(void) {
         CFRelease(window_list);
     }
     printf("--- end window list ---\n\n");
+
+    /* Full AX tree dump for every DISTINCT layer-0 window owner --
+     * generalized version of the System Settings-only dump above.
+     * This is the section that actually answers "what process/role/
+     * subrole does the Safari or Chrome Touch ID autofill sheet use"
+     * or "what does the Keychain access popup's secure field look
+     * like" -- we don't filter by name here on purpose, since the
+     * whole point is not knowing the name ahead of time. Kept separate
+     * from the System Settings dump above rather than replacing it, so
+     * existing padlock-debugging usage of this tool doesn't change. */
+    printf("--- Full AX tree dump per distinct layer-0 window owner ---\n");
+    {
+        CFArrayRef wlist = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID);
+        if (!wlist) {
+            printf("CGWindowListCopyWindowInfo returned NULL.\n");
+        } else {
+            pid_t seen_pids[64];
+            int seen_count = 0;
+            CFIndex count = CFArrayGetCount(wlist);
+
+            for (CFIndex i = 0; i < count; i++) {
+                CFDictionaryRef entry = (CFDictionaryRef)CFArrayGetValueAtIndex(wlist, i);
+                CFNumberRef layer_num = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowLayer);
+                int layer = -999;
+                if (layer_num) CFNumberGetValue(layer_num, kCFNumberIntType, &layer);
+                if (layer != 0) continue;
+
+                CFNumberRef pid_num = (CFNumberRef)CFDictionaryGetValue(entry, kCGWindowOwnerPID);
+                if (!pid_num) continue;
+                int pid_val = 0;
+                CFNumberGetValue(pid_num, kCFNumberIntType, &pid_val);
+                pid_t pid = (pid_t)pid_val;
+
+                bool already = false;
+                for (int s = 0; s < seen_count; s++) {
+                    if (seen_pids[s] == pid) { already = true; break; }
+                }
+                if (already || seen_count >= 64) continue;
+                seen_pids[seen_count++] = pid;
+
+                char proc_name_buf[256] = "(unknown)";
+                proc_name(pid, proc_name_buf, sizeof(proc_name_buf));
+
+                char path_buf[1024] = "(unknown)";
+                proc_pidpath(pid, path_buf, sizeof(path_buf));
+
+                /* Best-effort window title -- may come back empty if
+                 * Screen Recording permission isn't granted to this
+                 * binary; harmless either way, just informational. */
+                CFStringRef wname = (CFStringRef)CFDictionaryGetValue(entry, kCGWindowName);
+                char title_buf[256] = "(no title / no Screen Recording perm)";
+                if (wname) CFStringGetCString(wname, title_buf, sizeof(title_buf), kCFStringEncodingUTF8);
+
+                printf("\n=== pid=%d  process=\"%s\"  window title=\"%s\" ===\n", pid, proc_name_buf, title_buf);
+                printf("    path=\"%s\"\n", path_buf);
+
+                AXUIElementRef app = AXUIElementCreateApplication(pid);
+                CFArrayRef windows = NULL;
+                AXError werr = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows);
+                if (werr != kAXErrorSuccess || !windows) {
+                    printf("    Could not get kAXWindowsAttribute (AXError %d).\n", (int)werr);
+                } else {
+                    CFIndex wcount = CFArrayGetCount(windows);
+                    for (CFIndex w = 0; w < wcount; w++) {
+                        AXUIElementRef win = (AXUIElementRef)CFArrayGetValueAtIndex(windows, w);
+                        int budget = 300;
+                        dump_ax_tree(win, 1, &budget);
+                    }
+                    CFRelease(windows);
+                }
+                CFRelease(app);
+            }
+            CFRelease(wlist);
+        }
+    }
+    printf("--- end per-owner AX tree dump ---\n\n");
 
     AXUIElementRef system_wide = AXUIElementCreateSystemWide();
     AXUIElementRef focused_app = NULL;
