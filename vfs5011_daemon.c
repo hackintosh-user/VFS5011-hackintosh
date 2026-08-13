@@ -1070,7 +1070,15 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
 static bool is_system_auth_process(const char *name, const char *path) {
     static const char *allowlist[] = {
         "SecurityAgent", "authorizationhost", "coreauthd",
-        "System Settings", "System Preferences", "loginwindow"
+        "System Settings", "System Preferences", "loginwindow",
+        /* Passwords.app (Sequoia+) -- its own lock-gate password field,
+         * confirmed via ax_probe.c to be a distinct process (NOT
+         * SecurityAgent), reporting a plain AXTextField/AXSecureTextField
+         * that hits the same AXError -25205 "no focused UI element" as
+         * System Settings panes -- already covered by the existing
+         * find_secure_text_field tree-walk fallback below, so no new
+         * detection logic was needed, just this allowlist entry. */
+        "Passwords"
     };
     for (size_t i = 0; i < sizeof(allowlist) / sizeof(allowlist[0]); i++) {
         if (strcmp(name, allowlist[i]) == 0) return true;
