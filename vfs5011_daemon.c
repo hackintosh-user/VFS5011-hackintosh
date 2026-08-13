@@ -874,13 +874,13 @@ static int find_live_pids_under_path(const char *path_substring, pid_t *candidat
  * for whichever process is most likely to hold the currently-relevant
  * auth prompt, or NULL if nothing auth-relevant is in play this tick.
  *
- * Deliberately avoids AXUIElementCreateSystemWide() +
+ * Historically this avoided AXUIElementCreateSystemWide() +
  * kAXFocusedApplicationAttribute entirely -- confirmed, via live
  * [DIAG] logging in this exact daemon, to fail unconditionally with
- * kAXErrorCannotComplete on this hardware, not just transiently during
- * testing as first suspected. Direct by-PID AXUIElementCreateApplication()
- * calls are confirmed reliable (see ax_probe.c's Dock control test),
- * so this builds the candidate list a different way:
+ * kAXErrorCannotComplete on this hardware for the padlock/System
+ * Settings cases. Direct by-PID AXUIElementCreateApplication() calls
+ * are confirmed reliable (see ax_probe.c's Dock control test), so the
+ * candidate list was built a different way:
  *   1. The frontmost window's owning PID (via CGWindowList) --
  *      correctly covers SecurityAgent, authorizationhost, coreauthd,
  *      loginwindow, and non-extension-hosted System Settings/System
@@ -890,6 +890,24 @@ static int find_live_pids_under_path(const char *path_substring, pid_t *candidat
  *      correctly covers extension-hosted panes (e.g. Users & Groups),
  *      where the window owner and the actually-focused process are
  *      different PIDs entirely.
+ *
+ * v1.0.2 addition (Keychain-access consent dialogs, e.g. Keychain
+ * Access's "wants to use your confidential information" alert, owned
+ * by the coreautha process): confirmed via ax_probe.c that this exact
+ * dialog does NOT show up in the layer-0 CGWindowList scan at all --
+ * source (1) above returns nothing for it -- but the system-wide
+ * focused-application lookup DOES resolve it correctly, contradicting
+ * the historical finding above for this specific dialog type. Rather
+ * than replace the window-based approach (still the more reliable
+ * source for the padlock/Settings/Passwords cases already confirmed
+ * working), this adds source (3): a best-effort system-wide
+ * focused-app lookup, appended as an extra candidate if it succeeds
+ * and isn't already in the list. If it fails (kAXErrorCannotComplete
+ * or otherwise), that's silently ignored and sources (1)/(2) still
+ * apply as before -- this is additive, not a replacement, since we
+ * don't yet know if it behaves identically once running under launchd
+ * as root versus this interactive sudo ax_probe test.
+ *
  * The caller checks each candidate against the auth-process allowlist
  * and only proceeds with ones that pass. */
 static int get_auth_candidate_pids(pid_t *candidate_pids, int max_count) {
@@ -913,6 +931,35 @@ static int get_auth_candidate_pids(pid_t *candidate_pids, int max_count) {
             }
         }
     }
+
+    /* Source (3): system-wide focused application, best-effort. Covers
+     * alert-style dialogs (confirmed: coreautha's Keychain-access
+     * consent alert) that never appear in the layer-0 window list. */
+    if (count < max_count) {
+        AXUIElementRef system_wide = AXUIElementCreateSystemWide();
+        AXUIElementRef focused_app = NULL;
+        AXError err = AXUIElementCopyAttributeValue(system_wide, kAXFocusedApplicationAttribute,
+                                                      (CFTypeRef *)&focused_app);
+        CFRelease(system_wide);
+
+        if (err == kAXErrorSuccess && focused_app) {
+            pid_t focused_pid = 0;
+            AXUIElementGetPid(focused_app, &focused_pid);
+            CFRelease(focused_app);
+
+            if (focused_pid != 0) {
+                bool already_listed = false;
+                for (int i = 0; i < count; i++) {
+                    if (candidate_pids[i] == focused_pid) { already_listed = true; break; }
+                }
+                if (!already_listed) candidate_pids[count++] = focused_pid;
+            }
+        }
+        /* err != kAXErrorSuccess is expected/normal in many cases (see
+         * comment above) -- not logged here to avoid spamming the log
+         * every 300ms tick when nothing auth-relevant is focused. */
+    }
+
     return count;
 }
 
@@ -1078,7 +1125,15 @@ static bool is_system_auth_process(const char *name, const char *path) {
          * System Settings panes -- already covered by the existing
          * find_secure_text_field tree-walk fallback below, so no new
          * detection logic was needed, just this allowlist entry. */
-        "Passwords"
+        "Passwords",
+        /* coreautha (LocalAuthentication.framework/Support/coreautha.bundle)
+         * -- distinct from coreauthd above, NOT a typo. Owns Keychain
+         * Access's "wants to use your confidential information stored
+         * in keychain" consent alert. Confirmed via ax_probe.c; only
+         * discoverable via the system-wide focused-app fallback in
+         * get_auth_candidate_pids (source 3), since this alert never
+         * appears in the layer-0 window list. */
+        "coreautha"
     };
     for (size_t i = 0; i < sizeof(allowlist) / sizeof(allowlist[0]); i++) {
         if (strcmp(name, allowlist[i]) == 0) return true;
