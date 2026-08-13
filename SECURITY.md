@@ -26,9 +26,9 @@ Before opening an issue please download the latest source code for this repo, si
 
 ## Reporting a Vulnerability
 
-If you find a security issue (privilege escalation, sudoers misconfiguration, template/passphrase exposure, daemon impersonation, etc.), please **do not open a public GitHub issue**.
+If you find a security issue (privilege escalation, sudoers misconfiguration, template/passphrase exposure, daemon impersonation, etc.),
+Do the following:
 
-Instead:
 1. Open a [GitHub Security Advisory](../../security/advisories/new) on this repo (preferred method of reporting a security matter), or
 2. Open a Github Issue on this Repo 
 
