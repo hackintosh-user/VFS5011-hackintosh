@@ -65,7 +65,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 - `libusb` (`brew install libusb`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
-- OpenCore v1.0.7 or later (For maximum Security) [RELEASE or DEBUG Is fine]
+- OpenCore v1.0.7 or later (For maximum Security | Release or Debug are fine)
 
 ## Building
 
@@ -93,7 +93,7 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 
 ## Usage
 
-**WARINING**: On macOS 14 sonoma And older you will be shown a message that clearly stats there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
+**WARINING**: On macOS 14 sonoma And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
 
 Run the client with this command:
 
