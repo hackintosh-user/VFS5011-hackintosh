@@ -99,7 +99,7 @@ Run the client with this command:
 ```bash
 sudo ./vfs_client
 ```
-Then, you should be greeted with this**interactive CLI menu for VFS client**
+Then, you should be greeted with this **interactive CLI menu for VFS client**
 ```
 [1] Enroll a Finger
 [2] Verify Fingerprint Match [Score / 20]
