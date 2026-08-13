@@ -46,12 +46,14 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <libusb.h>
 #include <libproc.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <ApplicationServices/ApplicationServices.h>
+#include <IOKit/IOKitLib.h>
 
 #include "vfs5011_proto.h"
 #include "vfs5011_matcher.h"
@@ -1424,6 +1426,134 @@ static void *polling_thread_main(void *arg) {
     return NULL;
 }
 
+/* ------------------------------------------------------------------ *
+ * OpenCore version gate (v1.0.2 requirement)
+ * ------------------------------------------------------------------ *
+ * As of v1.0.2, this tool refuses to run unless it can confirm, via
+ * NVRAM, that the system is booted on OpenCore 1.0.6 or newer (MINIMUM
+ * only -- there is no ceiling, any version >= 1.0.6 passes, RELEASE or
+ * DEBUG build both fine). This is a security floor: typing a login
+ * password on the user's behalf isn't something this daemon should do
+ * on a boot chain it can't verify meets a known-good baseline.
+ *
+ * OpenCore publishes its own version into NVRAM under its vendor GUID
+ * (4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102), key "opencore-version" --
+ * documented in the OpenCore Reference Manual's Debug Properties
+ * section. Historically (confirmed across real-world OC installs
+ * through at least the 0.6.x/0.7.x/0.8.x lines) this reports a string
+ * like "REL-107-2025-08-01" (RELEASE build) or "DBG-107-2025-08-01"
+ * (DEBUG build) -- the middle field is the version squished to 3
+ * digits with no dots (0.6.6 -> "066", 1.0.6 -> "106").
+ *
+ * IMPORTANT / UNVERIFIED ON REAL 1.0.x HARDWARE: this project has not
+ * yet empirically confirmed the exact NVRAM string OpenCore 1.0.x
+ * itself reports, the way the auth-prompt watcher changes earlier in
+ * this file WERE confirmed via ax_probe.c (see the "Passwords" /
+ * "coreautha" findings). The 3-digit-code format above is what every
+ * OC release through at least 0.8.x has used and nothing in OpenCore's
+ * own changelog suggests it changed for 1.0.x, but before shipping,
+ * run this on the real machine:
+ *     nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version
+ * and confirm the output matches the format parsed below. If it
+ * doesn't, this function fails CLOSED rather than silently accepting
+ * an unrecognized value -- update the parser to match reality first,
+ * same philosophy as the ax_probe-driven changes above.
+ *
+ * ALSO REQUIRED: OpenCore only publishes this variable at all if
+ * config.plist's NVRAM -> ExposeSensitiveData bitmask includes the bit
+ * that exposes opencore-version. Plenty of existing configs (including
+ * ones from otherwise-correct guides) don't set this, which would make
+ * this check fail closed on an up-to-date, perfectly fine OpenCore
+ * install. Confirm this bit is set BEFORE relying on this gate -- see
+ * the OpenCore Reference Manual's NVRAM Properties section for the
+ * exact bitmask, and test with the `nvram` command above first.
+ *
+ * FAILURE MODE: this only refuses to run outright when the version
+ * genuinely can't be determined at all (not booted via OpenCore, the
+ * NVRAM variable is missing/unreadable, or the value doesn't parse) --
+ * those indicate something is fundamentally broken, not just "old."
+ * If a version WAS successfully read and it's simply below 1.0.6, this
+ * prints a loud warning and lets the user proceed anyway -- they're on
+ * their own for any issues that show up on 1.0.5 or older. */
+#define REQUIRED_OC_VERSION_CODE 106 /* 1.0.6 minimum -- MAJOR*100+MINOR*10+PATCH, no ceiling */
+
+/* Returns true if the daemon should proceed (version OK, or version
+ * too low but the user's been warned), false only when the version
+ * genuinely could not be determined at all. */
+static bool check_opencore_version_requirement(void) {
+    io_registry_entry_t options = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/options");
+    if (options == MACH_PORT_NULL) {
+        fprintf(stderr, "OpenCore version check FAILED: could not open IODeviceTree:/options "
+                        "(are you booted via OpenCore at all?). Refusing to run.\n");
+        return false;
+    }
+
+    CFStringRef key = CFSTR("4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version");
+    CFTypeRef value = IORegistryEntryCreateCFProperty(options, key, kCFAllocatorDefault, 0);
+    IOObjectRelease(options);
+
+    if (!value) {
+        fprintf(stderr, "OpenCore version check FAILED: \"opencore-version\" NVRAM variable not found.\n");
+        fprintf(stderr, "This means either (a) you're not booted via OpenCore, or (b) your config.plist's\n");
+        fprintf(stderr, "NVRAM -> ExposeSensitiveData bitmask doesn't expose this variable.\n");
+        fprintf(stderr, "This tool requires OpenCore 1.0.6 or newer -- refusing to run.\n");
+        return false;
+    }
+
+    char buf[128] = {0};
+    bool got_string = false;
+
+    if (CFGetTypeID(value) == CFDataGetTypeID()) {
+        CFDataRef data = (CFDataRef)value;
+        CFIndex len = CFDataGetLength(data);
+        if (len > 0 && (size_t)len < sizeof(buf)) {
+            CFDataGetBytes(data, CFRangeMake(0, len), (UInt8 *)buf);
+            buf[len] = '\0';
+            got_string = true;
+        }
+    } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+        got_string = CFStringGetCString((CFStringRef)value, buf, sizeof(buf), kCFStringEncodingUTF8);
+    }
+    CFRelease(value);
+
+    if (!got_string || buf[0] == '\0') {
+        fprintf(stderr, "OpenCore version check FAILED: could not read \"opencore-version\" as text. Refusing to run.\n");
+        return false;
+    }
+
+    /* Parse the 3-digit version code out of "REL-106-..." / "DBG-106-...".
+     * Deliberately narrow (exact "-DDD-" or "-DDD" at end) rather than a
+     * loose scan -- a loose match risks silently accepting a malformed
+     * or unexpected string as if it passed. */
+    int found_code = -1;
+    size_t buf_len = strlen(buf);
+    for (size_t i = 0; i + 4 <= buf_len; i++) {
+        if (buf[i] == '-' && isdigit((unsigned char)buf[i+1]) && isdigit((unsigned char)buf[i+2])
+            && isdigit((unsigned char)buf[i+3])
+            && (i + 4 == buf_len || buf[i+4] == '-')) {
+            found_code = (buf[i+1] - '0') * 100 + (buf[i+2] - '0') * 10 + (buf[i+3] - '0');
+            break;
+        }
+    }
+
+    if (found_code < 0) {
+        fprintf(stderr, "OpenCore version check FAILED: could not parse a version out of \"%s\".\n", buf);
+        fprintf(stderr, "Expected a format like \"REL-106-2025-08-01\". If OpenCore's NVRAM string format\n");
+        fprintf(stderr, "has changed, this parser needs updating -- refusing to run rather than guess.\n");
+        return false;
+    }
+
+    if (found_code < REQUIRED_OC_VERSION_CODE) {
+        fprintf(stderr, "OpenCore v%d.%d.%d detected: Officially not supported, proceed at your own risk.\n",
+                found_code / 100, (found_code / 10) % 10, found_code % 10);
+        return true;
+    }
+
+    printf("OpenCore v%d.%d.%d detected: continue.\n",
+           found_code / 100, (found_code / 10) % 10, found_code % 10);
+    return true;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
 
@@ -1449,6 +1579,10 @@ int main(int argc, char **argv) {
     }
 
     init_exec_dir(argv[0]);
+
+    if (!check_opencore_version_requirement()) {
+        return 1;
+    }
 
     printf("VFS5011 authentication daemon running -- idle until screen locks.\n");
     printf("Ctrl+C to quit.\n\n");
