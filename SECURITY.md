@@ -29,7 +29,7 @@ Only the most recent tagged release receives security fixes. This is a hobbyist 
 If you find a security issue (privilege escalation, sudoers misconfiguration, template/passphrase exposure, daemon impersonation, etc.), please **do not open a public GitHub issue**.
 
 Instead:
-1. Open a [GitHub Security Advisory](../../security/advisories/new) on this repo (preferred method of reporting a security mattar), or
+1. Open a [GitHub Security Advisory](../../security/advisories/new) on this repo (preferred method of reporting a security matter), or
 2. Open a Github Issue on this Repo 
 
 Please include:
