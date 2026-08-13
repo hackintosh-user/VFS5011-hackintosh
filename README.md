@@ -172,7 +172,8 @@ class hardware) with the VFS5011 sensor at USB `138A:0018`.
 - Ad hoc code signing is used for the daemon binary and its
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
-- a Cold boot sign in is not supported yet. locking the screen / screen saver starts is supported 
+- a Cold boot sign in is not supported yet. locking the screen / screen saver starts is supported
+- The sensor Takes some **time to fully start the scan (Show the white light)** currently unknown why. Please watch the sensor closely until this issue is resolved.
 
 ## Acknowledgments
 
