@@ -37,7 +37,11 @@
 #include <sys/utsname.h>
 #include <termios.h>
 #include <stdarg.h>
+#include <ctype.h>
+#include <stdbool.h>
 #include <libusb.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
 
 #include "vfs5011_proto.h"
 #include "vfs5011_matcher.h"
@@ -630,7 +634,7 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sValidity VFS5011 Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s                              %sv1.0.1%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
+    printf("         `\"Y8888P\"'%s                              %sv1.0.2%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
 }
 
 /* Multi-finger storage: each enrolled finger gets its own file of
@@ -1583,6 +1587,100 @@ static void check_macos_version_warning(void) {
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * OpenCore version gate (v1.0.2 requirement)
+ * ------------------------------------------------------------------ *
+ * Same gate as vfs5011_daemon.c -- kept as a separate copy here rather
+ * than a shared header, matching this project's existing pattern of
+ * self-contained client/daemon .c files. See the daemon's copy of this
+ * function for the full explanation of the NVRAM key, the version
+ * string format, and the ExposeSensitiveData caveat -- keep both
+ * copies in sync if either needs updating. As of v1.0.2, OpenCore
+ * 1.0.6 is the recommended MINIMUM version (no ceiling), RELEASE or
+ * DEBUG build both fine.
+ *
+ * FAILURE MODE: only refuses to run when the version genuinely can't
+ * be determined at all (not booted via OpenCore, NVRAM variable
+ * missing/unreadable, or unparseable value) -- that indicates
+ * something fundamentally broken, not just "old." If a version WAS
+ * successfully read and it's simply below 1.0.6, this warns loudly
+ * and lets the user proceed anyway -- on their own for any issues on
+ * OpenCore 1.0.5 or older. */
+#define REQUIRED_OC_VERSION_CODE 106 /* 1.0.6 minimum -- MAJOR*100+MINOR*10+PATCH, no ceiling */
+
+/* Returns true if the client should proceed (version OK, or version
+ * too low but the user's been warned), false only when the version
+ * genuinely could not be determined at all. */
+static bool check_opencore_version_requirement(void) {
+    io_registry_entry_t options = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/options");
+    if (options == MACH_PORT_NULL) {
+        vfsc_err("OpenCore version check FAILED: could not open IODeviceTree:/options "
+                 "(are you booted via OpenCore at all?). Refusing to run.\n");
+        return false;
+    }
+
+    CFStringRef key = CFSTR("4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version");
+    CFTypeRef value = IORegistryEntryCreateCFProperty(options, key, kCFAllocatorDefault, 0);
+    IOObjectRelease(options);
+
+    if (!value) {
+        vfsc_err("OpenCore version check FAILED: \"opencore-version\" NVRAM variable not found.\n");
+        vfsc_err("This means either (a) you're not booted via OpenCore, or (b) your config.plist's\n");
+        vfsc_err("NVRAM -> ExposeSensitiveData bitmask doesn't expose this variable.\n");
+        vfsc_err("This tool requires OpenCore 1.0.6 or newer -- refusing to run.\n");
+        return false;
+    }
+
+    char buf[128] = {0};
+    bool got_string = false;
+
+    if (CFGetTypeID(value) == CFDataGetTypeID()) {
+        CFDataRef data = (CFDataRef)value;
+        CFIndex len = CFDataGetLength(data);
+        if (len > 0 && (size_t)len < sizeof(buf)) {
+            CFDataGetBytes(data, CFRangeMake(0, len), (UInt8 *)buf);
+            buf[len] = '\0';
+            got_string = true;
+        }
+    } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+        got_string = CFStringGetCString((CFStringRef)value, buf, sizeof(buf), kCFStringEncodingUTF8);
+    }
+    CFRelease(value);
+
+    if (!got_string || buf[0] == '\0') {
+        vfsc_err("OpenCore version check FAILED: could not read \"opencore-version\" as text. Refusing to run.\n");
+        return false;
+    }
+
+    int found_code = -1;
+    size_t buf_len = strlen(buf);
+    for (size_t i = 0; i + 4 <= buf_len; i++) {
+        if (buf[i] == '-' && isdigit((unsigned char)buf[i+1]) && isdigit((unsigned char)buf[i+2])
+            && isdigit((unsigned char)buf[i+3])
+            && (i + 4 == buf_len || buf[i+4] == '-')) {
+            found_code = (buf[i+1] - '0') * 100 + (buf[i+2] - '0') * 10 + (buf[i+3] - '0');
+            break;
+        }
+    }
+
+    if (found_code < 0) {
+        vfsc_err("OpenCore version check FAILED: could not parse a version out of \"%s\".\n", buf);
+        vfsc_err("Expected a format like \"REL-106-2025-08-01\". If OpenCore's NVRAM string format\n");
+        vfsc_err("has changed, this parser needs updating -- refusing to run rather than guess.\n");
+        return false;
+    }
+
+    if (found_code < REQUIRED_OC_VERSION_CODE) {
+        vfsc_err("OpenCore v%d.%d.%d detected: Officially not supported, proceed at your own risk.\n",
+                 found_code / 100, (found_code / 10) % 10, found_code % 10);
+        return true;
+    }
+
+    printf("OpenCore v%d.%d.%d detected: continue.\n",
+           found_code / 100, (found_code / 10) % 10, found_code % 10);
+    return true;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
 
@@ -1606,6 +1704,11 @@ int main(int argc, char **argv) {
     init_exec_dir(argv[0]);
     init_color_support();
     print_banner();
+
+    if (!check_opencore_version_requirement()) {
+        return 1;
+    }
+
     check_macos_version_warning();
 
     /* Mount the template volume once up front to find out what's
