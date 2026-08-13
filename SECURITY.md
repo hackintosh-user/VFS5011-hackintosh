@@ -22,7 +22,7 @@ This project interacts with sensitive parts of macOS (authentication, sudoers, L
 
 ## Supported Versions
 
-Only the most recent tagged release receives security fixes. This is a hobbyist project maintained in spare time — there's no LTS branch, so please update before reporting an issue.
+Before opening an issue please download the latest source code for this repo, since there isn't a release (for security reasons). This is a hobbyist project maintained in spare time
 
 ## Reporting a Vulnerability
 
