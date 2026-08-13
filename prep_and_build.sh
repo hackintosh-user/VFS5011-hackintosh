@@ -5,19 +5,23 @@
 # Fixes the recurring "some .sh files aren't executable" problem
 # (build.sh only ever chmod'd itself + build_client.sh + build_daemon.sh,
 # never the runtime helper scripts like vfs5011_volume_mount.sh) by
-# chmod +x'ing EVERY .sh file in this folder, then rebuilds both
-# binaries from source.
+# chmod +x'ing EVERY .sh file in this folder, rebuilds both binaries
+# from source, and deploys the daemon (rebuild, copy to
+# /Library/Application Support/VFSDaemon/, re-sign, re-grant
+# Accessibility, reinstall the LaunchAgent).
+#
+# After this runs, the daemon is live and up to date in the background --
+# the only thing left to do yourself is run the client whenever you want
+# to enroll/manage fingers or change settings:
+#
+#   sudo ./vfs_client
 #
 # Usage:
-#   ./prep_and_build.sh            # chmod all scripts + build client & daemon
-#   ./prep_and_build.sh --deploy   # also runs the daemon's full install/deploy
-#                                   step (rebuilds + copies to
-#                                   /Library/Application Support/VFSDaemon/,
-#                                   re-signs, re-grants Accessibility,
-#                                   reinstalls the LaunchAgent). Requires sudo
-#                                   and will prompt for your password.
+#   ./prep_and_build.sh
 #
 # Run this from inside the project folder (same folder as build.sh).
+# The daemon deploy step needs root and will prompt you for your
+# password via sudo.
 
 set -e
 
@@ -33,13 +37,11 @@ echo "== Building client + daemon from source =="
 ./build.sh
 
 echo
-if [ "$1" == "--deploy" ]; then
-    echo "== Deploying daemon (rebuild, install, re-sign, re-grant Accessibility, reload LaunchAgent) =="
-    echo "This step needs root -- you may be prompted for your password."
-    sudo ./vfs5011_agent_install.sh
-else
-    echo "Build complete. Daemon binary at ./vfs5011_daemon is NOT yet deployed --"
-    echo "the LaunchAgent still runs the copy at /Library/Application Support/VFSDaemon/."
-    echo "Re-run with --deploy to rebuild + install + reload the LaunchAgent in one step:"
-    echo "  ./prep_and_build.sh --deploy"
-fi
+echo "== Deploying daemon (rebuild, install, re-sign, re-grant Accessibility, reload LaunchAgent) =="
+echo "This step needs root -- you may be prompted for your password."
+sudo ./vfs5011_agent_install.sh
+
+echo
+echo "Done. Daemon is deployed and running in the background."
+echo "Run the client yourself whenever you need it:"
+echo "  sudo ./vfs_client"
