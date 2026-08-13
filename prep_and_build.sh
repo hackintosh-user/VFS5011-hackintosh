@@ -33,6 +33,16 @@ chmod +x ./*.sh
 ls -la ./*.sh
 
 echo
+echo "== Reclaiming ownership of build artifacts (in case a previous sudo build left them root-owned) =="
+CURRENT_USER="$(id -un)"
+for bin in vfs_client vfs5011_daemon; do
+    if [ -e "$bin" ] && [ "$(stat -f '%Su' "$bin")" != "$CURRENT_USER" ]; then
+        echo "  $bin is owned by $(stat -f '%Su' "$bin") -- reclaiming as $CURRENT_USER (you may be prompted for your password)"
+        sudo chown "$CURRENT_USER":staff "$bin"
+    fi
+done
+
+echo
 echo "== Building client + daemon from source =="
 ./build.sh
 
