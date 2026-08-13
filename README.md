@@ -9,6 +9,7 @@
   fingerprint authentication to macOS on unsupported (Hackintosh) hardware —
   lock screen unlock and System Settings authentication prompts, driven by
   a real fingerprint sensor instead of a password.
+  
   * Current version: v1.0.1
 </p>
 
