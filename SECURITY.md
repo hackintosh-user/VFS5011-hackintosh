@@ -33,15 +33,15 @@ Instead:
 2. Open a Github Issue on this Repo 
 
 Please include:
-- macOS version and hardware (Hackintosh or real Mac)
+- macOS version and hardware
 - Steps to reproduce
 - Impact you believe it has (e.g. local privilege escalation vs. denial of service)
 
-I'll do my best to respond and patch promptly, but please keep in mind this is a solo/community-maintained project — response times won't match a corporate bug bounty program.
+I'll do my best to respond and patch promptly, but please keep in mind this is a solo maintained project — response times won't match a corporate bug bounty program.
 
 ## Recommendations for Users
 
-- Only build and install from source you've reviewed, or from official tagged releases — not random forks.
+- Only build and install from source (Only this repo!! if anyone claims anything outside this repo its most likely fake!!) you've reviewed, or from official tagged releases — not random forks.
 - Review the `sudoers` rule and `LaunchAgent` plist before installing; don't run install scripts blindly.
 - Don't rely on this as your *only* layer of security on a machine with sensitive data — treat it as a convenience layer on top of FileVault + a strong login password, not a replacement for either.
 - Keep your enrolled templates private — don't share your `fingers/` directory or `VFSStore` volume.
