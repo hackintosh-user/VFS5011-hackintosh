@@ -49,7 +49,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
   rule rather than a blanket NOPASSWD grant
 - Interactive terminal client (`vfs_client`) for enrollment, verification,
   and one-command deployment of the background daemon
-
+-  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
   ## Screenshots
 
   <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia 15.7.8 (24G824) (left), and macOS Tahoe 26.6 (25G72) (right)</em></p>
