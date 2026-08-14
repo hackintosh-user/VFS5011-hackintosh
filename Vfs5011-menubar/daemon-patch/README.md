@@ -17,7 +17,7 @@ app running.
 
 **Option A — download the pre-built app (easiest):**
 
-1. Grab `VFS5011MenuBar.app.zip` from the [Releases page](../../releases).
+1. Grab `VFS5011MenuBar.app.zip` from the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/)
 2. Unzip it and drag `VFS5011 Menu Bar.app` to `/Applications`.
 3. **First launch will be blocked by Gatekeeper** — this app is ad-hoc
    signed, not notarized with a paid Apple Developer account, so macOS
