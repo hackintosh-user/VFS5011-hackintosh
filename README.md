@@ -98,7 +98,7 @@ The menu bar app talks to the daemon over macOS distributed
 notifications — the same mechanism the daemon already uses for its own
 `screenIsLocked`/`screenIsUnlocked` handling. **The daemon needs a small
 patch to actually send those events**; see
-[`vfs5011-menubar/daemon-patch/README.md`](vfs5011-menubar/daemon-patch/README.md)
+[`vfs5011-menubar/daemon-patch/README.md`](Vfs5011-menubar/daemon-patch/README.md)
 for the exact 6-line diff against `vfs5011_daemon.c`. Without the patch,
 the app runs standalone and just never receives anything — harmless, but
 silent.
