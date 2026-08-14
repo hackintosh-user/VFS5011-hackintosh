@@ -82,6 +82,8 @@ Then, the user authenticates with a fingerprint swipe:
 
 This is **optional!** not required for the sensor to work. but it can help you out a lot, since this client works by auto filling the password, so getting a notification when the sensor is **ready to scan** can be useful.
 
+ * Please refer to the .MD File made for this Plug in [With this link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/main/VFS-MENUBAR.MD)
+
 ## Requirements 
 - A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
 - Xcode Command Line Tools (`xcode-select --install`)
