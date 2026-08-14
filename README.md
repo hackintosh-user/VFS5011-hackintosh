@@ -59,7 +59,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
   * Also Please keep in mind that the minimum version is macOS 15 Sequoia. Other older versions may work, but I offer **0 support for them** when using a version older than sequoia (Darwin 24.0.0) you are on your own
 
 
-## Menu Bar Plug-in
+## **optional** Menu Bar Plug-in
 
 This is **optional!** but it helps out a lot, with:
 * Sensors that lights are too dim to know its ready to scan
