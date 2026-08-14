@@ -58,9 +58,28 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
   * Please keep in mind that macOS tahoe Currently is **NOT supported by OpenCore legacy patcher.** Things may change when we have graphic acceleration But until then, the image for tahoe is a **proof-of-concept.**
   * Also Please keep in mind that the minimum version is macOS 15 Sequoia. Other older versions may work, but I offer **0 support for them** when using a version older than sequoia (Darwin 24.0.0) you are on your own
 
-## Requirements
 
-- A Hackintosh running macOS Sequoia or macOS Tahoe (Sequoia is the minimum version)
+## Menu Bar Plug-in
+
+This is **optional!** but it helps out a lot, with:
+* Sensors that lights are too dim to know its ready to scan
+* Sensors that lights are burnt / broken
+* Sensor taking too long to start
+
+How it works:
+
+a authentication prompt is shown to the user and it sends a notification to swipe:
+
+* <img width="847" height="587" alt="Screenshot 2026-08-14 at 2 24 13 PM" src="https://github.com/user-attachments/assets/4afb6845-3fb2-402e-ae41-830648841f5b" />
+
+Then, the user authenticates with a fingerprint swipe:
+
+* <img width="841" height="584" alt="Screenshot 2026-08-14 at 2 24 20 PM" src="https://github.com/user-attachments/assets/a9423da5-3fa1-4c68-83f2-377c775864c8" />
+
+
+This is **optional!** not required for the sensor to work. but it can help you out a lot, since this client works by auto filling the password, so getting a notification when the sensor is **ready to scan** can be useful.
+
+## Requirements 
 - A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
