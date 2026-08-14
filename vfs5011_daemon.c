@@ -57,6 +57,7 @@
 
 #include "vfs5011_proto.h"
 #include "vfs5011_matcher.h"
+#include "vfs5011_menubar_ipc.h"
 
 #define VFS5011_VID 0x138a
 #define VFS5011_PID 0x0018
@@ -1081,6 +1082,18 @@ static void on_screen_unlocked(void) {
  * padlock trigger) what must still be focused right before we type. */
 static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
                                      AXUIElementRef secure_field, const char *label) {
+    if (!vfs5011_scanning_is_enabled()) {
+        /* Paused via the menu bar. Don't wake the sensor, don't load
+         * templates, don't post swipe_requested -- stay IDLE so the
+         * next auth-prompt detection (after a resume) re-triggers this
+         * function fresh rather than needing a new prompt to appear. */
+        print_timestamp();
+        printf("%s detected, but scanning is paused -- staying IDLE.\n", label);
+        atomic_store(&g_state, STATE_IDLE);
+        if (secure_field) CFRelease(secure_field);
+        return;
+    }
+
     print_timestamp();
     printf("%s detected -> loading templates for this episode...\n", label);
 
@@ -1100,6 +1113,7 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
     print_timestamp();
     printf("Templates loaded (%d). Entering POLLING state.\n", g_enrolled_count);
     atomic_store(&g_state, STATE_POLLING);
+    vfs5011_notify_swipe_requested();
 }
 
 /* Process names that legitimately ask for the macOS LOGIN password via
@@ -1403,6 +1417,7 @@ static void *polling_thread_main(void *arg) {
                 type_password_and_enter(g_cached_password);
                 print_timestamp();
                 printf("Typed.\n");
+                vfs5011_notify_swipe_success();
             } else if (ok_to_type) {
                 print_timestamp();
                 printf("Match succeeded but no stored password was available -- cannot auto-type.\n");
@@ -1421,6 +1436,7 @@ static void *polling_thread_main(void *arg) {
              * well enough -- give an audible reject cue and let the
              * loop immediately try the next swipe. */
             play_failure_sound();
+            vfs5011_notify_swipe_failed();
         }
     }
     return NULL;
@@ -1606,6 +1622,8 @@ int main(int argc, char **argv) {
         auth_prompt_poll_callback, NULL);
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), auth_prompt_timer, kCFRunLoopDefaultMode);
     printf("Auth-prompt watcher registered (padlock, polling every 300ms).\n");
+
+    vfs5011_menubar_ipc_init();
 
     CFRunLoopRun();
 
