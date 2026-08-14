@@ -59,6 +59,57 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
   * Also Please keep in mind that the minimum version is macOS 15 Sequoia. Other older versions may work, but I offer **0 support for them** when using a version older than sequoia (Darwin 24.0.0) you are on your own
 
 
+## Menu Bar Companion App (optional)
+
+`vfs5011-menubar/` contains an optional menu bar app that surfaces the
+daemon's auth events as real notifications — useful since the sensor's
+LED can be too dim to notice on its own.
+
+- Notifies you the moment the daemon wants a swipe ("Swipe to
+  authenticate! 🫆"), then whether it succeeded or failed
+- One-click toggle to pause/resume fingerprint auth without touching Terminal
+- Registers itself as a login item automatically on first launch (macOS
+  13+, via `SMAppService` — no manual LaunchAgent setup needed)
+- "About VFS5011" menu item with a short project summary and a link back
+  here
+
+Completely optional — the daemon works identically with or without it
+running.
+
+### Installing
+
+```bash
+cd vfs5011-menubar
+chmod +x build_menubar_app.sh
+./build_menubar_app.sh
+open "build/VFS5011 Menu Bar.app"
+```
+
+Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
+and `iconutil`. No other dependencies.
+
+First launch will be blocked by Gatekeeper since this is ad-hoc signed,
+not notarized with a paid Apple Developer account — right-click the app →
+**Open** → **Open** again, or run `xattr -cr "VFS5011 Menu Bar.app"` once.
+
+### Wiring it to the daemon
+
+The menu bar app talks to the daemon over macOS distributed
+notifications — the same mechanism the daemon already uses for its own
+`screenIsLocked`/`screenIsUnlocked` handling. **The daemon needs a small
+patch to actually send those events**; see
+[`vfs5011-menubar/daemon-patch/README.md`](vfs5011-menubar/daemon-patch/README.md)
+for the exact 6-line diff against `vfs5011_daemon.c`. Without the patch,
+the app runs standalone and just never receives anything — harmless, but
+silent.
+
+Known limitations:
+
+- Pause/resume is global — disabling fingerprint auth pauses it for every
+  recognized prompt at once (lock screen, padlock, Finder, pkg installer,
+  Time Machine, Apple ID's local password step), not just one surface.
+- Not notarized (see Gatekeeper note above).
+
 
 
 ## Requirements 
