@@ -61,6 +61,9 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 
 ## **optional** Menu Bar Plug-in
 
+* <img width="510" height="127" alt="Screenshot 2026-08-14 at 2 31 10 PM" src="https://github.com/user-attachments/assets/9909209b-5d63-4606-954d-8abe8147f1a4" />
+
+
 This is **optional!** but it helps out a lot, with:
 * Sensors that lights are too dim to know its ready to scan
 * Sensors that lights are burnt / broken
