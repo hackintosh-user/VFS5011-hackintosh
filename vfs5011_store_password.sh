@@ -15,7 +15,6 @@
 
 set -e
 
-VOLUME_NAME="VFSStore"
 MOUNT_POINT="/private/var/db/vfsclient_data"
 PASSWORD_FILE="$MOUNT_POINT/password.txt"
 
