@@ -86,7 +86,7 @@ open "build/VFS5011 Menu Bar.app"
 ```
 
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-and `iconutil`. No other dependencies. And it needs **macOS 15 Sequoia and later** same like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on Sonoma and older.
+and `iconutil`. No other dependencies. And it needs **macOS 15 Sequoia and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on Sonoma and older.
 
 First launch will be blocked by Gatekeeper since this is ad-hoc signed,
 not notarized with a paid Apple Developer account — right-click the app →
