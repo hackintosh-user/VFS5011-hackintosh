@@ -114,6 +114,7 @@ Known limitations:
 
 ## Requirements 
 - A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
+- **macOS 15 Sequoia and later** (older versions may work, but I offer **0 support for them**)
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
