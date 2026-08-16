@@ -114,7 +114,7 @@ Known limitations:
 
 ## Requirements 
 - A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
-- **macOS 15 Sequoia and later** (older versions may work, but I offer **0 support for them**)
+- **macOS 13 Ventura and later** (older versions may work, but I offer **0 support for them**)
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
@@ -148,7 +148,7 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 
 ## Usage
 
-**WARINING 1**: On macOS 14 sonoma And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 15 Sequoia and macOS Tahoe 26** you are on your own for any issues that may arise on this version of macOS.
+**WARINING 1**: On macOS 12 Monterey And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 13 Ventura and later** you are on your own for any issues that may arise on this version of macOS.
 
 **WARNING 2**: Same goes for the OpenCore Boot loader: the minimum version is OpenCore v1.0.6 or later. v1.0.5 and older are officially not supported. You are on your own if you encounter any issues on v1.0.5 or older.
 
