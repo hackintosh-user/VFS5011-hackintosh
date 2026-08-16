@@ -634,7 +634,7 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sValidity VFS5011 Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s                              %sv1.0.2%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
+    printf("         `\"Y8888P\"'%s                              %sv1.0.3%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
 }
 
 /* Clears the terminal and homes the cursor, then redraws the banner --
