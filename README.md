@@ -56,7 +56,7 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 
 
   * Please keep in mind that macOS tahoe Currently is **NOT supported by OpenCore legacy patcher.** Things may change when we have graphic acceleration But until then, the image for tahoe is a **proof-of-concept.**
-  * Also Please keep in mind that the minimum version is macOS 15 Sequoia. Other older versions may work, but I offer **0 support for them** when using a version older than sequoia (Darwin 24.0.0) you are on your own
+  * Also Please keep in mind that the minimum version is macOS 13 Ventura. Other older versions may work, but I offer **0 support for them** when using a version older than Ventura (Darwin 22.0.0) you are on your own
 
 
 ## Menu Bar Companion App (optional)
