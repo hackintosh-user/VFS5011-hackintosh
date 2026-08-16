@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>VFS5011 Menu Bar</string>
+	<key>CFBundleDisplayName</key>
+	<string>VFS5011 Menu Bar</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.vfs5011.hackintosh.menubar</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>VFS5011MenuBar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<!-- Hides the app from the Dock and Cmd+Tab switcher; it only lives
+	     in the menu bar. Belt-and-suspenders with the runtime
+	     NSApp.setActivationPolicy(.accessory) call in AppDelegate. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>BSD 3-Clause, matches VFS5011-hackintosh main project license.</string>
+</dict>
+</plist>
