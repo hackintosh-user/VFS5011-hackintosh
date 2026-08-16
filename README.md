@@ -225,7 +225,7 @@ class hardware) with the VFS5011 sensor at USB `138A:0018`.
 - macOS only. This is not a libfprint driver and is not intended to run
   on Linux — if you're on Linux with this sensor, use the existing
   open-source libfprint driver directly instead (see Acknowledgments).
-- Targets macOS Sequoia and later only; the client prints a warning if
+- Targets macOS 13 Ventura and later only; the client prints a warning if
   run on an older Darwin version.
 - No PAM module exists for `sudo` in a terminal. An Accessibility-based
   approach for `sudo` prompts was prototyped during development and
