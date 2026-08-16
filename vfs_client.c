@@ -1029,7 +1029,7 @@ static void print_menu(void) {
 
 static void print_about(void) {
     printf("\n%sVFS CLIENT%s\n", VFSC_BCYAN, VFSC_RESET);
-    printf("Validity VFS5011 fingerprint authentication for macOS Sequoia+.\n");
+    printf("Validity VFS5011 fingerprint authentication for macOS Ventura+.\n");
     printf("Capture pipeline ported from libfprint; matching via NBIS mindtct/bozorth3.\n");
     printf("%sMATCH_THRESHOLD=%d, ENROLL_SWIPES=%d, MIN_SELF_CONSISTENCY=%d%s\n\n",
            VFSC_DIM, MATCH_THRESHOLD, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
@@ -1577,24 +1577,38 @@ static void do_deploy(void) {
     printf("Lock your screen and swipe an enrolled finger to test it.\n\n");
 }
 
-/* Darwin kernel major version 24 == macOS 15 Sequoia, the OS this
- * project was actually developed and tested against (per the banner:
- * "Sensors on macOS Sequoia and later"). Anything older is untested --
- * this is a heads-up, not a block. Someone running this on an older
- * OS may know exactly what they're doing (or be deliberately porting
- * it backward), but they should know up front that nothing here has
- * been verified there and support is on them. */
+/* Darwin kernel major version 22 == macOS 13 Ventura, the new stated
+ * floor as of this change. Originally this gated at Darwin 24 (macOS
+ * 15 Sequoia, the OS this project was first developed against), but a
+ * source review found no actual Sequoia/Sonoma-only API dependency
+ * anywhere in the daemon, client, or menu bar app -- every system call
+ * in use (AX APIs, CFNotificationCenterGetDistributedCenter, diskutil
+ * apfs, TCC.db writes, SMAppService) has worked since well before
+ * Ventura. The "Passwords" entry in is_system_auth_process() is
+ * Sequoia-only in practice (that app doesn't exist earlier) but is a
+ * harmless no-op allowlist entry on older OSes, not a hard dependency.
+ *
+ * The one confirmed empirical gap: the coreautha/Keychain-Access
+ * auth-surface finding from v1.0.2 was only verified via ax_probe.c on
+ * Sequoia. It has NOT yet been re-verified on Ventura or Sonoma, so
+ * that specific feature may behave differently there until confirmed.
+ *
+ * Anything older than Darwin 22 is still untested -- this remains a
+ * heads-up, not a block. Someone running this on an older OS may know
+ * exactly what they're doing (or be deliberately porting it backward),
+ * but they should know up front that nothing here has been verified
+ * there and support is on them. */
 static void check_macos_version_warning(void) {
     struct utsname uts;
     if (uname(&uts) != 0) return; /* can't determine it -- don't nag about something unconfirmed */
 
-    int darwin_major = atoi(uts.release); /* "24.6.0" -> 24 */
-    if (darwin_major > 0 && darwin_major < 24) {
+    int darwin_major = atoi(uts.release); /* "22.6.0" -> 22 */
+    if (darwin_major > 0 && darwin_major < 22) {
         printf("\n");
         printf("############################################################\n");
-        printf("  WARNING: Darwin %s detected -- older than macOS Sequoia\n", uts.release);
-        printf("  (Darwin 24.x). This project is developed and tested\n");
-        printf("  against Sequoia and later only. Older macOS versions are\n");
+        printf("  WARNING: Darwin %s detected -- older than macOS Ventura\n", uts.release);
+        printf("  (Darwin 22.x). This project is developed and tested\n");
+        printf("  against Ventura and later only. Older macOS versions are\n");
         printf("  untested territory -- things may work, may not, or may\n");
         printf("  behave differently. You're on your own for support here.\n");
         printf("############################################################\n\n");
