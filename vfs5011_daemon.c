@@ -464,6 +464,47 @@ static void close_device(void) {
     if (g_ctx) libusb_exit(g_ctx);
 }
 
+/* Cheap, non-invasive check for whether a VFS5011 is physically present
+ * on this system at all. Uses its own short-lived libusb context and
+ * just walks the device list comparing vendor/product IDs -- it never
+ * opens or claims the device, so it's safe to call from
+ * arm_polling_for_trigger() on every single trigger without any risk
+ * of interfering with an in-flight capture_quality_template() open/
+ * close cycle (which uses the separate g_ctx/g_handle globals).
+ *
+ * This exists so a screen lock or auth padlock on a machine with no
+ * sensor at all doesn't fire a "swipe now" notification that can never
+ * be satisfied, followed by an automatic failure a few seconds later,
+ * forever, on every single lock. Checking fresh on every trigger
+ * (rather than caching a startup-time result) also means a sensor
+ * plugged in mid-session is picked up immediately, no daemon restart
+ * needed. */
+static bool vfs5011_sensor_is_present(void) {
+    libusb_context *probe_ctx = NULL;
+    if (libusb_init(&probe_ctx) < 0) {
+        /* If libusb itself can't even initialize, don't block the
+         * trigger on that -- let the real open_device() path in
+         * capture_quality_template() surface the actual error. */
+        return true;
+    }
+    libusb_set_option(probe_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(probe_ctx, &list);
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        if (desc.idVendor == VFS5011_VID && desc.idProduct == VFS5011_PID) {
+            found = true;
+            break;
+        }
+    }
+    if (list) libusb_free_device_list(list, 1);
+    libusb_exit(probe_ctx);
+    return found;
+}
+
 #define MATCH_THRESHOLD 20       /* testing lower vs. confirmed impostor ceiling of ~18 */
 #define ENROLL_SWIPES 5          /* how many good swipes make up one enrollment */
 #define MAX_STORED_TEMPLATES 8   /* array bound for save/load */
@@ -1172,6 +1213,21 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
         return;
     }
 
+    if (!vfs5011_sensor_is_present()) {
+        /* No VFS5011 physically attached. Without this check we'd fire
+         * vfs5011_notify_swipe_requested() below, the user would see
+         * "Swipe to authenticate!" with nothing to swipe, and it would
+         * fail a few seconds later when capture_quality_template()'s
+         * own open_device() attempts all come back empty -- repeating
+         * on every single lock. Bail out here instead, before any
+         * notification goes out. */
+        print_timestamp();
+        printf("%s detected, but no VFS5011 sensor found on this system -- staying IDLE.\n", label);
+        atomic_store(&g_state, STATE_IDLE);
+        if (secure_field) CFRelease(secure_field);
+        return;
+    }
+
     g_trigger_target_pid = target_pid;
     if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
     g_trigger_secure_field = secure_field; /* already retained by caller */
@@ -1726,6 +1782,12 @@ int main(int argc, char **argv) {
 
     printf("VFS5011 authentication daemon running -- idle until screen locks.\n");
     printf("Ctrl+C to quit.\n\n");
+
+    if (!vfs5011_sensor_is_present()) {
+        printf("WARNING: No VFS5011 sensor detected on this system. The daemon\n");
+        printf("will keep running and re-check on every lock/auth-prompt trigger,\n");
+        printf("but it will stay idle (no swipe prompt) until a sensor is plugged in.\n\n");
+    }
 
     pthread_t poll_thread;
     if (pthread_create(&poll_thread, NULL, polling_thread_main, NULL) != 0) {
