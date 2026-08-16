@@ -729,6 +729,28 @@ static int g_enrolled_count = 0;
 static char g_cached_password[MAX_PASSWORD_LEN + 1];
 static int g_cached_password_valid = 0;
 
+/* g_enrolled_templates / g_enrolled_count / g_cached_password /
+ * g_cached_password_valid are now written by a dedicated loader thread
+ * (see load_templates_thread_main) instead of inline on the CFRunLoop
+ * thread that detects the trigger, so STATE_POLLING can start (and the
+ * sensor can light up) immediately instead of waiting on the encrypted
+ * volume's mount/unmount. That means those four globals now have two
+ * potential writers -- the loader thread, and on_screen_unlocked()
+ * clearing them if the screen unlocks mid-load -- plus one reader
+ * (polling_thread_main). g_templates_lock protects all four; nothing
+ * about the mount/unmount itself needs the lock, only the brief writes
+ * into these arrays/fields.
+ *
+ * g_templates_ready is set true by the loader thread only after it has
+ * finished writing under the lock, and is otherwise read/reset with
+ * plain atomics. Default sequentially-consistent atomic ordering here
+ * (same idiom already used for g_state elsewhere in this file) means a
+ * thread that observes g_templates_ready == true is guaranteed to see
+ * every write the loader made before setting it, without needing the
+ * mutex held for that check itself. */
+static pthread_mutex_t g_templates_lock = PTHREAD_MUTEX_INITIALIZER;
+static atomic_bool g_templates_ready = false;
+
 static void print_timestamp(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     CFDateFormatterRef fmt = CFDateFormatterCreate(NULL, CFLocaleCopyCurrent(),
@@ -990,6 +1012,16 @@ static int load_templates_for_episode(void) {
         return -1;
     }
 
+    /* Lock held from here through the password read below -- covers
+     * every write into g_enrolled_templates/g_enrolled_count/
+     * g_cached_password/g_cached_password_valid, but NOT the
+     * mount_template_volume()/unmount_template_volume() calls
+     * themselves, so on_screen_unlocked() (which takes the same lock
+     * only for its own brief zeroing) is never blocked on the
+     * multi-second disk+crypto mount/unmount round trip -- only ever
+     * on these fast in-memory writes. */
+    pthread_mutex_lock(&g_templates_lock);
+
     char fingers_dir[PATH_MAX];
     snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
 
@@ -1046,14 +1078,49 @@ static int load_templates_for_episode(void) {
         fprintf(stderr, "No stored password found (run vfs5011_store_password.sh first).\n");
     }
 
+    int enrolled_count = g_enrolled_count; /* snapshot before unlocking, for the check below */
+    pthread_mutex_unlock(&g_templates_lock);
+
     unmount_template_volume();
 
-    if (rc != 0 || g_enrolled_count == 0) {
+    if (rc != 0 || enrolled_count == 0) {
         fprintf(stderr, "No enrolled templates available -- polling will not start.\n");
+        pthread_mutex_lock(&g_templates_lock);
         g_enrolled_count = 0;
+        pthread_mutex_unlock(&g_templates_lock);
         return -1;
     }
     return 0;
+}
+
+/* Runs load_templates_for_episode() off the CFRunLoop thread so
+ * arm_polling_for_trigger() can enter STATE_POLLING and notify the
+ * user immediately, instead of the encrypted volume's mount/unmount
+ * sitting in the critical path before the sensor even lights up. Only
+ * responsibility beyond calling that function: flip g_templates_ready
+ * on success, or unwind back to STATE_IDLE (and tell the menu bar app
+ * this episode didn't pan out) on failure -- mirroring what
+ * arm_polling_for_trigger used to do inline when loading failed. */
+static void *load_templates_thread_main(void *arg) {
+    (void)arg;
+
+    if (load_templates_for_episode() == 0) {
+        atomic_store(&g_templates_ready, true);
+    } else {
+        /* Only actually meaningful if we're still mid-episode -- if the
+         * screen was already unlocked while this was loading,
+         * on_screen_unlocked() has already put us back in STATE_IDLE
+         * and there's nothing left to unwind. */
+        if (atomic_load(&g_state) == STATE_POLLING) {
+            print_timestamp();
+            printf("Staying IDLE (no templates available).\n");
+            atomic_store(&g_state, STATE_IDLE);
+            atomic_store(&g_trigger_source, TRIGGER_NONE);
+            if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+            vfs5011_notify_swipe_failed(); /* we already told them to swipe -- let the menu bar app walk that back */
+        }
+    }
+    return NULL;
 }
 
 /* Forward declaration -- defined further down alongside the padlock
@@ -1070,9 +1137,20 @@ static void on_screen_unlocked(void) {
     atomic_store(&g_state, STATE_IDLE);
     atomic_store(&g_trigger_source, TRIGGER_NONE);
     if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+
+    /* g_enrolled_templates/g_enrolled_count/g_cached_password/
+     * g_cached_password_valid can now also be mid-write on the loader
+     * thread -- someone can unlock (trackpad, mouse click) before the
+     * encrypted volume even finishes mounting. Same lock the loader
+     * thread holds while writing these, so this either runs cleanly
+     * before or after that write, never torn in the middle of it. */
+    pthread_mutex_lock(&g_templates_lock);
     g_enrolled_count = 0; /* don't keep templates resident in memory once idle */
     memset(g_cached_password, 0, sizeof(g_cached_password)); /* don't leave it sitting in memory either */
     g_cached_password_valid = 0;
+    pthread_mutex_unlock(&g_templates_lock);
+    atomic_store(&g_templates_ready, false); /* a stale "ready" must never leak into the next episode */
+
     print_timestamp();
     printf("Screen UNLOCKED -> entering IDLE state.\n");
 }
@@ -1094,26 +1172,39 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
         return;
     }
 
-    print_timestamp();
-    printf("%s detected -> loading templates for this episode...\n", label);
-
-    if (load_templates_for_episode() != 0) {
-        print_timestamp();
-        printf("Staying IDLE (no templates available).\n");
-        atomic_store(&g_state, STATE_IDLE);
-        if (secure_field) CFRelease(secure_field);
-        return;
-    }
-
     g_trigger_target_pid = target_pid;
     if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
     g_trigger_secure_field = secure_field; /* already retained by caller */
     atomic_store(&g_trigger_source, source);
 
-    print_timestamp();
-    printf("Templates loaded (%d). Entering POLLING state.\n", g_enrolled_count);
+    /* Enter POLLING and notify right away -- the sensor lights up and
+     * the user sees "swipe now" immediately, instead of the encrypted
+     * volume's mount/unmount sitting in the critical path first (that
+     * round trip alone was the 3-5 second delay users were seeing
+     * before the sensor even lit up). Templates load on their own
+     * thread in the background (load_templates_thread_main);
+     * polling_thread_main keeps the sensor warm and holds any captured
+     * swipe until g_templates_ready flips true before scoring it. */
+    atomic_store(&g_templates_ready, false);
     atomic_store(&g_state, STATE_POLLING);
+    print_timestamp();
+    printf("%s detected -> entering POLLING state, loading templates in background...\n", label);
     vfs5011_notify_swipe_requested();
+
+    pthread_t loader_thread;
+    if (pthread_create(&loader_thread, NULL, load_templates_thread_main, NULL) != 0) {
+        /* Couldn't even start the loader thread -- unwind exactly like
+         * the old inline failure path did, plus walk back the
+         * swipe_requested we already sent. */
+        print_timestamp();
+        printf("Could not start template loader thread -- staying IDLE.\n");
+        atomic_store(&g_state, STATE_IDLE);
+        atomic_store(&g_trigger_source, TRIGGER_NONE);
+        if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+        vfs5011_notify_swipe_failed();
+        return;
+    }
+    pthread_detach(loader_thread);
 }
 
 /* Process names that legitimately ask for the macOS LOGIN password via
@@ -1336,11 +1427,14 @@ static void notification_callback(CFNotificationCenterRef center,
 }
 
 /* Runs on its own thread so the main thread stays free to run
- * CFRunLoopRun() and receive lock/unlock notifications. Reads
- * g_enrolled_templates (populated once per episode by the
- * notification thread before flipping state to POLLING) -- benign
- * single-writer/single-reader pattern since the poller only ever
- * reads it while POLLING, and it's only rewritten while IDLE. */
+ * CFRunLoopRun() and receive lock/unlock notifications. Starts
+ * capturing/matching as soon as STATE_POLLING is set, which now
+ * happens immediately on trigger detection -- templates load
+ * concurrently on a separate loader thread (see
+ * load_templates_thread_main), so a captured swipe is held until
+ * g_templates_ready flips true, then g_enrolled_templates and the
+ * cached password are read under g_templates_lock (see the snapshot
+ * below) rather than assumed single-writer/single-reader. */
 static void *polling_thread_main(void *arg) {
     (void)arg;
     while (atomic_load(&g_running)) {
@@ -1357,9 +1451,39 @@ static void *polling_thread_main(void *arg) {
             continue;
         }
 
+        /* A real swipe just came in, but the loader thread might still
+         * be mid-mount on the encrypted volume. Rather than throw away
+         * a swipe the user just gave us, hold it and wait briefly for
+         * g_templates_ready. Bail instead of spinning forever if the
+         * episode ends underneath us -- screen unlocked, or the loader
+         * itself failed and on_screen_unlocked/load_templates_thread_main
+         * already put us back in STATE_IDLE. */
+        while (!atomic_load(&g_templates_ready) && atomic_load(&g_state) == STATE_POLLING) {
+            usleep(50000);
+        }
+        if (atomic_load(&g_state) != STATE_POLLING) {
+            continue;
+        }
+
+        /* Snapshot everything the loader thread wrote under its lock --
+         * cheap (a handful of small structs + one short string), and
+         * means the rest of this iteration (matching, then typing) runs
+         * against a consistent copy even if on_screen_unlocked clears
+         * the live globals out from under us moments later. */
+        struct xyt_struct enrolled_snapshot[MAX_STORED_TEMPLATES];
+        int enrolled_count_snapshot;
+        char password_snapshot[MAX_PASSWORD_LEN + 1];
+        int password_valid_snapshot;
+        pthread_mutex_lock(&g_templates_lock);
+        enrolled_count_snapshot = g_enrolled_count;
+        memcpy(enrolled_snapshot, g_enrolled_templates, sizeof(enrolled_snapshot));
+        password_valid_snapshot = g_cached_password_valid;
+        memcpy(password_snapshot, g_cached_password, sizeof(password_snapshot));
+        pthread_mutex_unlock(&g_templates_lock);
+
         int best_score = -1;
-        for (int i = 0; i < g_enrolled_count; i++) {
-            int score = vfs5011_match_score(&probe, &g_enrolled_templates[i]);
+        for (int i = 0; i < enrolled_count_snapshot; i++) {
+            int score = vfs5011_match_score(&probe, &enrolled_snapshot[i]);
             if (score > best_score) best_score = score;
         }
 
@@ -1413,8 +1537,8 @@ static void *polling_thread_main(void *arg) {
                 usleep(50000);
             }
 
-            if (ok_to_type && g_cached_password_valid) {
-                type_password_and_enter(g_cached_password);
+            if (ok_to_type && password_valid_snapshot) {
+                type_password_and_enter(password_snapshot);
                 print_timestamp();
                 printf("Typed.\n");
                 vfs5011_notify_swipe_success();
