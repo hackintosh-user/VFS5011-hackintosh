@@ -212,9 +212,10 @@ password automatically.
 
 | macOS Version | Result |
 |---|---|
-| Sequoia | Lock screen and padlock unlock confirmed working |
-| Tahoe | Lock screen and padlock unlock confirmed working (separate test volume) |
-| Sonoma| lock screen And padlock confirmed working on DV6-7080ee Sandy bridge.   | 
+| Sequoia| Lock screen and padlock unlock confirmed working |
+| Tahoe  | Lock screen and padlock unlock confirmed working (separate test volume) |
+| Sonoma | lock screen And padlock confirmed working on DV6-7080ee Sandy bridge.   |
+| Ventura| Remains to be TESTED.                                                   |
 
 Tested on an Intel Ivy Bridge Hackintosh laptop (HP Pavilion DV6/EliteBook
 class hardware) with the VFS5011 sensor at USB `138A:0018`.
