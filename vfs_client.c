@@ -1727,24 +1727,26 @@ static bool check_opencore_version_requirement(void) {
 }
 
 /* ------------------------------------------------------------------ *
- * VFS5011 presence check (startup warning, v1.0.5)
+ * VFS5011 presence check (startup gate, v1.0.5)
  * ------------------------------------------------------------------ *
  * Reuses probe_sensor_present() -- same non-claiming enumeration used
- * by the status line and by do_deploy()'s hard gate. This one is a
- * heads-up only, not a block: Settings/About/Quit are all still
- * useful with the sensor unplugged (e.g. checking Deploy status,
- * changing the auto-type password), so main() shouldn't refuse to
- * even start over it -- prints the VID:PID and tells the person to
- * check the hardware and quit, but doesn't force-exit itself. */
-static void check_sensor_presence_warning(void) {
-    if (probe_sensor_present()) return;
+ * by the status line and by do_deploy()'s hard gate. This one runs
+ * unconditionally at launch and now actually exits if the sensor
+ * isn't there: printed as a verbose loading line so it reads like
+ * part of the normal startup sequence rather than a silent hang. */
+static bool check_sensor_presence_gate(void) {
+    printf("Checking if Sensor is active / enabled...\n");
 
-    printf("\n");
-    printf("############################################################\n");
-    printf("  VFS5011 {0x%04X:0x%04X} was not found. Check if it's\n", VFS5011_VID, VFS5011_PID);
-    printf("  enabled or if you don't have it. Then quit this\n");
-    printf("  application.\n");
-    printf("############################################################\n\n");
+    if (!probe_sensor_present()) {
+        printf("Sensor not found. Launching Failed\n");
+        printf("VFS5011 {0x%04X:0x%04X} was not found. Check if it's\n", VFS5011_VID, VFS5011_PID);
+        printf("enabled or if you don't have it. Then quit this\n");
+        printf("application.\n");
+        return false;
+    }
+
+    printf("continuing...\n");
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -1776,7 +1778,9 @@ int main(int argc, char **argv) {
     }
 
     check_macos_version_warning();
-    check_sensor_presence_warning();
+    if (!check_sensor_presence_gate()) {
+        return 1;
+    }
 
     /* Mount the template volume once up front to find out what's
      * actually enrolled, so the status line below doesn't have to
