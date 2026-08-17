@@ -10,7 +10,7 @@
   lock screen unlock and System Settings authentication prompts, driven by
   a real fingerprint sensor instead of a password.
   
-  * Current version: v1.0.4 | August 16th 2026 
+  * Current version: v1.0.5 | August 18th 2026 
 </p>
 
 ---
