@@ -74,7 +74,7 @@
 #
 set -e
 
-BINARY_PATH="/Library/Application Support/VFSDaemon/vfs5011_daemon"
+BINARY_PATH="/usr/local/libexec/vfs5011/vfs5011_daemon"
 LABEL="com.hackintosh.vfs5011agent"
 LOG_PATH="/Library/Logs/vfs5011agent.log"
 SUDOERS_PATH="/etc/sudoers.d/vfs5011daemon"
@@ -88,6 +88,21 @@ OLD_AGENT_PLIST_SYSTEM="/Library/LaunchAgents/$LABEL.plist"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This needs root (writes to /etc/sudoers.d and /Library/Logs, bootstraps another user's session). Run with sudo." >&2
+    exit 1
+fi
+
+# v1.0.5: same hardware gate as vfs_client's Deploy option, duplicated
+# here because prep_and_build.sh and a bare `sudo ./vfs5011_agent_install.sh`
+# both call this script directly, bypassing vfs_client entirely. Uses
+# system_profiler rather than a libusb helper since this is a plain
+# shell script -- "Product ID: 0x0018" is always immediately followed
+# by its own "Vendor ID: 0x138a" line in SPUSBDataType's per-device
+# block, so pairing them with -A1 (rather than grepping each field
+# separately across the whole tree) avoids a false match against some
+# other 0x138a or 0x0018 device that isn't actually a VFS5011.
+if ! system_profiler SPUSBDataType 2>/dev/null | grep -A1 "Product ID: 0x0018" | grep -qi "Vendor ID: 0x138a"; then
+    echo "Error: No VFS5011 sensor detected on the USB bus (VID 0x138a / PID 0x0018 not found)." >&2
+    echo "Refusing to install a background service tied to hardware that isn't present." >&2
     exit 1
 fi
 
