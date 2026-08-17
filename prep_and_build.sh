@@ -7,8 +7,15 @@
 # never the runtime helper scripts like vfs5011_volume_mount.sh) by
 # chmod +x'ing EVERY .sh file in this folder, rebuilds both binaries
 # from source, and deploys the daemon (rebuild, copy to
-# /Library/Application Support/VFSDaemon/, re-sign, re-grant
-# Accessibility, reinstall the LaunchAgent).
+# /usr/local/libexec/vfs5011/, re-sign, re-grant Accessibility,
+# reinstall the LaunchAgent).
+#
+# As of v1.0.5, the deploy step (vfs5011_agent_install.sh, invoked
+# below) is the same one Deploy [3] in vfs_client calls, and it lives
+# at /usr/local/libexec/vfs5011/ instead of the old "/Library/
+# Application Support/VFSDaemon/" -- moved off a path with a space in
+# it, which was a recurring source of quoting bugs across the sudoers
+# rule, plist, and grant-accessibility scripts.
 #
 # After this runs, the daemon is live and up to date in the background --
 # the only thing left to do yourself is run the client whenever you want
