@@ -549,7 +549,7 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 #define GRANT_ACCESSIBILITY_SCRIPT_NAME "vfs5011_grant_accessibility.sh"
 #define AGENT_LABEL "com.hackintosh.vfs5011agent"
 #define VOLUME_NAME "VFSStore"
-#define DAEMON_INSTALL_PATH "/Library/Application Support/VFSDaemon/vfs5011_daemon"
+#define DAEMON_INSTALL_PATH "/usr/local/libexec/vfs5011/vfs5011_daemon"
 #define TCC_DB_PATH "/Library/Application Support/com.apple.TCC/TCC.db"
 
 /* ------------------------------------------------------------------ *
@@ -634,7 +634,7 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sValidity VFS5011 Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s                              %sv1.0.4%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
+    printf("         `\"Y8888P\"'%s                              %sv1.0.5%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
 }
 
 /* Clears the terminal and homes the cursor, then redraws the banner --
@@ -1510,6 +1510,23 @@ static void do_settings_menu(void) {
  * dump everything captured so far so the actual error is still
  * visible. */
 static void do_deploy(void) {
+    /* Hard gate, added in v1.0.5: refuse to install the daemon at all
+     * if there's no VFS5011 (138a:0018) on the USB bus. Deploy used to
+     * happily install/register the LaunchAgent on any machine
+     * regardless of hardware, which meant a fresh checkout run on the
+     * wrong laptop (or with the sensor unplugged) would leave a dead
+     * agent behind that could never do anything useful. This reuses
+     * the same non-claiming enumeration probe_sensor_present() already
+     * uses for the status line, so it's safe pre-root-check and won't
+     * fight a concurrent enroll/verify. */
+    if (!probe_sensor_present()) {
+        vfsc_err("No VFS5011 sensor detected (USB VID 0x%04X / PID 0x%04X not found).\n"
+                  "Refusing to deploy -- this installs a background service tied\n"
+                  "to that exact sensor, so it's not installed on hardware that\n"
+                  "doesn't have one.\n\n", VFS5011_VID, VFS5011_PID);
+        return;
+    }
+
     /* First-run convenience: Deploy needs the template volume to exist
      * (it stores the auto-type password there right below), so set it
      * up automatically rather than making the person discover Settings
@@ -1709,6 +1726,27 @@ static bool check_opencore_version_requirement(void) {
     return true;
 }
 
+/* ------------------------------------------------------------------ *
+ * VFS5011 presence check (startup warning, v1.0.5)
+ * ------------------------------------------------------------------ *
+ * Reuses probe_sensor_present() -- same non-claiming enumeration used
+ * by the status line and by do_deploy()'s hard gate. This one is a
+ * heads-up only, not a block: Settings/About/Quit are all still
+ * useful with the sensor unplugged (e.g. checking Deploy status,
+ * changing the auto-type password), so main() shouldn't refuse to
+ * even start over it -- prints the VID:PID and tells the person to
+ * check the hardware and quit, but doesn't force-exit itself. */
+static void check_sensor_presence_warning(void) {
+    if (probe_sensor_present()) return;
+
+    printf("\n");
+    printf("############################################################\n");
+    printf("  VFS5011 {0x%04X:0x%04X} was not found. Check if it's\n", VFS5011_VID, VFS5011_PID);
+    printf("  enabled or if you don't have it. Then quit this\n");
+    printf("  application.\n");
+    printf("############################################################\n\n");
+}
+
 int main(int argc, char **argv) {
     (void)argc;
 
@@ -1738,6 +1776,7 @@ int main(int argc, char **argv) {
     }
 
     check_macos_version_warning();
+    check_sensor_presence_warning();
 
     /* Mount the template volume once up front to find out what's
      * actually enrolled, so the status line below doesn't have to
