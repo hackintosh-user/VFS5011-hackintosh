@@ -4,7 +4,7 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 
 ---
 
-## v1.0.5 — August 17–18, 2026
+## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
 
 **Daemon/client version sync**
 - New `VFS5011_PROJECT_VERSION` macro in `vfs5011_proto.h` — single source of truth for the version string, shared by both `vfs_client.c` and `vfs5011_daemon.c` so they can never silently drift apart.
@@ -25,7 +25,7 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 
 ---
 
-## v1.0.4 — August 16, 2026
+## v1.0.4 — August 16th, 2026
 
 **macOS floor lowered to Ventura 13**
 - Whole stack (daemon, client, menu bar app) lowered from a Sequoia 15 floor to Ventura 13 (Darwin 22.0.0+), after confirming via source review that no actual Sequoia/Sonoma-only API is used anywhere.
@@ -45,7 +45,7 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 
 ---
 
-## v1.0.3 — August 15–16, 2026
+## v1.0.3 — August 15th, 2026
 
 **Instant swipe-prompt fix**
 - Diagnosed and fixed a 3–5 second delay between screen-lock and the sensor lighting up / "swipe now" prompt appearing.
@@ -61,20 +61,20 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 
 ---
 
-## v1.0.2 — August 13, 2026
+## v1.0.2 — August 13th, 2026
 
 - Confirmed (via empirical `ax_probe.c`-driven methodology) that Passwords.app and Keychain Access (`coreautha`) are valid auth surfaces for the existing post-login flow.
 - Added an OpenCore minimum-version NVRAM gate — warns (no hard block) if the detected OpenCore version is below 1.0.6.
 
 ---
 
-## v1.0.1
+## v1.0.1 - August 10th, 2026
 
 - Fixed the daemon to load templates from the `fingers/` directory, enabling proper multi-finger support (previously only read a single template location).
 
 ---
 
-## v1.0.0 — Initial release
+## v1.0.0 — Initial release | August 5th 2026
 
 - Built the full capture + matching pipeline from scratch: USB enumeration, the sensor's 77-step init handshake, swipe capture with offset-correlation alignment, and NBIS (`mindtct`/`bozorth3`) minutiae extraction and matching.
 - Enrollment: `ENROLL_SWIPES=5` with a self-consistency gate (`MIN_SELF_CONSISTENCY=15`); matching threshold `MATCH_THRESHOLD=20`.
