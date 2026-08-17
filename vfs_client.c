@@ -634,7 +634,7 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sValidity VFS5011 Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s                              %sv1.0.5%s\n", VFSC_RESET, VFSC_DIM, VFSC_RESET);
+    printf("         `\"Y8888P\"'%s                              %sv%s%s\n", VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, VFSC_RESET);
 }
 
 /* Clears the terminal and homes the cursor, then redraws the banner --
@@ -1749,6 +1749,68 @@ static bool check_sensor_presence_gate(void) {
     return true;
 }
 
+/* ------------------------------------------------------------------ *
+ * Daemon version check (startup gate, v1.0.5)
+ * ------------------------------------------------------------------ *
+ * The client and the installed daemon binary are two separately
+ * compiled artifacts that only stay in sync because prep_and_build.sh
+ * rebuilds/redeploys both together -- nothing stops someone from
+ * updating one and forgetting the other (e.g. `git pull` + rebuild
+ * just the client, or a Deploy that failed partway through). Running
+ * against a mismatched daemon is exactly the kind of thing that's
+ * hard to diagnose after the fact, so catch it here instead.
+ *
+ * Shells out to the installed daemon binary with --version, which
+ * (per vfs5011_daemon.c's early argv check) just prints the version
+ * and exits(0) immediately -- no root re-exec, no OpenCore gate, no
+ * actual daemon startup, so this is cheap and side-effect-free even
+ * though vfs_client itself is already running as root at this point. */
+static bool check_daemon_version_gate(void) {
+    printf("Checking Daemon version...\n");
+
+    if (access(DAEMON_INSTALL_PATH, F_OK) != 0) {
+        printf("No daemon installed yet -- skipping (run Deploy [3] first).\n");
+        return true;
+    }
+
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version", DAEMON_INSTALL_PATH);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_err("Failed to query installed daemon version: %s\n", strerror(errno));
+        return false;
+    }
+
+    char daemon_version[64] = {0};
+    bool got_line = (fgets(daemon_version, sizeof(daemon_version), fp) != NULL);
+    pclose(fp);
+
+    if (!got_line) {
+        printf("Could not read a version from the installed daemon. Stop launch\n");
+        return false;
+    }
+
+    size_t len = strlen(daemon_version);
+    while (len > 0 && (daemon_version[len-1] == '\n' || daemon_version[len-1] == '\r')) {
+        daemon_version[--len] = '\0';
+    }
+
+    if (strcmp(daemon_version, VFS5011_PROJECT_VERSION) != 0) {
+        printf("v%s detected... Stop launch\n", daemon_version);
+        printf("Installed daemon (v%s) doesn't match this client (v%s).\n",
+               daemon_version, VFS5011_PROJECT_VERSION);
+        printf("The client can't launch until they match. From outside\n");
+        printf("this client, run prep_and_build.sh (or sudo\n");
+        printf("./vfs5011_agent_install.sh) to rebuild and reinstall the\n");
+        printf("daemon at the matching version, then relaunch.\n");
+        return false;
+    }
+
+    printf("v%s detected continuing...\n", daemon_version);
+    return true;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
 
@@ -1779,6 +1841,9 @@ int main(int argc, char **argv) {
 
     check_macos_version_warning();
     if (!check_sensor_presence_gate()) {
+        return 1;
+    }
+    if (!check_daemon_version_gate()) {
         return 1;
     }
 
