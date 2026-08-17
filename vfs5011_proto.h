@@ -1,6 +1,12 @@
 #ifndef __VFS5011_PROTO_H
 #define __VFS5011_PROTO_H
 
+/* Single source of truth for the project version, included by both
+ * vfs_client.c and vfs5011_daemon.c so the two can never silently
+ * drift apart just because one binary got rebuilt/reinstalled and the
+ * other didn't. Bump this exactly once per release. */
+#define VFS5011_PROJECT_VERSION "1.0.5"
+
 #define VFS5011_LINE_SIZE 240
 #define VFS5011_IMAGE_WIDTH 160
 
