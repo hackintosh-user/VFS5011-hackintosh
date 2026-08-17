@@ -1751,7 +1751,17 @@ static bool check_opencore_version_requirement(void) {
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
+    /* v1.0.5: plain, unprivileged version query. Client's startup gate
+     * execs this (`vfs5011_daemon --version`) via popen and diffs the
+     * output against its own VFS5011_PROJECT_VERSION, so this has to
+     * print just the bare version and exit(0) before anything else --
+     * no root re-exec, no OpenCore gate, no daemon startup -- so the
+     * check itself never triggers a sudo prompt or a launchd conflict
+     * with an already-running instance. */
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        printf("%s\n", VFS5011_PROJECT_VERSION);
+        return 0;
+    }
 
     /* Force line-buffered stdout regardless of whether it's a tty.
      * Interactively, stdout is line-buffered automatically. But under
