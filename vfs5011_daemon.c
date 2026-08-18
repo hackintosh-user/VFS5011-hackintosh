@@ -4,7 +4,7 @@
  * Background authentication daemon: idles until the screen locks, polls
  * the sensor for a match while locked, and auto-types the stored
  * password on success. Shares the exact same capture/matcher/volume
- * code as vfs_client.c — this is the CLI's proven pipeline wired to a
+ * code as hack_touchid_client.c — this is the CLI's proven pipeline wired to a
  * lock/unlock trigger instead of a menu.
  *
  * This is a STANDALONE TEST HARNESS for the daemon logic — not yet a
