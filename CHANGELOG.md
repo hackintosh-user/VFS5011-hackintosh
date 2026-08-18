@@ -8,6 +8,7 @@ This list will change during development:
 
 - Rename: vfs_client.c -> hack_touchid.c
 - implementation of checking for supported sensor(s)
+- Update Project Version -> v1.1.0 across all major files.
 
   
 ## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
