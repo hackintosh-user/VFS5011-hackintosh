@@ -74,7 +74,7 @@
 #
 set -e
 
-BINARY_PATH="/usr/local/libexec/vfs5011/vfs5011_daemon"
+BINARY_PATH="/usr/local/libexec/hack-touchid/vfs5011_daemon"
 LABEL="com.hackintosh.vfs5011agent"
 LOG_PATH="/Library/Logs/vfs5011agent.log"
 SUDOERS_PATH="/etc/sudoers.d/vfs5011daemon"
@@ -91,9 +91,9 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# v1.0.5: same hardware gate as vfs_client's Deploy option, duplicated
+# v1.0.5: same hardware gate as hack-touchid client's Deploy option, duplicated
 # here because prep_and_build.sh and a bare `sudo ./vfs5011_agent_install.sh`
-# both call this script directly, bypassing vfs_client entirely. Uses
+# both call this script directly, bypassing hack-touchid client entirely. Uses
 # system_profiler rather than a libusb helper since this is a plain
 # shell script -- "Product ID: 0x0018" is always immediately followed
 # by its own "Vendor ID: 0x138a" line in SPUSBDataType's per-device
@@ -109,7 +109,7 @@ fi
 # Resolve this script's own directory so build_daemon.sh and the
 # source files can be found regardless of the caller's cwd -- both
 # a bare `sudo ./vfs5011_agent_install.sh` from the project folder
-# and vfs_client's Deploy option (which invokes this by absolute
+# and hack-touchid client's Deploy option (which invokes this by absolute
 # path from g_exec_dir) land here correctly.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_SCRIPT="$SCRIPT_DIR/build_daemon.sh"
@@ -140,7 +140,7 @@ chmod 755 "$BINARY_PATH"
 # The daemon resolves vfs5011_volume_mount.sh / _unmount.sh relative to
 # its OWN running directory (g_exec_dir, derived from argv[0]) -- not
 # the source project folder. That's invisible while testing via
-# vfs_client or the raw daemon binary run directly from this folder
+# hack-touchid client or the raw daemon binary run directly from this folder
 # (g_exec_dir just happens to BE this folder in that case), but once
 # deployed as a LaunchAgent pointed at $INSTALL_DIR, the daemon is
 # alone there with no mount/unmount scripts alongside it -- every lock
@@ -174,7 +174,7 @@ fi
 # this is whose gui/<uid> domain we need to bootstrap into, and whose
 # sudoers rule and ~/Library/LaunchAgents we need to write to.
 # $SUDO_USER is set when this script is invoked via sudo (including
-# from vfs_client's Deploy option, since vfs_client itself is already
+# from hack-touchid client's Deploy option, since hack-touchid client itself is already
 # running as root by that point) -- prefer it, fall back to the
 # console-owner lookup for a bare `sudo ./vfs5011_agent_install.sh`.
 if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
