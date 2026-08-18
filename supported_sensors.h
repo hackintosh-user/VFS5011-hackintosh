@@ -57,6 +57,23 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
         .install_script_name  = "upek_agent_install.sh",
         .backend_available    = 0,
     },
+    {
+        /* p0cketl1nt confirmed on a ThinkPad X1C6 (Aug 2026): enumerates
+         * cleanly on Sequoia 15.7.1 as a Vendor-Specific Device, Built-In:
+         * Yes, no macOS driver claiming it -- same unclaimed-but-visible
+         * floor VFS5011 had. Harder than VFS5011 or UPEK though: this is
+         * a Synaptics "Prometheus" chip (per uunicorn/python-validity),
+         * meaning it needs an ECDH handshake + session-cipher-wrapped
+         * commands, not a flat plaintext init script. See
+         * metallica_mis_daemon.c's header comment before touching this.
+         * install_script_name is a placeholder; nothing to install yet. */
+        .display_name        = "Synaptics Metallica MIS",
+        .vid                  = 0x06cb,
+        .pid                  = 0x009a,
+        .daemon_binary_name   = "metallica_mis_daemon",
+        .install_script_name  = "metallica_mis_agent_install.sh",
+        .backend_available    = 0,
+    },
 };
 
 #define HACK_TOUCHID_SENSOR_COUNT \
