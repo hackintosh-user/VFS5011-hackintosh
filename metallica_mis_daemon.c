@@ -1,7 +1,14 @@
 /*
  * metallica_mis_daemon.c
  *
- * SCAFFOLD ONLY -- not a working daemon yet.
+ * PARTIAL -- the plaintext bootstrap stage (send_init()) is
+ * implemented and ready to test against real hardware. Everything
+ * past that (firmware upload, calibration, capture) is blocked on
+ * metallica_mis_tls.c, which does not exist yet. This is NOT a
+ * working daemon -- it's a test harness for one stage of the
+ * handshake, same spirit as vfs5011_daemon.c's own "standalone test
+ * harness" caveat in its header before it got its real LaunchDaemon
+ * wiring.
  *
  * This follows vfs5011_daemon.c's structure per supported_sensors.h's
  * own instructions ("Build its capture backend as its own
@@ -138,25 +145,159 @@ static void close_device(void) {
 }
 
 /*
+ * bulk_transfer_with_pipe_retry() -- copied verbatim from
+ * vfs5011_daemon.c. This is pure libusb/macOS glue, not sensor
+ * protocol logic, so it's identical regardless of which sensor is
+ * on the other end of the pipe. If VFS5011's version of this ever
+ * changes (e.g. a new macOS quirk is discovered), port the change
+ * here too.
+ */
+static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpoint,
+                                          unsigned char *data, int size, int *transferred,
+                                          unsigned int timeout) {
+    int r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    if (r == LIBUSB_ERROR_PIPE) {
+        fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
+        libusb_clear_halt(handle, endpoint);
+        r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    }
+    return r;
+}
+
+/*
+ * cmd() -- the plaintext-stage equivalent of python-validity's
+ * Usb.cmd(): write `out` (out_len bytes) to the OUT endpoint, then
+ * read a reply into `in_buf` (up to in_buf_size bytes) from the
+ * control-reply IN endpoint. Returns the number of bytes actually
+ * received on success, or a negative libusb error code on failure.
+ *
+ * IMPORTANT: this is ONLY valid during the plaintext bootstrap
+ * stage. Once metallica_mis_tls.c exists and the ECDH handshake
+ * completes, all further commands must go through that module's
+ * encrypt/decrypt-wrapped cmd(), not this one. Do not call this
+ * function anywhere past send_init() succeeding.
+ */
+static int cmd(const unsigned char *out, int out_len,
+                unsigned char *in_buf, int in_buf_size) {
+    int transferred = 0;
+
+    if (out_len > 0) {
+        int r = bulk_transfer_with_pipe_retry(g_handle, METALLICA_MIS_OUT_ENDPOINT,
+                                               (unsigned char *)out, out_len, &transferred,
+                                               METALLICA_MIS_DEFAULT_WAIT_TIMEOUT);
+        if (r != 0 || transferred != out_len) {
+            fprintf(stderr, "metallica_mis: cmd() SEND failed: %s\n", libusb_error_name(r));
+            return (r != 0) ? r : LIBUSB_ERROR_IO;
+        }
+    }
+
+    transferred = 0;
+    int r = bulk_transfer_with_pipe_retry(g_handle, METALLICA_MIS_IN_ENDPOINT_CTRL,
+                                           in_buf, in_buf_size, &transferred,
+                                           METALLICA_MIS_DEFAULT_WAIT_TIMEOUT);
+    if (r != 0) {
+        fprintf(stderr, "metallica_mis: cmd() RECV failed: %s\n", libusb_error_name(r));
+        return r;
+    }
+
+    return transferred;
+}
+
+/*
+ * assert_status() -- python-validity's convention (see util.py's
+ * assert_status()) is that most command replies start with a 2-byte
+ * little-endian status word, 0x0000 meaning success. Mirrors that
+ * check. Returns 0 if status is OK, -1 otherwise (and logs the raw
+ * status bytes so a real failure is diagnosable rather than silent).
+ */
+static int assert_status(const unsigned char *reply, int reply_len) {
+    if (reply_len < 2) {
+        fprintf(stderr, "metallica_mis: reply too short to contain a status word (%d bytes)\n",
+                reply_len);
+        return -1;
+    }
+    unsigned short status = (unsigned short)reply[0] | ((unsigned short)reply[1] << 8);
+    if (status != 0x0000) {
+        fprintf(stderr, "metallica_mis: command failed, status=0x%04x\n", status);
+        return -1;
+    }
+    return 0;
+}
+
+/*
  * send_init() -- ONLY the plaintext bootstrap stage. This is as far
  * as this daemon can get without metallica_mis_tls.c existing.
- * Mirrors python-validity's Usb.send_init(): RomInfo -> cmd_19 ->
- * get_fw_info -> hardcoded init blob -> (if fwext not loaded) clean
- * slate blob. Returns 0 on success reaching end of plaintext stage,
- * negative on failure. Does NOT attempt firmware upload, calibration,
- * or capture -- those all require the session cipher to exist first.
+ * Mirrors python-validity's Usb.send_init():
+ *
+ *   1. RomInfo.get()          (metallica_mis_cmd_rominfo)
+ *   2. unknown init command   (metallica_mis_cmd_19)
+ *   3. get_fw_info()          (metallica_mis_cmd_fwinfo) -- reply's
+ *      first 2 bytes (after the status word) are inspected; a
+ *      nonzero "err" there means fwext isn't loaded yet
+ *   4. metallica_mis_init_hardcoded is always sent
+ *   5. IF step 3 indicated fwext isn't loaded, ALSO send
+ *      metallica_mis_init_hardcoded_clean_slate ("Clean slate" path
+ *      in python-validity's logging)
+ *
+ * Returns 0 on success reaching end of plaintext stage, negative on
+ * failure. Does NOT attempt firmware upload, calibration, or
+ * capture -- those all require the session cipher to exist first.
+ *
+ * NOT YET VERIFIED against real hardware. First real test: does step
+ * 1 even get a valid-looking reply back from a live 06cb:009a sensor.
  */
 static int send_init(void) {
-    /* TODO(metallica-mis): implement the actual cmd() write/read pair
-     * against METALLICA_MIS_OUT_ENDPOINT / METALLICA_MIS_IN_ENDPOINT_CTRL,
-     * same shape as vfs5011_daemon.c's run_sequence() but without a
-     * canned struct usb_action[] script since this stage is only ~4
-     * commands and the branch on get_fw_info()'s response (clean slate
-     * or not) doesn't fit a static SEND/RECV list cleanly.
-     *
-     * fprintf(stderr, "metallica_mis: send_init() not implemented\n");
-     */
-    return -1;
+    unsigned char reply[256];
+    int n;
+
+    /* Step 1: RomInfo.get() */
+    n = cmd(metallica_mis_cmd_rominfo, sizeof(metallica_mis_cmd_rominfo), reply, sizeof(reply));
+    if (n < 0) return -1;
+    if (assert_status(reply, n) != 0) {
+        fprintf(stderr, "metallica_mis: RomInfo.get() failed\n");
+        return -1;
+    }
+
+    /* Step 2: unknown plaintext init command. python-validity doesn't
+     * appear to check this reply's status the same way (TODO: confirm
+     * against a real trace once hardware is available) -- send it and
+     * move on rather than hard-failing if status looks odd here. */
+    n = cmd(metallica_mis_cmd_19, sizeof(metallica_mis_cmd_19), reply, sizeof(reply));
+    if (n < 0) return -1;
+
+    /* Step 3: get_fw_info() -- reply layout per python-validity's
+     * send_init(): 2-byte status word, then a 2-byte little-endian
+     * "err" field. err != 0 means fwext isn't loaded ("Clean slate"). */
+    n = cmd(metallica_mis_cmd_fwinfo, sizeof(metallica_mis_cmd_fwinfo), reply, sizeof(reply));
+    if (n < 0) return -1;
+    if (n < 4) {
+        fprintf(stderr, "metallica_mis: get_fw_info() reply too short (%d bytes)\n", n);
+        return -1;
+    }
+    unsigned short fw_err = (unsigned short)reply[2] | ((unsigned short)reply[3] << 8);
+
+    /* Step 4: always send the hardcoded init blob. */
+    n = cmd(metallica_mis_init_hardcoded, sizeof(metallica_mis_init_hardcoded), reply, sizeof(reply));
+    if (n < 0) return -1;
+    if (assert_status(reply, n) != 0) {
+        fprintf(stderr, "metallica_mis: init_hardcoded blob rejected\n");
+        return -1;
+    }
+
+    /* Step 5: only if fwext isn't loaded yet. */
+    if (fw_err != 0) {
+        fprintf(stderr, "metallica_mis: fwext not loaded, sending clean-slate blob\n");
+        n = cmd(metallica_mis_init_hardcoded_clean_slate,
+                sizeof(metallica_mis_init_hardcoded_clean_slate), reply, sizeof(reply));
+        if (n < 0) return -1;
+        if (assert_status(reply, n) != 0) {
+            fprintf(stderr, "metallica_mis: init_hardcoded_clean_slate blob rejected\n");
+            return -1;
+        }
+    }
+
+    fprintf(stderr, "metallica_mis: plaintext bootstrap stage completed OK\n");
+    return 0;
 }
 
 /*
@@ -174,10 +315,11 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 
 int main(int argc, char **argv) {
     fprintf(stderr,
-        "metallica_mis_daemon: scaffold only, not a working daemon.\n"
-        "Blocked on: firmware blob extraction (see metallica_mis_proto.h "
-        "TODOs) and the ECDH handshake / session cipher (metallica_mis_tls.c, "
-        "not yet written). See file header for what's safe to build next.\n");
+        "metallica_mis_daemon: plaintext bootstrap stage only, not a\n"
+        "working daemon yet. Blocked on the ECDH handshake / session\n"
+        "cipher (metallica_mis_tls.c, not yet written) -- see file\n"
+        "header for what's safe to build next. This run only tests\n"
+        "send_init() against real hardware.\n");
 
     if (open_device() != 0) {
         return 1;
@@ -185,10 +327,17 @@ int main(int argc, char **argv) {
 
     int rc = send_init();
     if (rc != 0) {
-        fprintf(stderr, "metallica_mis: plaintext bootstrap stage failed "
-                         "(expected -- send_init() is unimplemented)\n");
+        fprintf(stderr, "metallica_mis: plaintext bootstrap stage FAILED. "
+                         "This is the first real signal from hardware -- "
+                         "check the specific step that failed above.\n");
+        close_device();
+        return 1;
     }
 
+    fprintf(stderr, "metallica_mis: bootstrap OK. Stopping here -- "
+                     "firmware upload/calibration/capture all require "
+                     "metallica_mis_tls.c, which doesn't exist yet.\n");
+
     close_device();
-    return 1;
+    return 0;
 }
