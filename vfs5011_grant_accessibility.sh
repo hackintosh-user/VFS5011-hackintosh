@@ -35,7 +35,7 @@
 #        (defaults to the standard install path if omitted)
 set -e
 
-DAEMON_PATH="${1:-/usr/local/libexec/vfs5011/vfs5011_daemon}"
+DAEMON_PATH="${1:-/usr/local/libexec/hack-touchid/vfs5011_daemon}"
 TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
 
 if [ "$(id -u)" -ne 0 ]; then
