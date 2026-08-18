@@ -7,21 +7,29 @@
 # never the runtime helper scripts like vfs5011_volume_mount.sh) by
 # chmod +x'ing EVERY .sh file in this folder, rebuilds both binaries
 # from source, and deploys the daemon (rebuild, copy to
-# /usr/local/libexec/vfs5011/, re-sign, re-grant Accessibility,
+# /usr/local/libexec/hack-touchid/, re-sign, re-grant Accessibility,
 # reinstall the LaunchAgent).
 #
 # As of v1.0.5, the deploy step (vfs5011_agent_install.sh, invoked
-# below) is the same one Deploy [3] in vfs_client calls, and it lives
-# at /usr/local/libexec/vfs5011/ instead of the old "/Library/
+# below) is the same one Deploy [3] in the client calls, and it lives
+# at /usr/local/libexec/hack-touchid/ instead of the old "/Library/
 # Application Support/VFSDaemon/" -- moved off a path with a space in
 # it, which was a recurring source of quoting bugs across the sudoers
 # rule, plist, and grant-accessibility scripts.
+#
+# NOTE (v1.1, active-development): this script is still VFS5011-only --
+# it always runs vfs5011_agent_install.sh regardless of what's plugged
+# in. Once a second sensor (e.g. UPEK) has a real capture backend and
+# its own <sensor>_agent_install.sh, this needs the same
+# detect-then-dispatch logic the client itself now has (see
+# supported_sensors.h / hack_touchid_client.c) rather than hardcoding
+# one installer. Not urgent while VFS5011 is the only working backend.
 #
 # After this runs, the daemon is live and up to date in the background --
 # the only thing left to do yourself is run the client whenever you want
 # to enroll/manage fingers or change settings:
 #
-#   sudo ./vfs_client
+#   sudo ./hack-touchid
 #
 # Usage:
 #   ./prep_and_build.sh
@@ -42,7 +50,7 @@ ls -la ./*.sh
 echo
 echo "== Reclaiming ownership of build artifacts (in case a previous sudo build left them root-owned) =="
 CURRENT_USER="$(id -un)"
-for bin in vfs_client vfs5011_daemon; do
+for bin in hack-touchid vfs5011_daemon; do
     if [ -e "$bin" ] && [ "$(stat -f '%Su' "$bin")" != "$CURRENT_USER" ]; then
         echo "  $bin is owned by $(stat -f '%Su' "$bin") -- reclaiming as $CURRENT_USER (you may be prompted for your password)"
         sudo chown "$CURRENT_USER":staff "$bin"
@@ -61,4 +69,4 @@ sudo ./vfs5011_agent_install.sh
 echo
 echo "Done. Daemon is deployed and running in the background."
 echo "Run the client yourself whenever you need it:"
-echo "  sudo ./vfs_client"
+echo "  sudo ./hack-touchid"
