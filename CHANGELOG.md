@@ -3,7 +3,13 @@
 All notable changes to the VFS5011 Hackintosh fingerprint authentication project are documented here.
 
 ---
+## v1.1.0 - Current Development Target, August 18th, 2026
+This list will change during development:
 
+- Rename: vfs_client.c -> hack_touchid.c
+- implementation of checking for supported sensor(s)
+
+  
 ## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
 
 **Daemon/client version sync**
