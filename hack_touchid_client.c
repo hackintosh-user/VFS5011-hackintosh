@@ -46,6 +46,7 @@
 #include "vfs5011_proto.h"
 #include "vfs5011_matcher.h"
 #include "supported_sensors.h"
+#include "metallica_mis_firmware.h"
 
 #define VFS5011_VID 0x138a
 #define VFS5011_PID 0x0018
@@ -1089,6 +1090,25 @@ static void do_enroll(void) {
                   g_detected_sensor->display_name);
         return;
     }
+
+    /* Metallica MIS-specific: this sensor needs a proprietary
+     * firmware blob uploaded during first-run pairing before it can
+     * do anything. Other sensors (VFS5011, UPEK) don't have this
+     * requirement, so this check is scoped to this exact VID:PID
+     * rather than being a general precondition every sensor goes
+     * through. See metallica_mis_firmware.h for why this fetches
+     * from Lenovo directly rather than bundling the firmware. */
+    if (g_detected_sensor->vid == 0x06cb && g_detected_sensor->pid == 0x009a) {
+        if (!metallica_mis_firmware_is_present()) {
+            if (!metallica_mis_firmware_fetch()) {
+                vfsc_err("Couldn't obtain the sensor firmware. Enrollment can't "
+                          "continue until this is resolved.\n\n");
+                return;
+            }
+            printf("\n");
+        }
+    }
+
     if (g_finger_count < 0) refresh_finger_cache();
 
     printf("Enter a name for this finger (e.g. \"Right Index\"): ");
