@@ -1,0 +1,104 @@
+name: CI
+
+# Runs on every push and PR. Nothing here touches a real sensor --
+# GitHub's runners have no USB fingerprint reader attached, so this
+# checks everything that CAN be checked without hardware: does it
+# compile, does static analysis flag anything obvious, do the shell
+# scripts pass shellcheck, and do the matcher's pure-logic unit tests
+# (serialization + fingers/ directory scanning) still pass.
+#
+# What this deliberately does NOT cover (needs the real DV6):
+#   - libusb capture from the actual sensor
+#   - CFNotificationCenter IPC across the root/user boundary
+#   - Passwords.app / Keychain Access AX-prompt integration
+#   - the real lock-screen / login-window flow
+
+on:
+  push:
+    branches: [main, active-development]
+  pull_request:
+    branches: [main, active-development]
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: Shellcheck all scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: |
+          find . -name "*.sh" -not -path "./.git/*" -print0 \
+            | xargs -0 shellcheck --severity=warning
+
+  cppcheck:
+    name: Static analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Run cppcheck on daemon/client/matcher/ax_probe
+        # --force: check all #ifdef configurations, not just the default one
+        # --suppress=missingInclude: macOS SDK headers (ApplicationServices,
+        #   IOKit, etc.) don't exist on this Linux runner, and that's expected
+        run: |
+          cppcheck --force --enable=warning,performance,portability \
+            --suppress=missingInclude \
+            --error-exitcode=1 \
+            -I. -INBIS/include \
+            ax_probe.c vfs5011_daemon.c hack_touchid_client.c vfs5011_matcher.c \
+            vfs5011_menubar_ipc.c metallica_mis_daemon.c metallica_mis_firmware.c
+
+  build-daemon-and-client:
+    name: Build daemon + client (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libusb
+        run: brew install libusb
+      - name: Point compiler at Homebrew's libusb
+        # build_client.sh/build_daemon.sh hardcode -I/usr/local/include and
+        # -L/usr/local/lib, which is correct on Mohammad's Intel DV6 (where
+        # Homebrew installs to /usr/local) but NOT on GitHub's macos-latest
+        # runners, which are Apple Silicon and use /opt/homebrew instead.
+        # CPATH/LIBRARY_PATH are extra search paths clang checks in addition
+        # to any -I/-L flags, so this fixes CI without touching the scripts
+        # that are correct for real hardware.
+        run: |
+          echo "CPATH=$(brew --prefix libusb)/include/libusb-1.0" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix libusb)/lib" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          chmod +x ./*.sh
+          ./build.sh
+      - name: Verify binaries were produced
+        run: |
+          test -x ./hack-touchid
+          test -x ./vfs5011_daemon
+          echo "Both binaries built successfully."
+
+  matcher-unit-tests:
+    name: Matcher unit tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: |
+          chmod +x tests/run_tests.sh
+          ./tests/run_tests.sh
+
+  build-menubar-app:
+    name: Build menu bar app (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          chmod +x Vfs5011-menubar/build_menubar_app.sh
+          ./Vfs5011-menubar/build_menubar_app.sh
+      - name: Verify app bundle was produced
+        run: |
+          test -d "Vfs5011-menubar/build/VFS5011 Menu Bar.app"
+          test -x "Vfs5011-menubar/build/VFS5011 Menu Bar.app/Contents/MacOS/VFS5011MenuBar"
+          echo "Menu bar app built successfully."
