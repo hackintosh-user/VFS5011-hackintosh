@@ -127,6 +127,16 @@ typedef struct {
     size_t ecdh_blob_len;
 } metallica_mis_identity_t;
 
+/* metallica_mis_crt_hardcoded[] -- the hardcoded firmware CA cert
+ * blob (420 bytes), lifted verbatim from tls.py's crt_hardcoded
+ * module-level constant. Defined (non-static) in metallica_mis_tls.c;
+ * used both by make_tls_flash() there and by
+ * metallica_mis_partition_flash() in metallica_mis_init_flash.c
+ * (block id 3 of the cmd 0x4f pairing command) -- exposed here rather
+ * than kept file-static so both can share the one copy. */
+extern const unsigned char metallica_mis_crt_hardcoded[];
+extern const size_t metallica_mis_crt_hardcoded_len;
+
 /* metallica_mis_handle_cert() -- stores the raw cert blob the device
  * hands back, verbatim (matches Tls.handle_cert(); python-validity's
  * own comment: "TODO validate cert, check if pub keys match" -- not
@@ -212,11 +222,22 @@ int metallica_mis_tls_init(metallica_mis_tls_t *tls,
 int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identity_t *identity);
 
 /* metallica_mis_tls_cmd() -- sends `cmd` (cmd_len bytes) as an
- * application-layer command through the open session and returns the
- * decrypted, validated response. Requires secure_tx && secure_rx
- * (i.e. metallica_mis_tls_open() succeeded). Response written to
- * out_buf (caller-provided, out_buf_size capacity); returns number of
- * bytes written, or -1 on failure. Mirrors Tls.cmd()/Tls.app(). */
+ * application-layer command. Mirrors Tls.cmd()'s DUAL-MODE dispatch
+ * exactly: if secure_tx && secure_rx (i.e. metallica_mis_tls_open()
+ * already succeeded), wraps cmd in the encrypted/authenticated
+ * app-data layer and decrypts+validates the response. If NOT secure
+ * yet, falls straight through to a plain transport() call -- this is
+ * NOT an error path, it's the normal/expected mode during pairing:
+ * get_flash_info(), the partition_flash() cmd 0x4f, and the reset
+ * command all go through tls_cmd() in plaintext before the very
+ * first tls_open() has ever run, exactly like Tls.cmd() does in
+ * python. An earlier version of this function treated "not secure"
+ * as a hard failure, which would have made init_flash() and
+ * everything downstream of it impossible to build against this
+ * function at all -- caught while reading init_flash.py/flash.py
+ * closely enough to notice they call tls.cmd() before pairing.
+ * Response written to out_buf (caller-provided, out_buf_size
+ * capacity); returns number of bytes written, or -1 on failure. */
 /* metallica_mis_make_tls_flash() -- serializes the paired identity's
  * blocks (empty-0, priv, cert, hardcoded firmware CA cert, two empty
  * 0x100 blocks, ecdh) into the 0x1000-byte buffer written to the
