@@ -13,10 +13,14 @@
  * and init_flash() calls erase_flash()/write_flash() after pairing to
  * wipe and persist the new partitions.
  *
- * All commands here go through metallica_mis_tls_cmd() (the SECURE
- * session), matching python's tls.cmd() calls in flash.py -- these
- * are NOT plaintext-bootstrap commands, so this module cannot be used
- * before metallica_mis_tls_open() has succeeded.
+ * All commands here go through metallica_mis_tls_cmd(), which
+ * dual-mode dispatches: plaintext (falls through to the raw
+ * transport) if no secure session is up yet, or wrapped/encrypted if
+ * one is -- matching Tls.cmd() exactly. During init_flash()'s
+ * pairing flow (this module's main caller) NO secure session exists
+ * yet, so every call here runs in plaintext, same as python. This
+ * module works identically before or after pairing; it just calls
+ * metallica_mis_tls_cmd() and lets IT decide the mode.
  *
  * SCOPE: only get_flash_info(), erase_flash(), write_flash(),
  * call_cleanups() are built here -- exactly what partition_flash()/
@@ -79,8 +83,9 @@ typedef struct {
     size_t partition_count;
 } metallica_mis_flash_info_t;
 
-/* metallica_mis_get_flash_info() -- sends cmd 0x3e over the secure
- * TLS session, parses the JEDEC id / geometry / partition-table
+/* metallica_mis_get_flash_info() -- sends cmd 0x3e via
+ * metallica_mis_tls_cmd() (plaintext during pairing, encrypted
+ * afterward -- see file header), parses the JEDEC id / geometry / partition-table
  * response, and resolves the JEDEC id against the hardcoded table.
  * Port of flash.py's get_flash_info(). Returns 0 on success (info
  * populated, partitions malloc'd -- caller must call
@@ -131,5 +136,108 @@ int metallica_mis_erase_flash(metallica_mis_tls_t *tls, uint8_t partition);
  * on write failure or (if the write succeeded) cleanup failure. */
 int metallica_mis_write_flash(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
                                const unsigned char *buf, size_t buf_len);
+
+/* metallica_mis_reboot() -- sends cmd 0x05 0x02 0x00 via
+ * metallica_mis_tls_cmd(), the exact 3 bytes sensor.py's reboot()
+ * sends (`unhex('050200')`). Direct port -- this really is the
+ * entire command, nothing more to it. python raises a
+ * RebootException() immediately after to signal the caller that the
+ * device is about to disconnect/re-enumerate; this port doesn't have
+ * an exception mechanism, so it just returns 0 on success (status
+ * word OK) and the CALLER must treat that as "device is rebooting
+ * now" -- do not send anything else to tls/the transport after this
+ * returns 0, the device will not be there to receive it. Returns -1
+ * if the status word itself indicated failure or the transport
+ * failed outright (in which case the device likely did NOT reboot). */
+int metallica_mis_reboot(metallica_mis_tls_t *tls);
+
+/* ==================== pairing orchestration ==================== */
+/* Declared here (not in metallica_mis_init_flash.h) because both
+ * need metallica_mis_flash_info_t, which only this header defines --
+ * init_flash.h can't include this file back (this file already
+ * includes init_flash.h), so this is the one layer both sides can
+ * safely depend on. Implemented in metallica_mis_init_flash.c, which
+ * includes this header for exactly this reason. */
+
+/* metallica_mis_partition_flash() -- direct port of init_flash.py's
+ * partition_flash(). Sends cmd 0x4f (flash params + partition table
+ * + signature + a fresh self-signed cert over client_keypair's public
+ * point + the hardcoded firmware CA cert) via metallica_mis_tls_cmd()
+ * (plaintext at this point in pairing -- see metallica_mis_tls_cmd()
+ * doc comment), then hands the device's returned cert blob to
+ * metallica_mis_handle_cert(identity, ...) -- identity is passed
+ * directly (NOT read from tls->identity, which is const/read-only
+ * and typically not even set yet at this point in pairing; this
+ * function is one of the things that POPULATES identity, before
+ * tls_open() is ever called with it). layout/layout_count and
+ * signature/signature_len are the flash_layout_hardcoded[_0090] and
+ * partition_signature[_0090] tables from metallica_mis_init_flash.c,
+ * selected by metallica_mis_init_flash() based on VID:PID (matching
+ * python's `if usb_dev.idVendor == 0x138a and idProduct == 0x0090`
+ * check). Returns 0 on success, -1 on any protocol failure. NOTE:
+ * python leaves a `# TODO - figure out what the rest of rsp means`
+ * after crt_len bytes are consumed -- ported as a documented gap,
+ * not silently dropped: the remaining response bytes are currently
+ * discarded here too, matching python's own actual behavior (it
+ * never uses them either), not a shortcut this port is taking on its
+ * own. */
+int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t *identity,
+                                   const metallica_mis_flash_info_t *info,
+                                   const metallica_mis_partition_info_t *layout, size_t layout_count,
+                                   const unsigned char *signature, size_t signature_len,
+                                   const EC_KEY *client_keypair);
+
+/* metallica_mis_init_flash() -- direct port of init_flash.py's
+ * init_flash(), the top-level pairing orchestrator. Full sequence,
+ * matching python exactly (including the plaintext-vs-secure timing,
+ * which only works now that metallica_mis_tls_cmd() dual-mode
+ * dispatches -- see that function's doc comment):
+ *
+ *   1. get_flash_info() -- if partitions already exist, this device
+ *      is already paired: return 0 immediately, nothing else to do
+ *      (matches python's early return, NOT an error).
+ *   2. Otherwise: send reset_blob (06cb:009a variant, see
+ *      metallica_mis_blobs_9a.h) via metallica_mis_tls_cmd() in
+ *      plaintext.
+ *   3. Generate a fresh SECP256R1 keypair locally (the actual pairing
+ *      secret -- NOT read from the device).
+ *   4. Select flash_layout_hardcoded/partition_signature based on
+ *      usb_vid/usb_pid (0090 variant vs the default/009a variant --
+ *      NOTE: only the 009a variant's reset_blob/db_write_enable
+ *      blobs exist in this codebase; passing 0090 VID:PID here will
+ *      select the 0090 layout/signature tables correctly but
+ *      metallica_mis_write_enable()/erase_flash() will still send
+ *      the 009a blobs underneath, since metallica_mis_flash.c only
+ *      has 009a's -- NOT SAFE for real 0090 hardware yet, this
+ *      project has none to test against; 009a is the only variant
+ *      this function should be considered ready for).
+ *   5. metallica_mis_partition_flash() with the selected layout.
+ *   6. Read the device's ECDH pubkey via cmd 0x50, hand to
+ *      metallica_mis_handle_ecdh(). (python's RomInfo.get() call
+ *      here is skipped -- its own comment says the result isn't used
+ *      yet either, `# TODO: use the firmware version...`; skipping a
+ *      currently-inert call is not skipping real functionality.)
+ *   7. metallica_mis_handle_priv(encrypt_key(client_private,
+ *      client_public)) -- wraps and hands over our fresh keypair.
+ *   8. metallica_mis_tls_open() -- the actual first real handshake.
+ *   9. erase_flash() partitions 1,2,5,6,4 in that exact order
+ *      (matches python).
+ *  10. write_flash(1, 0, make_tls_flash()) -- persist the paired
+ *      identity to the cert partition.
+ *  11. Caller's responsibility, NOT done here: send the reboot
+ *      command afterward (python's reboot() at the very end) -- no
+ *      reboot primitive exists in this codebase yet, so this
+ *      function stops at step 10 and returns success; the caller
+ *      must reboot the device before anything else will work
+ *      correctly (matches how e.g. write_flash_all doesn't exist yet
+ *      either -- documented gap, not a silent omission).
+ *
+ * identity must be zero-initialized by the caller before this call
+ * (metallica_mis_handle_ecdh/_priv/_cert all populate it in place).
+ * Returns 0 on success (including the "already paired, nothing to
+ * do" case), -1 on any step's failure. */
+int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t *identity,
+                              const char *product_name, const char *serial_number,
+                              uint16_t usb_vid, uint16_t usb_pid);
 
 #endif /* __METALLICA_MIS_FLASH_H */
