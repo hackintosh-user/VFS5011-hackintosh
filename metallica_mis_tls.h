@@ -111,6 +111,20 @@ typedef struct {
      * Synaptics firmware pubkey) and reused by every subsequent
      * metallica_mis_tls_open() call's make_keys() step. */
     EC_KEY *device_ecdh_pub;
+
+    /* Raw wire blobs as received during pairing, kept verbatim
+     * (not just the parsed EC_KEY forms above) so that
+     * metallica_mis_make_tls_flash() can persist byte-identical
+     * copies to the cert flash partition -- matches python's
+     * self.priv_blob / self.ecdh_blob, which Tls.make_tls_flash()
+     * writes back out unchanged rather than re-serializing from the
+     * parsed key material. Populated by metallica_mis_handle_priv()
+     * and metallica_mis_handle_ecdh() respectively; both malloc'd,
+     * owned by this struct. */
+    unsigned char *priv_blob;
+    size_t priv_blob_len;
+    unsigned char *ecdh_blob;
+    size_t ecdh_blob_len;
 } metallica_mis_identity_t;
 
 /* metallica_mis_handle_cert() -- stores the raw cert blob the device
@@ -203,6 +217,42 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
  * (i.e. metallica_mis_tls_open() succeeded). Response written to
  * out_buf (caller-provided, out_buf_size capacity); returns number of
  * bytes written, or -1 on failure. Mirrors Tls.cmd()/Tls.app(). */
+/* metallica_mis_make_tls_flash() -- serializes the paired identity's
+ * blocks (empty-0, priv, cert, hardcoded firmware CA cert, two empty
+ * 0x100 blocks, ecdh) into the 0x1000-byte buffer written to the
+ * cert flash partition at the end of init_flash()'s pairing flow.
+ * Direct port of Tls.make_tls_flash() -- writes raw priv_blob/
+ * ecdh_blob verbatim (NOT re-derived from priv_key/device_ecdh_pub),
+ * matching python exactly. out must be exactly 0x1000 (4096) bytes.
+ * identity->priv_blob and identity->ecdh_blob must already be set
+ * (by metallica_mis_handle_priv()/metallica_mis_handle_ecdh() during
+ * this same pairing run) or this fails. Returns 0 on success, -1 if
+ * required blobs are missing or the content overflows 0x1000 bytes
+ * (shouldn't happen with real device data, but checked rather than
+ * silently truncated). */
+int metallica_mis_make_tls_flash(const metallica_mis_identity_t *identity,
+                                  unsigned char out[0x1000]);
+
+/* metallica_mis_parse_tls_flash() -- the inverse: reads a previously
+ * make_tls_flash()'d 0x1000-byte blob back off the sensor's cert
+ * partition (subsequent-connection path, NOT the fresh-pairing path)
+ * and repopulates identity's priv_key/tls_cert/device_ecdh_pub +
+ * blobs by dispatching each block through the SAME handle_priv()/
+ * handle_cert()/handle_ecdh() used during pairing -- exactly what
+ * python's parse_tls_flash() does (it calls self.handle_priv() etc.
+ * directly per block). NOTE: this reuses metallica_mis_handle_priv(),
+ * which needs the PSK pair -- caller must pass the same
+ * psk_encryption_key/psk_validation_key metallica_mis_set_hwkey()
+ * would derive for THIS host (loading a flash paired on a different
+ * host's hwkey will correctly fail the HMAC check inside
+ * handle_priv(), same as python). Stops at the first 0xffff sentinel
+ * block, per python. Returns 0 on success, -1 on any malformed block,
+ * hash mismatch, or a wrapped handle_*() failure. */
+int metallica_mis_parse_tls_flash(metallica_mis_identity_t *identity,
+                                   const unsigned char psk_encryption_key[METALLICA_MIS_TLS_KEYLEN],
+                                   const unsigned char psk_validation_key[METALLICA_MIS_TLS_KEYLEN],
+                                   const unsigned char *reply, size_t reply_len);
+
 int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, size_t cmd_len,
                            unsigned char *out_buf, size_t out_buf_size);
 
