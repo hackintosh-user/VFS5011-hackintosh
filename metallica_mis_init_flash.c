@@ -238,8 +238,16 @@ done:
  *                                       matches python's behavior
  *                                       exactly since l = 16 - (96%16) = 16)
  *   iv = random 16 bytes
- *   c = iv + AES-128-CBC(psk_encryption_key, iv).encrypt(m)
+ *   c = iv + AES-256-CBC(psk_encryption_key, iv).encrypt(m)
  *   sig = HMAC-SHA256(psk_validation_key, c)
+ *
+ * NOTE: psk_encryption_key is METALLICA_MIS_PRF_KEYLEN (32) bytes, so
+ * this MUST be AES-256-CBC, not AES-128-CBC -- a 32-byte key handed to
+ * EVP_aes_128_cbc() is a real bug (either an OpenSSL error or a silent
+ * truncation to the first 16 bytes depending on version/build), not a
+ * cosmetic mismatch. Confirmed against tls.py's set_hwkey(), which
+ * derives psk_encryption_key via the same 32-byte PRF as everything
+ * else in this file.
  *   return b'\x02' + c + sig
  */
 int metallica_mis_encrypt_key(const EC_KEY *client_keypair,
@@ -270,7 +278,7 @@ int metallica_mis_encrypt_key(const EC_KEY *client_keypair,
     if (!ctx) return -1;
     EVP_CIPHER_CTX_set_padding(ctx, 0); /* we already padded manually, matching python */
 
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, psk_encryption_key, iv) != 1) goto cleanup;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, psk_encryption_key, iv) != 1) goto cleanup;
     if (EVP_EncryptUpdate(ctx, ciphertext, &clen, m, sizeof(m)) != 1) goto cleanup;
     if (EVP_EncryptFinal_ex(ctx, ciphertext + clen, &clen2) != 1) goto cleanup;
     clen += clen2;
