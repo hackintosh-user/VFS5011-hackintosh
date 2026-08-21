@@ -41,7 +41,7 @@
  *   - metallica_mis_set_hwkey()    -- derives psk_encryption_key /
  *                                      psk_validation_key from host
  *                                      product name + serial
- *   - metallica_mis_encrypt_key()  -- AES-128-CBC + HMAC-SHA256 wrap
+ *   - metallica_mis_encrypt_key()  -- AES-256-CBC + HMAC-SHA256 wrap
  *                                      of the client's EC keypair,
  *                                      ported from init_flash.py's
  *                                      encrypt_key()
@@ -111,7 +111,7 @@ void metallica_mis_set_hwkey(const char *product_name, const char *serial_number
  * OpenSSL failure. */
 EC_KEY *metallica_mis_generate_client_keypair(void);
 
-/* metallica_mis_encrypt_key() -- AES-128-CBC (random IV) + HMAC-SHA256
+/* metallica_mis_encrypt_key() -- AES-256-CBC (random IV) + HMAC-SHA256
  * wrap of the client's private scalar + public point (x||y||d, PKCS7
  * padded), keyed by the PSK pair from metallica_mis_set_hwkey().
  * Matches init_flash.py's encrypt_key() output layout exactly:
