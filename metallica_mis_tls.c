@@ -103,7 +103,7 @@ static int make_ext(bb_t *out, uint16_t id, const unsigned char *body, size_t bo
 
 /* ==================== hardcoded constants ==================== */
 
-static const unsigned char metallica_mis_crt_hardcoded[] = { /* 420 B */
+const unsigned char metallica_mis_crt_hardcoded[] = { /* 420 B */
     0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00, 0xfc, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -161,6 +161,7 @@ static const unsigned char metallica_mis_crt_hardcoded[] = { /* 420 B */
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00,
 };
+const size_t metallica_mis_crt_hardcoded_len = sizeof(metallica_mis_crt_hardcoded);
 
 /* Hardcoded firmware pubkey -- corresponding privkey should only be
  * known to a genuine Synaptics device. This is what stops a rogue
@@ -1117,13 +1118,25 @@ done:
 
 int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, size_t cmd_len,
                            unsigned char *out_buf, size_t out_buf_size) {
+    /* Mirrors Tls.cmd(): if the secure session isn't up yet, this is
+     * just a plain USB command -- NOT an error. This is the path
+     * get_flash_info()/partition_flash()/the reset command all take
+     * during pairing, before the first tls_open() has ever
+     * succeeded. Earlier version of this function treated the
+     * not-secure case as a hard failure ("this port only supports
+     * the secure path"), which would have made init_flash() and
+     * everything downstream of it impossible to build -- caught
+     * while reading init_flash.py/flash.py closely enough to notice
+     * they call tls.cmd() before any pairing has happened at all. */
+    if (!(tls->secure_rx && tls->secure_tx)) {
+        return tls->transport(tls->transport_ctx, cmd, cmd_len, out_buf, out_buf_size);
+    }
+
     unsigned char in_buf[8192];
     int in_len;
     bb_t frame; bb_init(&frame);
     bb_t app_out; bb_init(&app_out);
     int rc = -1;
-
-    if (!(tls->secure_rx && tls->secure_tx)) goto done; /* mirrors Tls.cmd()'s branch -- this port only supports the secure path */
 
     if (make_app_data(tls, cmd, cmd_len, &frame) != 0) goto done;
 
