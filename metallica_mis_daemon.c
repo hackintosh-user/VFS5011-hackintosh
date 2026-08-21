@@ -72,9 +72,13 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <libusb.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
 
 #include "metallica_mis_proto.h"
-/* #include "metallica_mis_tls.h"      -- not built yet */
+#include "metallica_mis_tls.h"
+#include "metallica_mis_flash.h"
+#include "metallica_mis_blobs_9a.h"
 /* #include "vfs5011_matcher.h"        -- reused unmodified once capture works */
 /* #include "vfs5011_menubar_ipc.h"    -- reused unmodified once capture works */
 
@@ -246,6 +250,155 @@ static int assert_status(const unsigned char *reply, int reply_len) {
  * NOT YET VERIFIED against real hardware. First real test: does step
  * 1 even get a valid-looking reply back from a live 06cb:009a sensor.
  */
+/*
+ * get_host_identity() -- fetches the two values metallica_mis_tls_init()
+ * needs for PSK derivation (see set_hwkey() in metallica_mis_init_flash.c),
+ * which on Linux python-validity reads from /sys/class/dmi/id/
+ * product_name and product_serial. There's no DMI on macOS -- the
+ * equivalent host-identity source is IOPlatformExpertDevice's "model"
+ * and "IOPlatformSerialNumber" properties (the same values macOS
+ * itself uses to identify the machine, and on a Hackintosh, exactly
+ * what OpenCore's SMBIOS spoofing injects -- so pairing is tied to
+ * the SPOOFED model+serial, same as any other macOS-facing identity
+ * check on this machine, not the real physical hardware's identity).
+ * NOT YET TESTED against real hardware -- this is new code written
+ * this session, unlike open_device()/cmd() which were carried over
+ * from the already-tested plaintext bootstrap stage. First real test
+ * of this function is whatever session actually runs do_pairing()
+ * against a live device.
+ *
+ * out_product/out_serial are caller-provided buffers of the given
+ * capacity; both are null-terminated on success. Returns 0 on
+ * success, -1 if either IOKit lookup fails.
+ */
+static int get_host_identity(char *out_product, size_t product_cap,
+                              char *out_serial, size_t serial_cap) {
+    int rc = -1;
+    io_service_t platform_expert = IOServiceGetMatchingService(
+        kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
+    if (platform_expert == IO_OBJECT_NULL) {
+        fprintf(stderr, "metallica_mis: get_host_identity(): IOPlatformExpertDevice not found\n");
+        return -1;
+    }
+
+    CFTypeRef model_ref = IORegistryEntryCreateCFProperty(
+        platform_expert, CFSTR("model"), kCFAllocatorDefault, 0);
+    CFTypeRef serial_ref = IORegistryEntryCreateCFProperty(
+        platform_expert, CFSTR(kIOPlatformSerialNumberKey), kCFAllocatorDefault, 0);
+
+    /* "model" comes back as CFDataRef (raw bytes, null-terminated C
+     * string content) rather than CFStringRef -- this is a real
+     * IOKit quirk, not a bug; CFStringGetCString() would fail on it. */
+    if (model_ref && CFGetTypeID(model_ref) == CFDataGetTypeID()) {
+        CFDataRef data = (CFDataRef)model_ref;
+        CFIndex len = CFDataGetLength(data);
+        if ((size_t)len < product_cap) {
+            memcpy(out_product, CFDataGetBytePtr(data), (size_t)len);
+            out_product[len] = '\0';
+        } else {
+            fprintf(stderr, "metallica_mis: get_host_identity(): product_name buffer too small\n");
+            goto done;
+        }
+    } else {
+        fprintf(stderr, "metallica_mis: get_host_identity(): couldn't read \"model\" property\n");
+        goto done;
+    }
+
+    if (serial_ref && CFGetTypeID(serial_ref) == CFStringGetTypeID()) {
+        if (!CFStringGetCString((CFStringRef)serial_ref, out_serial, (CFIndex)serial_cap,
+                                 kCFStringEncodingUTF8)) {
+            fprintf(stderr, "metallica_mis: get_host_identity(): CFStringGetCString() failed for serial\n");
+            goto done;
+        }
+    } else {
+        fprintf(stderr, "metallica_mis: get_host_identity(): couldn't read IOPlatformSerialNumber\n");
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+    if (model_ref) CFRelease(model_ref);
+    if (serial_ref) CFRelease(serial_ref);
+    IOObjectRelease(platform_expert);
+    return rc;
+}
+
+/*
+ * mis_transport() -- adapts the existing cmd() (int-typed lengths, no
+ * ctx param) to metallica_mis_tls_transport_fn's exact signature
+ * (size_t-typed lengths, void *ctx first). ctx is unused -- this
+ * daemon only ever talks to one device via the g_handle global, same
+ * as cmd() itself already assumes. Thin wrapper, no new logic.
+ */
+static int mis_transport(void *ctx, const unsigned char *out, size_t out_len,
+                          unsigned char *in_buf, size_t in_buf_size) {
+    (void)ctx;
+    return cmd(out, (int)out_len, in_buf, (int)in_buf_size);
+}
+
+/*
+ * do_pairing() -- the actual wiring this session was for: calls
+ * metallica_mis_init_flash() (built + link/dry-run verified last
+ * session, but never called from anywhere until now) using this
+ * daemon's own cmd()-based transport. Only meaningful to call AFTER
+ * send_init() has succeeded (same plaintext-bootstrap precondition
+ * init_flash.py itself assumes via open_common()'s ordering).
+ *
+ * NOT YET TESTED against real hardware -- this is the very first
+ * thing in this whole project that would attempt a REAL WRITE to the
+ * sensor's flash (partition table, cert material). Read the header
+ * comment on metallica_mis_init_flash() in metallica_mis_flash.h
+ * before running this against real hardware: if it partially
+ * succeeds and fails partway through, the sensor's flash state is
+ * left in whatever partial state the last completed step left it in
+ * -- there is no rollback/transaction semantics here, matching
+ * python's own lack of any either.
+ *
+ * Returns 0 on success (including "already paired, nothing to do"),
+ * -1 on any failure. On success, the device sends itself a real
+ * reboot command as the last step -- see the loud warning in main()
+ * about what NOT to do immediately after this returns.
+ */
+static int do_pairing(void) {
+    char product_name[256];
+    char serial_number[256];
+    metallica_mis_tls_t tls;
+    metallica_mis_identity_t identity;
+
+    if (get_host_identity(product_name, sizeof(product_name),
+                           serial_number, sizeof(serial_number)) != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing(): failed to get host identity, aborting\n");
+        return -1;
+    }
+    fprintf(stderr, "metallica_mis: host identity: product=\"%s\" serial=\"%s\"\n",
+            product_name, serial_number);
+
+    if (metallica_mis_tls_init(&tls, mis_transport, NULL, product_name, serial_number) != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing(): metallica_mis_tls_init() failed\n");
+        return -1;
+    }
+
+    memset(&identity, 0, sizeof(identity));
+
+    if (metallica_mis_init_flash(&tls, &identity, product_name, serial_number,
+                                  METALLICA_MIS_VID, METALLICA_MIS_PID) != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing(): init_flash() FAILED\n");
+        return -1;
+    }
+
+    fprintf(stderr, "metallica_mis: init_flash() succeeded. Sending reboot command...\n");
+    if (metallica_mis_reboot(&tls) != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing(): reboot command failed (pairing itself "
+                         "may still have succeeded -- flash was already written before this "
+                         "point; only the reboot command itself failed to send/ack)\n");
+        return -1;
+    }
+
+    fprintf(stderr, "metallica_mis: reboot command sent. Device should be re-enumerating now.\n");
+    return 0;
+}
+
 static int send_init(void) {
     unsigned char reply[256];
     int n;
@@ -314,12 +467,15 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 */
 
 int main(int argc, char **argv) {
+    bool do_pair = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--pair") == 0) do_pair = true;
+    }
+
     fprintf(stderr,
-        "metallica_mis_daemon: plaintext bootstrap stage only, not a\n"
-        "working daemon yet. Blocked on the ECDH handshake / session\n"
-        "cipher (metallica_mis_tls.c, not yet written) -- see file\n"
-        "header for what's safe to build next. This run only tests\n"
-        "send_init() against real hardware.\n");
+        "metallica_mis_daemon: plaintext bootstrap + pairing stage.\n"
+        "Firmware upload/calibration/capture still require work beyond\n"
+        "this. See file header for status.\n");
 
     if (open_device() != 0) {
         return 1;
@@ -334,9 +490,39 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stderr, "metallica_mis: bootstrap OK. Stopping here -- "
-                     "firmware upload/calibration/capture all require "
-                     "metallica_mis_tls.c, which doesn't exist yet.\n");
+    fprintf(stderr, "metallica_mis: bootstrap OK.\n");
+
+    if (!do_pair) {
+        fprintf(stderr,
+            "metallica_mis: stopping here (pass --pair to attempt real\n"
+            "pairing). Pairing writes the partition table + cert material\n"
+            "to the sensor's flash and ends with a real reboot command --\n"
+            "this is NOT reversible by just re-running the daemon, and has\n"
+            "not been tested against real hardware yet. Don't pass --pair\n"
+            "casually; understand what it does first (see do_pairing()'s\n"
+            "doc comment above).\n");
+        close_device();
+        return 0;
+    }
+
+    fprintf(stderr, "metallica_mis: --pair given, attempting real pairing now...\n");
+    rc = do_pairing();
+    if (rc != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing() FAILED. Sensor flash state is "
+                         "whatever the last completed step left it in -- there is no "
+                         "rollback. Do not assume the device is in a clean/unpaired "
+                         "state before trying again; get_flash_info() on the next run "
+                         "will report the truth.\n");
+        close_device();
+        return 1;
+    }
+
+    fprintf(stderr, "metallica_mis: pairing succeeded, device is rebooting. "
+                     "Not sending any further application-protocol commands to "
+                     "it -- close_device() below is just local libusb cleanup "
+                     "(clear_halt/release/close), which is safe to call even on "
+                     "a handle whose device just disconnected; it's not another "
+                     "command to the sensor itself.\n");
 
     close_device();
     return 0;
