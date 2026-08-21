@@ -235,3 +235,11 @@ int metallica_mis_write_flash(metallica_mis_tls_t *tls, uint8_t partition, uint3
     if (!cleanup_ok) return -1;
     return 0;
 }
+
+int metallica_mis_reboot(metallica_mis_tls_t *tls) {
+    unsigned char cmd[3] = { 0x05, 0x02, 0x00 };
+    unsigned char rsp[64];
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0) return -1;
+    return assert_status(rsp, n);
+}
