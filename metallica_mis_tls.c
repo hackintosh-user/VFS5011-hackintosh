@@ -182,16 +182,11 @@ static const unsigned char metallica_mis_fwpub_y[32] = {
  * tls.py's handle_ecdh():
  *   0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3
  *   0xa85538f8b6bec50d6eef8bd5f4d07a886243c58b2393948df761a84721a6ca94
- * Both are 33 bytes (66 hex chars) as written in python, one byte
- * over a P-256 coordinate's usual 32 -- Python bigints don't care
- * about width, so this is almost certainly just python's hex literal
- * carrying a leading zero nibble pair that doesn't affect the value.
- * FLAGGED, NOT SILENTLY TRUNCATED: TODO verify by recomputing
- * 0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3
- * 's exact byte length before trusting the 32-byte arrays above --
- * if it's genuinely 33 bytes the top byte must be included or
- * fwpub.verify() will fail against every real device. Do not skip
- * this check before hardware testing.
+ * VERIFIED (recomputed programmatically): each hex literal is exactly
+ * 64 hex characters = 32 bytes, matching a normal P-256 coordinate
+ * width -- the earlier "33 bytes" concern was a manual miscount, not
+ * a real discrepancy. The 32-byte arrays above are correct as-is; no
+ * top byte is missing. Safe to trust ahead of hardware testing.
  */
 
 /* ==================== small crypto helpers ==================== */
@@ -670,7 +665,7 @@ static int handle_server_hello(metallica_mis_tls_t *tls, const unsigned char *p,
     if (suite != 0xc005) return -1; /* "Server accepted unsupported cipher suite" */
 
     if (p_len < 1 || p[0] != 0) return -1; /* server tried to enable compression -- unsupported */
-    p += 1; p_len -= 1;
+    p_len -= 1; /* p itself isn't read again in this function -- only advance p_len is significant here (cppcheck: uselessAssignmentPtrArg on the p += 1 this replaced) */
 
     if (p_len != 0) return -1; /* "Not expecting any more data" */
     return 0;
@@ -684,7 +679,7 @@ static int handle_cert_req(const unsigned char *p, size_t p_len) {
 
     if (p_len < 2) return -1;
     uint16_t l = (uint16_t)((p[0] << 8) | p[1]);
-    p += 2; p_len -= 2;
+    p_len -= 2; /* p itself isn't read again in this function -- see matching note in handle_server_hello() */
     if (l != 0) return -1; /* "non-empty list of CAs" unsupported */
 
     return p_len == 0 ? 0 : -1;
@@ -907,11 +902,26 @@ int metallica_mis_handle_ecdh(metallica_mis_identity_t *identity,
         goto done; /* "InvalidSignature" -- rogue/unrecognized device */
     }
 
-    free(identity->tls_cert); /* not touched here, but keep device_ecdh_pub swap atomic-ish */
-    identity->tls_cert = identity->tls_cert; /* no-op, cert is untouched by this call */
+    /* tls_cert is NOT touched by this call (only device_ecdh_pub is
+     * set here) -- the earlier free(identity->tls_cert) + self-reassign
+     * here was a real use-after-free bug: it freed the cert buffer on
+     * every handle_ecdh() call and left identity->tls_cert dangling,
+     * with no indication anything was wrong until something later
+     * read or double-freed it. Removed entirely; nothing to do here. */
     if (identity->device_ecdh_pub) EC_KEY_free(identity->device_ecdh_pub);
     identity->device_ecdh_pub = pub;
     pub = NULL; /* ownership transferred */
+
+    {
+        /* stash the raw blob verbatim for make_tls_flash() later --
+         * matches python's self.ecdh_blob = body */
+        unsigned char *copy = malloc(body_len);
+        if (!copy) goto done;
+        memcpy(copy, body, body_len);
+        free(identity->ecdh_blob);
+        identity->ecdh_blob = copy;
+        identity->ecdh_blob_len = body_len;
+    }
     rc = 0;
 
 done:
@@ -990,6 +1000,17 @@ int metallica_mis_handle_priv(metallica_mis_identity_t *identity,
     if (identity->priv_key) EC_KEY_free(identity->priv_key);
     identity->priv_key = priv;
     priv = NULL;
+
+    {
+        /* stash the raw blob verbatim for make_tls_flash() later --
+         * matches python's self.priv_blob = body */
+        unsigned char *copy = malloc(body_len);
+        if (!copy) goto done;
+        memcpy(copy, body, body_len);
+        free(identity->priv_blob);
+        identity->priv_blob = copy;
+        identity->priv_blob_len = body_len;
+    }
     rc = 0;
 
 done:
@@ -1124,4 +1145,111 @@ done:
 void metallica_mis_tls_free(metallica_mis_tls_t *tls) {
     if (tls->session_key) { EC_KEY_free(tls->session_key); tls->session_key = NULL; }
     /* tls->identity->device_ecdh_pub is owned by the identity struct, not the session -- not freed here */
+}
+
+/* ==================== cert flash persistence ==================== */
+
+/* make_tls_flash_block() -- hdr(id u16le, len u16le) + sha256(body)
+ * + body. Direct port of Tls.make_tls_flash_block(). */
+static int make_tls_flash_block(bb_t *out, uint16_t id, const unsigned char *body, size_t body_len) {
+    unsigned char hdr[4];
+    unsigned char digest[32];
+    hdr[0] = (unsigned char)(id & 0xff);
+    hdr[1] = (unsigned char)((id >> 8) & 0xff);
+    hdr[2] = (unsigned char)(body_len & 0xff);
+    hdr[3] = (unsigned char)((body_len >> 8) & 0xff);
+    SHA256(body, body_len, digest);
+    if (bb_append(out, hdr, sizeof(hdr)) != 0) return -1;
+    if (bb_append(out, digest, sizeof(digest)) != 0) return -1;
+    if (bb_append(out, body, body_len) != 0) return -1;
+    return 0;
+}
+
+int metallica_mis_make_tls_flash(const metallica_mis_identity_t *identity,
+                                  unsigned char out[0x1000]) {
+    static const unsigned char zero_byte = 0;
+    unsigned char zeros_0x100[0x100];
+    bb_t b; bb_init(&b);
+    int rc = -1;
+
+    if (!identity->priv_blob || !identity->tls_cert || !identity->ecdh_blob) goto done; /* required blocks not populated yet */
+
+    memset(zeros_0x100, 0, sizeof(zeros_0x100));
+
+    if (make_tls_flash_block(&b, 0, &zero_byte, 1) != 0) goto done;
+    if (make_tls_flash_block(&b, 4, identity->priv_blob, identity->priv_blob_len) != 0) goto done;
+    if (make_tls_flash_block(&b, 3, identity->tls_cert, identity->tls_cert_len) != 0) goto done;
+    if (make_tls_flash_block(&b, 5, metallica_mis_crt_hardcoded, sizeof(metallica_mis_crt_hardcoded)) != 0) goto done;
+    if (make_tls_flash_block(&b, 1, zeros_0x100, sizeof(zeros_0x100)) != 0) goto done;
+    if (make_tls_flash_block(&b, 2, zeros_0x100, sizeof(zeros_0x100)) != 0) goto done;
+    if (make_tls_flash_block(&b, 6, identity->ecdh_blob, identity->ecdh_blob_len) != 0) goto done;
+
+    if (b.len > 0x1000) goto done; /* content overflowed the partition -- shouldn't happen, but don't silently truncate */
+
+    memcpy(out, b.data, b.len);
+    memset(out + b.len, 0xff, 0x1000 - b.len);
+    rc = 0;
+
+done:
+    bb_free(&b);
+    return rc;
+}
+
+/* handle_empty() -- verifies a block is all-zero, per python's
+ * Tls.handle_empty() (used for the two reserved 0x100 blocks). */
+static int handle_empty(const unsigned char *body, size_t body_len) {
+    for (size_t i = 0; i < body_len; i++) {
+        if (body[i] != 0) return -1; /* "Expected empty block" */
+    }
+    return 0;
+}
+
+int metallica_mis_parse_tls_flash(metallica_mis_identity_t *identity,
+                                   const unsigned char psk_encryption_key[METALLICA_MIS_TLS_KEYLEN],
+                                   const unsigned char psk_validation_key[METALLICA_MIS_TLS_KEYLEN],
+                                   const unsigned char *reply, size_t reply_len) {
+    size_t off = 0;
+
+    while (off < reply_len) {
+        if (off + 4 > reply_len) return -1; /* truncated header */
+        uint16_t id = (uint16_t)reply[off] | ((uint16_t)reply[off + 1] << 8);
+        uint16_t sz = (uint16_t)reply[off + 2] | ((uint16_t)reply[off + 3] << 8);
+        off += 4;
+
+        if (off + 32 > reply_len) return -1; /* truncated hash */
+        const unsigned char *hs = reply + off;
+        off += 32;
+
+        if (id == 0xffff) break; /* sentinel -- stop before consuming a body */
+
+        if (off + sz > reply_len) return -1; /* truncated body */
+        const unsigned char *body = reply + off;
+        off += sz;
+
+        unsigned char digest[32];
+        SHA256(body, sz, digest);
+        if (memcmp(digest, hs, 32) != 0) return -1; /* "hash mismatch" */
+
+        switch (id) {
+            case 4:
+                if (metallica_mis_handle_priv(identity, psk_encryption_key, psk_validation_key, body, sz) != 0) return -1;
+                break;
+            case 6:
+                if (metallica_mis_handle_ecdh(identity, body, sz) != 0) return -1;
+                break;
+            case 3:
+                if (metallica_mis_handle_cert(identity, body, sz) != 0) return -1;
+                break;
+            case 0:
+            case 1:
+            case 2:
+                if (handle_empty(body, sz) != 0) return -1;
+                break;
+            default:
+                /* unhandled block id -- python just traces and moves on */
+                break;
+        }
+    }
+
+    return 0;
 }
