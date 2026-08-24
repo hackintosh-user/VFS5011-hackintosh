@@ -34,6 +34,16 @@ into the prompt automatically.
 Confirmed working end-to-end on macOS Sequoia and macOS Tahoe, on an
 Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint Sensor) And Confirmed Working on Sonoma on another DV6 (Sandy bridge with VFS5011 fingerprint Sensor)
 
+## Supported Sensors
+
+This Table will have the currently Supported Sensors or sensors in **Development** or **Planned Support**. Please keep your expectations in check, this is a hobby project.
+| Sensor Name     | PID  | VID  | Support status |
+|-----------------|------|------|----------------|
+| Validty VFS5011 | 138A | 0018 | **Supported**  |
+| Metallica MIS   | 006cb| 009a | **Developing** |
+| UPEK TouchStrip | 147e | 2016 | **Planed**     |
+
+ * Please Keep in Mind that some sensor names are **too long to fit in the table** the PID:VID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
 ## Features
 
 - Fingerprint capture and matching entirely native to macOS, no Linux
