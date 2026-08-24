@@ -22,13 +22,23 @@
  * module works identically before or after pairing; it just calls
  * metallica_mis_tls_cmd() and lets IT decide the mode.
  *
- * SCOPE: only get_flash_info(), erase_flash(), write_flash(),
- * call_cleanups() are built here -- exactly what partition_flash()/
- * init_flash() need. write_flash_all()/read_flash()/read_flash_all()/
- * write_fw_signature()/read_tls_flash() from the real flash.py are
- * NOT built yet (not needed until firmware upload / calibration /
- * template DB work starts) -- add them when that work begins rather
- * than speculatively now.
+ * SCOPE: get_flash_info(), erase_flash(), write_flash(),
+ * call_cleanups(), write_flash_all(), get_fw_info(), write_fw_signature()
+ * are built here (the last three added when firmware-upload work
+ * started, ported against real flash.py source pulled Aug 24 2026,
+ * not from memory). read_flash()/read_flash_all()/read_tls_flash()
+ * from the real flash.py are still NOT built -- not needed until
+ * template DB / calibration work starts -- add them when that work
+ * begins rather than speculatively now.
+ *
+ * write_hw_reg32()/read_hw_reg32() are also here, even though they're
+ * sensor.py's functions in upstream, not flash.py's -- this project
+ * already put reboot() (also sensor.py's) here for the same reason:
+ * metallica_mis_init_flash.c needs one shared low-level-primitives
+ * layer, and splitting two functions into their own
+ * metallica_mis_sensor.c/.h for this project's single-sensor scope
+ * isn't worth the extra file. Revisit if/when this project ever needs
+ * more of sensor.py (identify_sensor(), RomInfo, factory_reset()).
  *
  * JEDEC table: only the 19-entry table from hw_tables.py's
  * flash_ic_table is ported (verbatim, all fields, even the ones this
@@ -44,6 +54,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "metallica_mis_tls.h"
 
 typedef struct {
@@ -136,6 +147,80 @@ int metallica_mis_erase_flash(metallica_mis_tls_t *tls, uint8_t partition);
  * on write failure or (if the write succeeded) cleanup failure. */
 int metallica_mis_write_flash(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
                                const unsigned char *buf, size_t buf_len);
+
+/* metallica_mis_write_flash_all() -- direct port of flash.py's
+ * write_flash_all(): chunks buf into <= 0x1000-byte pieces and calls
+ * metallica_mis_write_flash() once per chunk, advancing addr by each
+ * chunk's actual length. This is the piece flash.h's earlier scope
+ * note flagged as not-yet-built -- needed because firmware blobs
+ * (the .xpfwext this sensor needs) are far larger than one
+ * write_flash() call's 0x1000-byte limit. Returns 0 on success, -1 on
+ * the first chunk that fails (matches python: write_flash() itself
+ * would raise and abort the loop; this port stops and returns -1 the
+ * same way, WITHOUT attempting remaining chunks -- flash may be left
+ * partially written on failure, same as upstream's own lack of
+ * rollback). */
+int metallica_mis_write_flash_all(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
+                                   const unsigned char *buf, size_t buf_len);
+
+/* ==================== firmware (fwext) info / upload ==================== */
+
+typedef struct {
+    uint16_t type;
+    uint16_t subtype;
+    uint16_t major;
+    uint16_t minor;
+    uint32_t size;
+} metallica_mis_module_info_t;
+
+typedef struct {
+    uint16_t major;
+    uint16_t minor;
+    uint32_t buildtime; /* unix timestamp, matches python's ctime(fwi.buildtime) usage */
+    metallica_mis_module_info_t *modules; /* malloc'd, caller frees via metallica_mis_fw_info_free() */
+    size_t module_count;
+} metallica_mis_fw_info_t;
+
+/* metallica_mis_get_fw_info() -- direct port of flash.py's
+ * get_fw_info(partition): sends cmd 0x43 <partition>, and unlike
+ * every other command in this file, a "b0 04" reply (2 bytes, status
+ * word 0x04b0) is NOT a failure here -- it means no firmware is
+ * loaded yet, which is the expected/normal state before first upload.
+ * That specific reply returns 0 with *out_present = false and *out
+ * left zeroed (do not treat this as an error and do not call
+ * metallica_mis_fw_info_free() on it). Any OTHER non-OK status IS a
+ * real failure (-1). On a genuine OK reply, parses major/minor/
+ * buildtime + the module table, sets *out_present = true, and the
+ * caller must call metallica_mis_fw_info_free() when done. Returns 0
+ * on success (loaded or not), -1 on transport/protocol failure. */
+int metallica_mis_get_fw_info(metallica_mis_tls_t *tls, uint8_t partition,
+                               bool *out_present, metallica_mis_fw_info_t *out);
+
+void metallica_mis_fw_info_free(metallica_mis_fw_info_t *info);
+
+/* metallica_mis_write_fw_signature() -- direct port of flash.py's
+ * write_fw_signature(): sends cmd 0x42 <partition> <pad-byte> <u16le
+ * sig_len> + signature bytes (python's pack('<BBxH', ...) -- the 'x'
+ * is one skipped/padding byte between partition and the length
+ * field, ported literally as hdr[2]=0). Returns 0 on success, -1 on
+ * failure status or transport error. */
+int metallica_mis_write_fw_signature(metallica_mis_tls_t *tls, uint8_t partition,
+                                      const unsigned char *signature, size_t signature_len);
+
+/* metallica_mis_write_hw_reg32() / metallica_mis_read_hw_reg32() --
+ * direct ports of sensor.py's write_hw_reg32()/read_hw_reg32(): raw
+ * 32-bit register poke/peek used by upload_fwext()'s "no idea what
+ * this is" precondition check (ported as a documented gap, not
+ * silently dropped -- matches upstream's own comment verbatim: nobody
+ * knows what these registers mean, only that the sequence is required
+ * before a firmware upload will succeed). write: cmd 0x08 <u32le addr>
+ * <u32le val> <u8 0x04>. read: cmd 0x07 <u32le addr> <u8 0x04>, reply
+ * is status word + u32le value. Both return 0/value success, -1 on
+ * failure status or transport error (read has no separate error
+ * output channel beyond that, matching python raising on bad status
+ * before ever unpacking a value). */
+int metallica_mis_write_hw_reg32(metallica_mis_tls_t *tls, uint32_t addr, uint32_t val);
+int metallica_mis_read_hw_reg32(metallica_mis_tls_t *tls, uint32_t addr, uint32_t *out_val);
 
 /* metallica_mis_reboot() -- sends cmd 0x05 0x02 0x00 via
  * metallica_mis_tls_cmd(), the exact 3 bytes sensor.py's reboot()
