@@ -1,0 +1,131 @@
+name: CI
+
+# Runs on every push and PR. Nothing here touches a real sensor --
+# GitHub's runners have no USB fingerprint reader attached, so this
+# checks everything that CAN be checked without hardware: does it
+# compile, does static analysis flag anything obvious, do the shell
+# scripts pass shellcheck, and do the matcher's pure-logic unit tests
+# (serialization + fingers/ directory scanning) still pass.
+#
+# What this deliberately does NOT cover (needs the real DV6):
+#   - libusb capture from the actual sensor
+#   - CFNotificationCenter IPC across the root/user boundary
+#   - Passwords.app / Keychain Access AX-prompt integration
+#   - the real lock-screen / login-window flow
+
+on:
+  push:
+    branches: [main, active-development]
+  pull_request:
+    branches: [main, active-development]
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: Shellcheck all scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: |
+          find . -name "*.sh" -not -path "./.git/*" -print0 \
+            | xargs -0 shellcheck --severity=warning
+
+  cppcheck:
+    name: Static analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Run cppcheck on daemon/client/matcher/ax_probe
+        # --force: check all #ifdef configurations, not just the default one
+        # --suppress=missingInclude: macOS SDK headers (ApplicationServices,
+        #   IOKit, etc.) don't exist on this Linux runner, and that's expected
+        run: |
+          cppcheck --force --enable=warning,performance,portability \
+            --suppress=missingInclude \
+            --error-exitcode=1 \
+            -I. -INBIS/include \
+            ax_probe.c vfs5011_daemon.c hack_touchid_client.c vfs5011_matcher.c \
+            vfs5011_menubar_ipc.c metallica_mis_daemon.c metallica_mis_firmware.c \
+            metallica_mis_tls.c metallica_mis_init_flash.c metallica_mis_flash.c \
+            metallica_mis_blobs_9a.c
+          # NOTE (Aug 2026): metallica_mis_tls.c/init_flash.c had been sitting in
+          # the tree since Aug 19-20 without appearing in this list at all --
+          # meaning cppcheck (and the build jobs below, which also don't
+          # compile them) gave a false-green signal on every commit touching
+          # them. Two real bugs (AES-128 used with a 32-byte key; a
+          # use-after-free in handle_ecdh()) shipped as "CI passing" as a
+          # result. Added here now that the OpenSSL headers these files need
+          # (libssl-dev) are available on the runner. metallica_mis_flash.c/
+          # metallica_mis_blobs_9a.c are new as of this same session and are
+          # added from the start rather than repeating the same mistake.
+          # UPDATE: build_metallica_mis.sh now links all five of these
+          # files (plus metallica_mis_firmware.c) into a real binary, and
+          # the build-daemon-and-client job below builds + verifies it.
+          # cppcheck here still only catches syntax/logic issues, not link
+          # errors -- the build job is what actually covers linking.
+
+  build-daemon-and-client:
+    name: Build daemon + client (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libusb + openssl@3
+        run: brew install libusb openssl@3
+      - name: Point compiler at Homebrew's libusb/openssl
+        # build_client.sh/build_daemon.sh hardcode -I/usr/local/include and
+        # -L/usr/local/lib, and build_metallica_mis.sh hardcodes
+        # /usr/local/opt/openssl@3, which is correct on Mohammad's Intel
+        # DV6 (where Homebrew installs to /usr/local) but NOT on GitHub's
+        # macos-latest runners, which are Apple Silicon and use
+        # /opt/homebrew instead. CPATH/LIBRARY_PATH are extra search paths
+        # clang checks in addition to any -I/-L flags, so this fixes CI
+        # without touching the scripts that are correct for real hardware.
+        # build_metallica_mis.sh's own hardcoded-path check
+        # (`test -d "$OPENSSL_PREFIX"`) would otherwise fail outright on
+        # this runner since /usr/local/opt/openssl@3 doesn't exist here --
+        # symlinking it is simpler than parameterizing the script for a
+        # runner shape that doesn't match any real hardware this project
+        # targets.
+        run: |
+          echo "CPATH=$(brew --prefix libusb)/include/libusb-1.0" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix libusb)/lib" >> "$GITHUB_ENV"
+          sudo mkdir -p /usr/local/opt
+          sudo ln -s "$(brew --prefix openssl@3)" /usr/local/opt/openssl@3
+      - name: Build
+        run: |
+          chmod +x ./*.sh
+          ./build.sh
+      - name: Verify binaries were produced
+        run: |
+          test -x ./hack-touchid
+          test -x ./vfs5011_daemon
+          test -x ./metallica_mis_daemon
+          echo "All three binaries built successfully."
+
+  matcher-unit-tests:
+    name: Matcher unit tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: |
+          chmod +x tests/run_tests.sh
+          ./tests/run_tests.sh
+
+  build-menubar-app:
+    name: Build menu bar app (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          chmod +x Vfs5011-menubar/build_menubar_app.sh
+          ./Vfs5011-menubar/build_menubar_app.sh
+      - name: Verify app bundle was produced
+        run: |
+          test -d "Vfs5011-menubar/build/VFS5011 Menu Bar.app"
+          test -x "Vfs5011-menubar/build/VFS5011 Menu Bar.app/Contents/MacOS/VFS5011MenuBar"
+          echo "Menu bar app built successfully."
