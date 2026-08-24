@@ -236,6 +236,164 @@ int metallica_mis_write_flash(metallica_mis_tls_t *tls, uint8_t partition, uint3
     return 0;
 }
 
+int metallica_mis_write_flash_all(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
+                                   const unsigned char *buf, size_t buf_len) {
+    const size_t bs = 0x1000;
+    size_t remaining = buf_len;
+    const unsigned char *p = buf;
+
+    while (remaining > 0) {
+        size_t chunk_len = (remaining < bs) ? remaining : bs;
+        if (metallica_mis_write_flash(tls, partition, addr, p, chunk_len) != 0) {
+            return -1;
+        }
+        addr += (uint32_t)chunk_len;
+        p += chunk_len;
+        remaining -= chunk_len;
+    }
+    return 0;
+}
+
+/* ==================== get_fw_info / write_fw_signature ==================== */
+
+int metallica_mis_get_fw_info(metallica_mis_tls_t *tls, uint8_t partition,
+                               bool *out_present, metallica_mis_fw_info_t *out) {
+    unsigned char cmd[2] = { 0x43, partition };
+    unsigned char rsp[8192];
+
+    *out_present = false;
+    memset(out, 0, sizeof(*out));
+
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0) return -1;
+
+    /* "don't want to throw exception here - it is normal not to have
+     * FW when we're about to upload it": a 2-byte 0xb0 0x04 reply
+     * (status word 0x04b0) means no firmware loaded -- not a failure. */
+    if (n == 2 && rsp[0] == 0xb0 && rsp[1] == 0x04) {
+        return 0; /* *out_present already false, *out already zeroed */
+    }
+
+    if (assert_status(rsp, n) != 0) return -1;
+
+    /* rsp = rsp[2:]; hdr = rsp[:0xa] -- unpack('<HHHL', hdr):
+     * major, minor, modcnt, buildtime */
+    if (n < 2 + 0xa) return -1;
+    const unsigned char *p = rsp + 2;
+
+    uint16_t major   = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    uint16_t minor   = (uint16_t)p[2] | ((uint16_t)p[3] << 8);
+    uint16_t modcnt  = (uint16_t)p[4] | ((uint16_t)p[5] << 8);
+    uint32_t buildtime = (uint32_t)p[6] | ((uint32_t)p[7] << 8) |
+                          ((uint32_t)p[8] << 16) | ((uint32_t)p[9] << 24);
+    p += 0xa;
+    size_t remaining = (size_t)n - 2 - 0xa;
+
+    if (remaining < (size_t)modcnt * 0xc) return -1;
+
+    metallica_mis_module_info_t *modules = NULL;
+    if (modcnt > 0) {
+        modules = malloc(sizeof(metallica_mis_module_info_t) * modcnt);
+        if (!modules) return -1;
+        for (uint16_t i = 0; i < modcnt; i++) {
+            const unsigned char *e = p + (size_t)i * 0xc;
+            /* unpack('<HHHHL', e): type, subtype, major, minor, size */
+            modules[i].type    = (uint16_t)e[0] | ((uint16_t)e[1] << 8);
+            modules[i].subtype = (uint16_t)e[2] | ((uint16_t)e[3] << 8);
+            modules[i].major   = (uint16_t)e[4] | ((uint16_t)e[5] << 8);
+            modules[i].minor   = (uint16_t)e[6] | ((uint16_t)e[7] << 8);
+            modules[i].size    = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                                  ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+        }
+    }
+
+    out->major = major;
+    out->minor = minor;
+    out->buildtime = buildtime;
+    out->modules = modules;
+    out->module_count = modcnt;
+    *out_present = true;
+    return 0;
+}
+
+void metallica_mis_fw_info_free(metallica_mis_fw_info_t *info) {
+    free(info->modules);
+    info->modules = NULL;
+    info->module_count = 0;
+}
+
+int metallica_mis_write_fw_signature(metallica_mis_tls_t *tls, uint8_t partition,
+                                      const unsigned char *signature, size_t signature_len) {
+    /* pack('<BBxH', 0x42, partition, len(signature)) + signature --
+     * the 'x' is one skipped/padding byte between partition and the
+     * u16le length field: [0]=0x42 [1]=partition [2]=pad [3:5]=u16le
+     * length, 5 bytes total before the signature itself. */
+    unsigned char hdr[5];
+    hdr[0] = 0x42;
+    hdr[1] = partition;
+    hdr[2] = 0x00; /* pad byte */
+    uint16_t slen = (uint16_t)signature_len;
+    hdr[3] = (unsigned char)(slen & 0xff);
+    hdr[4] = (unsigned char)((slen >> 8) & 0xff);
+
+    unsigned char *cmd = malloc(sizeof(hdr) + signature_len);
+    if (!cmd) return -1;
+    memcpy(cmd, hdr, sizeof(hdr));
+    memcpy(cmd + sizeof(hdr), signature, signature_len);
+
+    unsigned char rsp[64];
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(hdr) + signature_len, rsp, sizeof(rsp));
+    free(cmd);
+
+    if (n < 0) return -1;
+    return assert_status(rsp, n);
+}
+
+/* ==================== hw reg32 (sensor.py port, see header note) ==================== */
+
+int metallica_mis_write_hw_reg32(metallica_mis_tls_t *tls, uint32_t addr, uint32_t val) {
+    /* pack('<BLLB', 8, addr, val, 4) -- 1+4+4+1 = 10 bytes */
+    unsigned char cmd[10];
+    cmd[0] = 0x08;
+    cmd[1] = (unsigned char)(addr & 0xff);
+    cmd[2] = (unsigned char)((addr >> 8) & 0xff);
+    cmd[3] = (unsigned char)((addr >> 16) & 0xff);
+    cmd[4] = (unsigned char)((addr >> 24) & 0xff);
+    cmd[5] = (unsigned char)(val & 0xff);
+    cmd[6] = (unsigned char)((val >> 8) & 0xff);
+    cmd[7] = (unsigned char)((val >> 16) & 0xff);
+    cmd[8] = (unsigned char)((val >> 24) & 0xff);
+    cmd[9] = 0x04;
+
+    unsigned char rsp[64];
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0) return -1;
+    return assert_status(rsp, n);
+}
+
+int metallica_mis_read_hw_reg32(metallica_mis_tls_t *tls, uint32_t addr, uint32_t *out_val) {
+    /* pack('<BLB', 7, addr, 4) -- 1+4+1 = 6 bytes */
+    unsigned char cmd[6];
+    cmd[0] = 0x07;
+    cmd[1] = (unsigned char)(addr & 0xff);
+    cmd[2] = (unsigned char)((addr >> 8) & 0xff);
+    cmd[3] = (unsigned char)((addr >> 16) & 0xff);
+    cmd[4] = (unsigned char)((addr >> 24) & 0xff);
+    cmd[5] = 0x04;
+
+    unsigned char rsp[64];
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0) return -1;
+    if (assert_status(rsp, n) != 0) return -1;
+
+    /* rsp[2:] unpacked as '<L' -- 4-byte little-endian value */
+    if (n < 2 + 4) return -1;
+    const unsigned char *p = rsp + 2;
+    *out_val = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+               ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return 0;
+}
+
 int metallica_mis_reboot(metallica_mis_tls_t *tls) {
     unsigned char cmd[3] = { 0x05, 0x02, 0x00 };
     unsigned char rsp[64];
