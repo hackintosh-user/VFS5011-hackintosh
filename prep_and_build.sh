@@ -50,7 +50,7 @@ ls -la ./*.sh
 echo
 echo "== Reclaiming ownership of build artifacts (in case a previous sudo build left them root-owned) =="
 CURRENT_USER="$(id -un)"
-for bin in hack-touchid vfs5011_daemon; do
+for bin in hack-touchid vfs5011_daemon metallica_mis_daemon; do
     if [ -e "$bin" ] && [ "$(stat -f '%Su' "$bin")" != "$CURRENT_USER" ]; then
         echo "  $bin is owned by $(stat -f '%Su' "$bin") -- reclaiming as $CURRENT_USER (you may be prompted for your password)"
         sudo chown "$CURRENT_USER":staff "$bin"
