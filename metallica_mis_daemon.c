@@ -1,14 +1,15 @@
 /*
  * metallica_mis_daemon.c
  *
- * PARTIAL -- the plaintext bootstrap stage (send_init()) is
- * implemented and ready to test against real hardware. Everything
- * past that (firmware upload, calibration, capture) is blocked on
- * metallica_mis_tls.c, which does not exist yet. This is NOT a
- * working daemon -- it's a test harness for one stage of the
- * handshake, same spirit as vfs5011_daemon.c's own "standalone test
- * harness" caveat in its header before it got its real LaunchDaemon
- * wiring.
+ * PARTIAL -- the plaintext bootstrap stage (send_init()), pairing
+ * (do_pairing() -> metallica_mis_init_flash()), and firmware upload
+ * (do_pairing() -> metallica_mis_upload_fwext(), same session, no
+ * reboot in between) are all implemented and ready to test against
+ * real hardware -- NONE of it has been run against a real device yet.
+ * Calibration and every capture-mode command are still not built.
+ * This is NOT a working daemon -- it's a test harness for --pair,
+ * same spirit as vfs5011_daemon.c's own "standalone test harness"
+ * caveat in its header before it got its real LaunchDaemon wiring.
  *
  * This follows vfs5011_daemon.c's structure per supported_sensors.h's
  * own instructions ("Build its capture backend as its own
@@ -56,13 +57,14 @@
  * None of that is sensor-specific -- it's all keyed off the finished
  * fingerprint template, not off how the template got captured.
  *
- * Build: not wired into build_daemon.sh yet. Once metallica_mis_tls.c
- * exists, this should build the same way vfs5011_daemon.c does --
- * this file + vfs5011_matcher.c + NBIS sources + metallica_mis_tls.c,
- * linked against libusb-1.0 + an SSL/EC-capable crypto lib (OpenSSL or
- * LibreSSL -- TBD which one plays nicest with the existing macOS
- * build setup) + the same CoreFoundation/ApplicationServices/IOKit
- * frameworks vfs5011_daemon.c already links.
+ * Build: wired up via build_metallica_mis.sh (session Aug 24), which
+ * links this file + metallica_mis_tls.c + metallica_mis_init_flash.c
+ * + metallica_mis_flash.c + metallica_mis_blobs_9a.c +
+ * metallica_mis_upload_fwext.c + metallica_mis_firmware.c against
+ * libusb-1.0 + OpenSSL + CoreFoundation/IOKit. Not part of build.sh's
+ * default hack-touchid/vfs5011_daemon targets -- build.sh calls this
+ * script as a third, separate step. See that script for the exact
+ * source list and flags.
  */
 
 #include <stdio.h>
@@ -79,6 +81,7 @@
 #include "metallica_mis_tls.h"
 #include "metallica_mis_flash.h"
 #include "metallica_mis_blobs_9a.h"
+#include "metallica_mis_upload_fwext.h"
 /* #include "vfs5011_matcher.h"        -- reused unmodified once capture works */
 /* #include "vfs5011_menubar_ipc.h"    -- reused unmodified once capture works */
 
@@ -338,26 +341,41 @@ static int mis_transport(void *ctx, const unsigned char *out, size_t out_len,
 }
 
 /*
- * do_pairing() -- the actual wiring this session was for: calls
- * metallica_mis_init_flash() (built + link/dry-run verified last
- * session, but never called from anywhere until now) using this
- * daemon's own cmd()-based transport. Only meaningful to call AFTER
- * send_init() has succeeded (same plaintext-bootstrap precondition
- * init_flash.py itself assumes via open_common()'s ordering).
+ * do_pairing() -- calls metallica_mis_init_flash() using this
+ * daemon's own cmd()-based transport, THEN metallica_mis_upload_fwext()
+ * in the SAME still-open TLS session, matching upstream's
+ * open_common() flow (init() if not yet paired, immediately followed
+ * by upload_fwext() -- both run before any reboot). Only meaningful
+ * to call AFTER send_init() has succeeded (same plaintext-bootstrap
+ * precondition init_flash.py itself assumes).
+ *
+ * IMPORTANT CORRECTION (session Aug 24, after reading real
+ * upload_fwext.py source): an earlier version of this function sent
+ * its own reboot command immediately after metallica_mis_init_flash()
+ * succeeded. That was wrong -- upload_fwext() needs a LIVE secure TLS
+ * session to upload firmware (it's called in the same session right
+ * after pairing, per upstream's own open_common()), and upload_fwext()
+ * itself owns the actual reboot at the very end of the whole flow.
+ * Rebooting right after init_flash() would have killed the session
+ * before firmware could ever be uploaded. This was caught before
+ * being run against real hardware -- see the memory note on why this
+ * matters if this comment is ever read in isolation.
  *
  * NOT YET TESTED against real hardware -- this is the very first
  * thing in this whole project that would attempt a REAL WRITE to the
- * sensor's flash (partition table, cert material). Read the header
- * comment on metallica_mis_init_flash() in metallica_mis_flash.h
- * before running this against real hardware: if it partially
- * succeeds and fails partway through, the sensor's flash state is
- * left in whatever partial state the last completed step left it in
- * -- there is no rollback/transaction semantics here, matching
- * python's own lack of any either.
+ * sensor's flash (partition table, cert material, then the firmware
+ * blob itself). Read the header comments on metallica_mis_init_flash()
+ * in metallica_mis_flash.h and metallica_mis_upload_fwext() in
+ * metallica_mis_upload_fwext.h before running this against real
+ * hardware: if either partially succeeds and fails partway through,
+ * the sensor's flash state is left in whatever partial state the
+ * last completed step left it in -- there is no rollback/transaction
+ * semantics here, matching python's own lack of any either.
  *
- * Returns 0 on success (including "already paired, nothing to do"),
- * -1 on any failure. On success, the device sends itself a real
- * reboot command as the last step -- see the loud warning in main()
+ * Returns 0 on success (including "already paired AND firmware
+ * already loaded, nothing to do"), -1 on any failure. On success, the
+ * device sends itself a real reboot command as the last step (inside
+ * metallica_mis_upload_fwext()) -- see the loud warning in main()
  * about what NOT to do immediately after this returns.
  */
 static int do_pairing(void) {
@@ -387,15 +405,20 @@ static int do_pairing(void) {
         return -1;
     }
 
-    fprintf(stderr, "metallica_mis: init_flash() succeeded. Sending reboot command...\n");
-    if (metallica_mis_reboot(&tls) != 0) {
-        fprintf(stderr, "metallica_mis: do_pairing(): reboot command failed (pairing itself "
-                         "may still have succeeded -- flash was already written before this "
-                         "point; only the reboot command itself failed to send/ack)\n");
+    fprintf(stderr, "metallica_mis: init_flash() succeeded (session still open). "
+                     "Proceeding to firmware upload before any reboot...\n");
+
+    if (metallica_mis_upload_fwext(&tls) != 0) {
+        fprintf(stderr, "metallica_mis: do_pairing(): upload_fwext() FAILED. Pairing itself "
+                         "(partition table + cert material) already succeeded and was "
+                         "written to flash -- only the firmware upload step failed. Do NOT "
+                         "assume the device is unpaired; get_flash_info() on the next run "
+                         "will report the truth.\n");
         return -1;
     }
 
-    fprintf(stderr, "metallica_mis: reboot command sent. Device should be re-enumerating now.\n");
+    fprintf(stderr, "metallica_mis: upload_fwext() succeeded -- reboot command already "
+                     "sent as its last step. Device should be re-enumerating now.\n");
     return 0;
 }
 
@@ -473,8 +496,8 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr,
-        "metallica_mis_daemon: plaintext bootstrap + pairing stage.\n"
-        "Firmware upload/calibration/capture still require work beyond\n"
+        "metallica_mis_daemon: plaintext bootstrap + pairing + firmware\n"
+        "upload stage. Calibration/capture still require work beyond\n"
         "this. See file header for status.\n");
 
     if (open_device() != 0) {
@@ -496,16 +519,18 @@ int main(int argc, char **argv) {
         fprintf(stderr,
             "metallica_mis: stopping here (pass --pair to attempt real\n"
             "pairing). Pairing writes the partition table + cert material\n"
-            "to the sensor's flash and ends with a real reboot command --\n"
-            "this is NOT reversible by just re-running the daemon, and has\n"
-            "not been tested against real hardware yet. Don't pass --pair\n"
-            "casually; understand what it does first (see do_pairing()'s\n"
-            "doc comment above).\n");
+            "to the sensor's flash, uploads the Metallica MIS firmware blob\n"
+            "(downloading it from Lenovo first if not already cached), and\n"
+            "ends with a real reboot command -- this is NOT reversible by\n"
+            "just re-running the daemon, and has not been tested against\n"
+            "real hardware yet. Don't pass --pair casually; understand what\n"
+            "it does first (see do_pairing()'s doc comment above).\n");
         close_device();
         return 0;
     }
 
-    fprintf(stderr, "metallica_mis: --pair given, attempting real pairing now...\n");
+    fprintf(stderr, "metallica_mis: --pair given, attempting real pairing "
+                     "+ firmware upload now...\n");
     rc = do_pairing();
     if (rc != 0) {
         fprintf(stderr, "metallica_mis: do_pairing() FAILED. Sensor flash state is "
@@ -517,9 +542,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stderr, "metallica_mis: pairing succeeded, device is rebooting. "
-                     "Not sending any further application-protocol commands to "
-                     "it -- close_device() below is just local libusb cleanup "
+    fprintf(stderr, "metallica_mis: pairing + firmware upload succeeded, device is "
+                     "rebooting. Not sending any further application-protocol commands "
+                     "to it -- close_device() below is just local libusb cleanup "
                      "(clear_halt/release/close), which is safe to call even on "
                      "a handle whose device just disconnected; it's not another "
                      "command to the sensor itself.\n");
