@@ -7,7 +7,11 @@
 # cppcheck job: metallica_mis_tls.c/init_flash.c/flash.c/blobs_9a.c were
 # being statically checked but never actually linked into a binary, so
 # CI gave a false-green signal on link errors and missing declarations.
-# This script is that missing link step.
+# This script is that missing link step. metallica_mis_upload_fwext.c
+# (firmware upload, ported against real upload_fwext.py/flash.py/
+# sensor.py source, session Aug 24) was added to this same link set
+# once it existed -- do_pairing() now calls it in the same TLS session
+# right after pairing succeeds, before any reboot.
 #
 # Needs OpenSSL (ECDH/HMAC/SHA/ECDSA for the session-cipher handshake in
 # metallica_mis_tls.c and metallica_mis_init_flash.c) in addition to the
@@ -30,6 +34,7 @@ fi
 
 clang metallica_mis_daemon.c metallica_mis_tls.c metallica_mis_init_flash.c \
     metallica_mis_flash.c metallica_mis_blobs_9a.c metallica_mis_firmware.c \
+    metallica_mis_upload_fwext.c \
     -o metallica_mis_daemon \
     -I. \
     -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
