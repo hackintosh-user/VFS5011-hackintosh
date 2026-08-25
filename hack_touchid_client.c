@@ -39,6 +39,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <time.h>
 #include <libusb.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -574,6 +575,58 @@ static int g_color_enabled = 1;
 #define VFSC_BGREEN  (g_color_enabled ? "\033[1;32m" : "")
 #define VFSC_BRED    (g_color_enabled ? "\033[1;31m" : "")
 #define VFSC_BYELLOW (g_color_enabled ? "\033[1;33m" : "")
+
+/* Verbose boot log, default ON -- prints a scrolling kernel-log-style
+ * flavor line before/around the real startup checks, mirroring a
+ * Hackintosh verbose boot (-v). Purely decorative timestamp/prefix
+ * text wrapped around REAL check results -- it never replaces or
+ * hides the actual pass/fail output those checks already print,
+ * only adds atmosphere around it. Pass --q (or --quiet) to skip the
+ * flavor lines entirely and get the older, plain startup output.
+ * Intentionally kept non-denominational/purely-technical flavor
+ * text only (no "gods"/mythology framing) -- this ships to a mixed
+ * audience and there's no upside to picking that fight. */
+static bool g_verbose_boot = true;
+static double g_boot_fake_time = 0.000031;
+
+static void vfsc_boot_line(const char *fmt, ...) {
+    if (!g_verbose_boot) return;
+
+    /* Fake-but-monotonic timestamp, small pseudo-random-ish increment
+     * each call so it reads like a real dmesg/kernel log scroll
+     * rather than a suspiciously round counter. */
+    g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+
+    printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+/* Like vfsc_boot_line(), but for the REAL check functions' own
+ * routine status lines (e.g. "OpenCore v1.0.7 detected: continue.")
+ * rather than pure decorative flavor. Unlike vfsc_boot_line(), this
+ * ALWAYS prints -- quiet mode (--q) still needs to see real check
+ * results, it just drops the timestamp prefix and goes back to the
+ * older plain output exactly. Verbose mode gets the same timestamp
+ * treatment as the flavor lines around it, so the whole boot reads
+ * as one continuous log instead of some lines having timestamps and
+ * others not. */
+static void vfsc_status_line(const char *fmt, ...) {
+    if (g_verbose_boot) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
 
 /* Small printf-style helpers so success/error/warning lines look the
  * same everywhere instead of every call site hand-rolling its own
@@ -1816,7 +1869,7 @@ static bool check_opencore_version_requirement(void) {
         return true;
     }
 
-    printf("OpenCore v%d.%d.%d detected: continue.\n",
+    vfsc_status_line("OpenCore v%d.%d.%d detected: continue.",
            found_code / 100, (found_code / 10) % 10, found_code % 10);
     return true;
 }
@@ -1831,7 +1884,7 @@ static bool check_opencore_version_requirement(void) {
  * printed as a verbose loading line so it reads like part of the
  * normal startup sequence rather than a silent hang. */
 static bool check_sensor_presence_gate(void) {
-    printf("Checking if Sensor is active / enabled...\n");
+    vfsc_status_line("Checking if Sensor is active / enabled...");
 
     g_detected_sensor = detect_supported_sensor();
     if (!g_detected_sensor) {
@@ -1841,7 +1894,7 @@ static bool check_sensor_presence_gate(void) {
         return false;
     }
 
-    printf("%s detected. continuing...\n", g_detected_sensor->display_name);
+    vfsc_status_line("%s detected. continuing...", g_detected_sensor->display_name);
     return true;
 }
 
@@ -1863,7 +1916,7 @@ static bool check_sensor_presence_gate(void) {
  * side-effect-free even though the client is already running as root
  * at this point. Must run after check_sensor_presence_gate(). */
 static bool check_daemon_version_gate(void) {
-    printf("Checking Daemon version...\n");
+    vfsc_status_line("Checking Daemon version...");
 
     if (!g_detected_sensor) {
         printf("No supported sensor detected -- skipping.\n");
@@ -1912,22 +1965,28 @@ static bool check_daemon_version_gate(void) {
         return false;
     }
 
-    printf("v%s detected continuing...\n", daemon_version);
+    vfsc_status_line("v%s detected continuing...", daemon_version);
     return true;
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--q") == 0 || strcmp(argv[i], "--quiet") == 0) {
+            g_verbose_boot = false;
+        }
+    }
+    srand((unsigned int)time(NULL));
 
     /* Claiming the USB interface needs root on macOS. Re-exec the whole
      * menu session under sudo up front, same approach as the original
      * CLI, so options 1/2 don't each need their own privilege prompt. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[3];
+        char *sudo_argv[4];
         sudo_argv[0] = "sudo";
         sudo_argv[1] = argv[0];
-        sudo_argv[2] = NULL;
+        sudo_argv[2] = g_verbose_boot ? NULL : "--q";
+        sudo_argv[3] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
         return 1;
@@ -1938,27 +1997,58 @@ int main(int argc, char **argv) {
      * regardless of what directory this was launched from. */
     init_exec_dir(argv[0]);
     init_color_support();
-    print_banner();
 
+    /* Quiet mode keeps the banner where it's always been (first thing
+     * shown) -- only verbose mode moves it to the end, after the log
+     * scroll, so it isn't quiet mode's problem too. */
+    if (!g_verbose_boot) {
+        print_banner();
+    }
+
+    vfsc_boot_line("AppleACPIPlatform: enumerating hardware...");
+    vfsc_boot_line("IOKit: matching USB device tree...");
+    vfsc_boot_line("com.hack-touchid.client @ 0x0000 (v%s)", VFS5011_PROJECT_VERSION);
+    vfsc_boot_line("libusb-1.0: context initialized");
+
+    vfsc_boot_line("NVRAM: reading IODeviceTree:/options...");
     if (!check_opencore_version_requirement()) {
         return 1;
     }
 
     check_macos_version_warning();
+
+    vfsc_boot_line("USB: probing supported_sensors.h device table...");
     if (!check_sensor_presence_gate()) {
         return 1;
     }
+    vfsc_boot_line("Sensor descriptor matched, claiming interface...");
+
+    vfsc_boot_line("launchd: querying installed daemon version...");
     if (!check_daemon_version_gate()) {
         return 1;
     }
+
+    vfsc_boot_line("VFSStore: mounting encrypted APFS volume...");
+    vfsc_boot_line("AX: checking Accessibility grant...");
 
     /* Mount the template volume once up front to find out what's
      * actually enrolled, so the status line below doesn't have to
      * show "Unknown" until the user happens to hit Enroll/Verify.
      * Failure here (e.g. volume not set up yet) just leaves the
      * count at 0/unset -- Settings will explain why if relevant. */
-    printf("Checking enrolled fingers...\n");
+    vfsc_status_line("Checking enrolled fingers...");
     refresh_finger_cache();
+    vfsc_boot_line("Template DB: %d enrolled", g_finger_count > 0 ? g_finger_count : 0);
+    vfsc_boot_line("hack-touchid: init complete");
+
+    /* Banner prints LAST in verbose mode, once the whole boot log has
+     * scrolled by -- reads as "boot finished, here's the app" rather
+     * than a logo sitting in the middle of a log stream. Quiet mode
+     * already printed it up front (see above), so skip it here to
+     * avoid a duplicate. */
+    if (g_verbose_boot) {
+        print_banner();
+    }
 
     char line[64];
     for (;;) {
