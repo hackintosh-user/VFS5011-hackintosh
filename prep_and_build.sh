@@ -5,38 +5,31 @@
 # Fixes the recurring "some .sh files aren't executable" problem
 # (build.sh only ever chmod'd itself + build_client.sh + build_daemon.sh,
 # never the runtime helper scripts like vfs5011_volume_mount.sh) by
-# chmod +x'ing EVERY .sh file in this folder, rebuilds both binaries
-# from source, and deploys the daemon (rebuild, copy to
-# /usr/local/libexec/hack-touchid/, re-sign, re-grant Accessibility,
-# reinstall the LaunchAgent).
+# chmod +x'ing EVERY .sh file in this folder, and rebuilds both
+# binaries from source.
 #
-# As of v1.0.5, the deploy step (vfs5011_agent_install.sh, invoked
-# below) is the same one Deploy [3] in the client calls, and it lives
-# at /usr/local/libexec/hack-touchid/ instead of the old "/Library/
-# Application Support/VFSDaemon/" -- moved off a path with a space in
-# it, which was a recurring source of quoting bugs across the sudoers
-# rule, plist, and grant-accessibility scripts.
+# NOTE (v1.1): this used to also deploy the daemon itself (rebuild,
+# copy to /usr/local/libexec/hack-touchid/, re-sign, re-grant
+# Accessibility, reinstall the LaunchAgent) by shelling out to
+# vfs5011_agent_install.sh directly. That's exactly what Deploy [3]
+# in the client does -- doing it here too meant the daemon could end
+# up live and running before the user ever launched the client once,
+# which makes Deploy [3] pointless the first time around. Deploy is
+# now the client's job alone. This script only gets the binaries
+# built and the helper scripts executable; run the client yourself
+# and use Deploy [3] when you're ready to actually install/reinstall
+# the daemon.
 #
-# NOTE (v1.1, active-development): this script is still VFS5011-only --
-# it always runs vfs5011_agent_install.sh regardless of what's plugged
-# in. Once a second sensor (e.g. UPEK) has a real capture backend and
-# its own <sensor>_agent_install.sh, this needs the same
-# detect-then-dispatch logic the client itself now has (see
-# supported_sensors.h / hack_touchid_client.c) rather than hardcoding
-# one installer. Not urgent while VFS5011 is the only working backend.
-#
-# After this runs, the daemon is live and up to date in the background --
-# the only thing left to do yourself is run the client whenever you want
-# to enroll/manage fingers or change settings:
+# After this runs:
 #
 #   sudo ./hack-touchid
+#
+# then use Deploy [3] from the menu.
 #
 # Usage:
 #   ./prep_and_build.sh
 #
 # Run this from inside the project folder (same folder as build.sh).
-# The daemon deploy step needs root and will prompt you for your
-# password via sudo.
 
 set -e
 
@@ -62,11 +55,6 @@ echo "== Building client + daemon from source =="
 ./build.sh
 
 echo
-echo "== Deploying daemon (rebuild, install, re-sign, re-grant Accessibility, reload LaunchAgent) =="
-echo "This step needs root -- you may be prompted for your password."
-sudo ./vfs5011_agent_install.sh
-
-echo
-echo "Done. Daemon is deployed and running in the background."
-echo "Run the client yourself whenever you need it:"
+echo "Done. Binaries are built. Nothing has been deployed/installed yet."
+echo "Run the client and use Deploy [3] from the menu when you're ready:"
 echo "  sudo ./hack-touchid"
