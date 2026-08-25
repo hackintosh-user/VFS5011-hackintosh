@@ -454,7 +454,31 @@ static void close_device(void) {
     if (g_ctx) libusb_exit(g_ctx);
 }
 
-#define MATCH_THRESHOLD 20       /* testing lower vs. confirmed impostor ceiling of ~18 */
+#define MATCH_THRESHOLD_MIN 20
+#define MATCH_THRESHOLD_MAX 40
+#define MATCH_THRESHOLD_DEFAULT 20
+/* Shared with vfs5011_daemon.c -- see that file's copy of this
+ * constant/function for the full explanation. g_match_threshold is
+ * loaded once at startup (see main()) and updated immediately by
+ * Settings [6] Adjust Match Threshold when the user changes it, so
+ * this session reflects a change right away without needing a
+ * relaunch. The daemon (a separate process) re-reads the same file
+ * once per swipe attempt, so it doesn't need restarting either. */
+#define MATCH_THRESHOLD_CONF_PATH "/usr/local/libexec/hack-touchid/match_threshold.conf"
+
+static int g_match_threshold = MATCH_THRESHOLD_DEFAULT;
+
+static int load_match_threshold(void) {
+    FILE *f = fopen(MATCH_THRESHOLD_CONF_PATH, "r");
+    if (!f) return MATCH_THRESHOLD_DEFAULT;
+    int val = MATCH_THRESHOLD_DEFAULT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < MATCH_THRESHOLD_MIN || val > MATCH_THRESHOLD_MAX) {
+        return MATCH_THRESHOLD_DEFAULT;
+    }
+    return val;
+}
 
 /* Built-in macOS system sound (no bundled asset -- keeps the repo
  * asset-free for open sourcing). Same cue as vfs5011_daemon.c's
@@ -1076,7 +1100,7 @@ static void print_menu(void) {
 
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("%s[1]%s Enroll a Finger\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[2]%s Verify Fingerprint Match [Score / %d]\n", VFSC_BOLD, VFSC_RESET, MATCH_THRESHOLD);
+    printf("%s[2]%s Verify Fingerprint Match [Score / %d]\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
     printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
     printf("\n");
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
@@ -1125,7 +1149,7 @@ static void print_about(void) {
     printf("UPEK/AuthenTec TouchStrip (detection only, capture backend pending).\n");
     printf("Capture pipelines ported from libfprint; matching via NBIS mindtct/bozorth3.\n");
     printf("%sMATCH_THRESHOLD=%d, ENROLL_SWIPES=%d, MIN_SELF_CONSISTENCY=%d%s\n\n",
-           VFSC_DIM, MATCH_THRESHOLD, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
+           VFSC_DIM, g_match_threshold, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
 }
 
 /* Enrolls ONE named finger. Multiple fingers can be enrolled by
@@ -1356,8 +1380,8 @@ static int do_verify(void) {
         return 1;
     }
 
-    printf("Best match: \"%s\" score %d (threshold: %d)\n", labels[best_finger], best_score, MATCH_THRESHOLD);
-    if (best_score >= MATCH_THRESHOLD) {
+    printf("Best match: \"%s\" score %d (threshold: %d)\n", labels[best_finger], best_score, g_match_threshold);
+    if (best_score >= g_match_threshold) {
         play_success_sound();
         printf("\n  %s\xE2\x9C\x93  Success! (%s)%s\n\n", VFSC_BGREEN, labels[best_finger], VFSC_RESET);
         return 0;
@@ -1579,6 +1603,66 @@ static void do_settings_grant_accessibility(void) {
     do_run_accessibility_grant();
 }
 
+/* --- Settings: [6] Adjust Match Threshold ---
+ * Higher = stricter (fewer false accepts, more false rejects of the
+ * legitimate finger); lower = looser. Constrained to a fixed set of
+ * sane steps rather than a free-typed number, so someone can't
+ * accidentally set something wildly unsafe (e.g. 1) or above what
+ * this sensor's score range realistically produces. Writes the new
+ * value to MATCH_THRESHOLD_CONF_PATH and updates g_match_threshold
+ * immediately -- this client session and the background daemon (on
+ * its next swipe) both pick it up without needing a restart. */
+static void do_settings_adjust_threshold(void) {
+    printf("Current match threshold: %d\n\n", g_match_threshold);
+    printf("Higher = stricter matching (fewer false accepts, may need cleaner\n");
+    printf("swipes). Lower = looser (easier match, slightly higher false-accept\n");
+    printf("risk). Pick a value:\n\n");
+    printf("%s[1]%s 20 (default)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[2]%s 25\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[3]%s 30\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[4]%s 35\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[5]%s 40 (strictest)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[C]%s Cancel\n\n", VFSC_BOLD, VFSC_RESET);
+    printf("Choice: ");
+    fflush(stdout);
+
+    char line[16];
+    if (!fgets(line, sizeof(line), stdin)) {
+        printf("\n");
+        return;
+    }
+
+    int new_threshold;
+    switch (line[0]) {
+        case '1': new_threshold = 20; break;
+        case '2': new_threshold = 25; break;
+        case '3': new_threshold = 30; break;
+        case '4': new_threshold = 35; break;
+        case '5': new_threshold = 40; break;
+        default:
+            printf("Cancelled.\n\n");
+            return;
+    }
+
+    /* Parent dir already exists once the daemon's been deployed once
+     * (get_daemon_install_path() lives under the same tree), but
+     * don't assume Deploy has run yet -- create it defensively so
+     * this doesn't fail on a fresh checkout. */
+    system("mkdir -p /usr/local/libexec/hack-touchid");
+
+    FILE *f = fopen(MATCH_THRESHOLD_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", MATCH_THRESHOLD_CONF_PATH, strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", new_threshold);
+    fclose(f);
+
+    g_match_threshold = new_threshold;
+    vfsc_ok("Match threshold set to %d. Takes effect immediately -- no restart needed.\n\n",
+            new_threshold);
+}
+
 static void print_settings_menu(void) {
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
@@ -1588,6 +1672,7 @@ static void print_settings_menu(void) {
     printf("%s[3]%s Set/Update Auto-Type Password\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[4]%s Set Up / Repair Template Volume\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[5]%s Grant/Verify Accessibility Permission\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[6]%s Adjust Match Threshold (current: %d)\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -1623,9 +1708,10 @@ static void do_settings_menu(void) {
             case '3': do_settings_set_password(); break;
             case '4': do_settings_setup_volume(); break;
             case '5': do_settings_grant_accessibility(); break;
+            case '6': do_settings_adjust_threshold(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-5 or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-6 or B.\n\n", line);
         }
     }
 }
@@ -1997,6 +2083,7 @@ int main(int argc, char **argv) {
      * regardless of what directory this was launched from. */
     init_exec_dir(argv[0]);
     init_color_support();
+    g_match_threshold = load_match_threshold();
 
     /* Quiet mode keeps the banner where it's always been (first thing
      * shown) -- only verbose mode moves it to the end, after the log
