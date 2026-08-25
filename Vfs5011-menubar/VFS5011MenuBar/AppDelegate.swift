@@ -1,8 +1,13 @@
 //
 //  AppDelegate.swift
-//  VFS5011 Menu Bar
+//  Hackintosh Touch-ID Menu Bar
 //
-//  Menu bar companion app for the VFS5011 fingerprint daemon.
+//  Menu bar companion app for the Hackintosh Touch-ID daemon (multi-
+//  sensor as of v1.1 -- was VFS5011-only when this app was first
+//  built, hence the internal symbol/IPC-prefix names below still
+//  saying "VFS5011"; renamed the user-facing branding only, see the
+//  comment at the enum below for why the wire-protocol strings and
+//  Swift symbol name were deliberately left alone).
 //  Listens for distributed notifications posted by the daemon and
 //  surfaces them as user notifications + a status item, since the
 //  sensor's LED is sometimes too dim to notice on its own.
@@ -24,6 +29,14 @@ import UserNotifications
 import ServiceManagement
 
 // MARK: - Notification names (must match vfs5011_menubar_ipc.h exactly)
+// NOTE: kept as "VFS5011Notification"/"com.vfs5011.hackintosh" even
+// after the user-facing rename to "Hackintosh Touch-ID" -- this is a
+// wire-protocol identifier shared with vfs5011_menubar_ipc.c/.h (two
+// copies: repo root + Vfs5011-menubar/daemon-patch/). Renaming it
+// would mean updating three files in lockstep for zero user-visible
+// benefit (nobody sees this string), so it was left alone. Only
+// user-facing text (window titles, menu items, notification banners)
+// was renamed.
 enum VFS5011Notification {
     static let prefix = "com.vfs5011.hackintosh"
 
@@ -119,7 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.image = customIcon
             } else if let symbolImage = NSImage(
                 systemSymbolName: "touchid",
-                accessibilityDescription: "VFS5011 Fingerprint Daemon"
+                accessibilityDescription: "Hackintosh Touch-ID Daemon"
             ) {
                 // Fallback if the bundled icon didn't load for any
                 // reason (e.g. Resources weren't copied into the .app).
@@ -149,7 +162,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         let aboutItem = NSMenuItem(
-            title: "About VFS5011",
+            title: "About Hackintosh Touch-ID",
             action: #selector(aboutTapped),
             keyEquivalent: ""
         )
@@ -159,7 +172,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit VFS5011 Menu Bar",
+            title: "Quit Hackintosh Touch-ID",
             action: #selector(quitTapped),
             keyEquivalent: "q"
         )
@@ -200,7 +213,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "About VFS5011"
+        window.title = "About Hackintosh Touch-ID"
         window.isReleasedWhenClosed = false
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 340))
@@ -210,7 +223,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         icon.imageScaling = .scaleProportionallyUpOrDown
         content.addSubview(icon)
 
-        let title = NSTextField(labelWithString: "VFS5011")
+        let title = NSTextField(labelWithString: "Hackintosh Touch-ID")
         title.font = NSFont.boldSystemFont(ofSize: 18)
         title.alignment = .center
         title.frame = NSRect(x: 0, y: 205, width: 360, height: 24)
@@ -224,8 +237,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         content.addSubview(subtitle)
 
         let body = NSTextField(wrappingLabelWithString:
-            "Brings Validity VFS5011 fingerprint sensors (common on older " +
-            "HP laptops) to Hackintosh macOS as a real authentication " +
+            "Brings supported fingerprint sensors (Validity VFS5011, with more " +
+            "in progress) to Hackintosh macOS as a real authentication " +
             "method -- lock screen, System Settings, Finder, installers, " +
             "and more. This menu bar app surfaces swipe prompts and " +
             "results as notifications, since the sensor's LED can be " +
@@ -363,19 +376,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             switch name {
             case VFS5011Notification.swipeRequested:
                 self.fireLocalNotification(
-                    title: "VFS5011",
+                    title: "Hackintosh Touch-ID",
                     body: "Swipe to authenticate! 🫆"
                 )
 
             case VFS5011Notification.swipeSuccess:
                 self.fireLocalNotification(
-                    title: "VFS5011",
+                    title: "Hackintosh Touch-ID",
                     body: "Authentication successful! 🫆"
                 )
 
             case VFS5011Notification.swipeFailed:
                 self.fireLocalNotification(
-                    title: "VFS5011",
+                    title: "Hackintosh Touch-ID",
                     body: "Authentication failed, try swiping better 🫆"
                 )
 
