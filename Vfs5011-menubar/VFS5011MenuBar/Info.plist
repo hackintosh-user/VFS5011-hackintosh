@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>VFS5011 Menu Bar</string>
+	<string>Hackintosh Touch-ID</string>
 	<key>CFBundleDisplayName</key>
-	<string>VFS5011 Menu Bar</string>
+	<string>Hackintosh Touch-ID</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.vfs5011.hackintosh.menubar</string>
 	<key>CFBundleVersion</key>
@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
-	<string>VFS5011MenuBar</string>
+	<string>HackintoshTouchID</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
