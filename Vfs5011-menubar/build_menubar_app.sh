@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-APP_NAME="VFS5011 Menu Bar"
+APP_NAME="Hackintosh Touch-ID"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VFS5011MenuBar"
 ASSETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets"
 BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build"
@@ -21,7 +21,7 @@ echo "==> Compiling Swift source"
 # application with this version of macOS" on older OSes. Keep this in
 # sync with LSMinimumSystemVersion in Info.plist.
 swiftc "$SRC_DIR/AppDelegate.swift" \
-    -o "$APP_BUNDLE/Contents/MacOS/VFS5011MenuBar" \
+    -o "$APP_BUNDLE/Contents/MacOS/HackintoshTouchID" \
     -target x86_64-apple-macosx13.0 \
     -parse-as-library \
     -framework Cocoa \
