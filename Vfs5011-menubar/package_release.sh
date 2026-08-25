@@ -10,12 +10,12 @@ echo "==> Building app"
 ./build_menubar_app.sh
 
 VERSION="${1:-1.0.0}"
-ZIP_NAME="VFS5011MenuBar-v${VERSION}.zip"
+ZIP_NAME="HackintoshTouchID-v${VERSION}.zip"
 
 echo "==> Packaging release zip"
 cd build
 rm -f "../$ZIP_NAME"
-zip -r "../$ZIP_NAME" "VFS5011 Menu Bar.app" > /dev/null
+zip -r "../$ZIP_NAME" "Hackintosh Touch-ID.app" > /dev/null
 cd ..
 
 echo "==> Done: $ZIP_NAME"
