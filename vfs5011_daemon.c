@@ -505,7 +505,32 @@ static bool vfs5011_sensor_is_present(void) {
     return found;
 }
 
-#define MATCH_THRESHOLD 20       /* testing lower vs. confirmed impostor ceiling of ~18 */
+#define MATCH_THRESHOLD_MIN 20
+#define MATCH_THRESHOLD_MAX 40
+#define MATCH_THRESHOLD_DEFAULT 20
+/* Shared with hack_touchid_client.c's Settings [6] Adjust Match
+ * Threshold -- lives under the same install dir both binaries
+ * already know about (get_daemon_install_path() in the client).
+ * Plain text, just the integer. Missing/unreadable/out-of-range ->
+ * silently falls back to MATCH_THRESHOLD_DEFAULT rather than failing
+ * startup over a cosmetic settings file. Re-read once per swipe
+ * (see the poll loop below) rather than once at startup, so a
+ * Settings change takes effect on the very next swipe attempt --
+ * no daemon restart required. */
+#define MATCH_THRESHOLD_CONF_PATH "/usr/local/libexec/hack-touchid/match_threshold.conf"
+
+static int load_match_threshold(void) {
+    FILE *f = fopen(MATCH_THRESHOLD_CONF_PATH, "r");
+    if (!f) return MATCH_THRESHOLD_DEFAULT;
+    int val = MATCH_THRESHOLD_DEFAULT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < MATCH_THRESHOLD_MIN || val > MATCH_THRESHOLD_MAX) {
+        return MATCH_THRESHOLD_DEFAULT;
+    }
+    return val;
+}
+
 #define ENROLL_SWIPES 5          /* how many good swipes make up one enrollment */
 #define MAX_STORED_TEMPLATES 8   /* array bound for save/load */
 #define MIN_MINUTIAE 20          /* below this, a capture is too weak to trust */
@@ -1543,10 +1568,12 @@ static void *polling_thread_main(void *arg) {
             if (score > best_score) best_score = score;
         }
 
-        print_timestamp();
-        printf("Poll swipe scored %d (threshold %d)\n", best_score, MATCH_THRESHOLD);
+        int match_threshold = load_match_threshold();
 
-        if (best_score >= MATCH_THRESHOLD) {
+        print_timestamp();
+        printf("Poll swipe scored %d (threshold %d)\n", best_score, match_threshold);
+
+        if (best_score >= match_threshold) {
             print_timestamp();
             printf("MATCH -- checking target is still focused before typing...\n");
 
