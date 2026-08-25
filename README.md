@@ -127,12 +127,13 @@ Known limitations:
 
 
 
-## Requirements 
-- A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
+## Requirements
 - **macOS 13 Ventura and later** (older versions may work, but I offer **0 support for them**)
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
+- `openssl@3` (`brew install openssl@3`)
+- `innoextract` (`brew install innoextract`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
 - OpenCore v1.0.6 or later (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
