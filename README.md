@@ -41,6 +41,7 @@ This Table will have the currently Supported Sensors or sensors in **Development
 |-----------------|------|------|----------------|
 | Validty VFS5011 | 138A | 0018 | **Supported**  |
 | Metallica MIS   | 006cb| 009a | **Developing** |
+| Metallica MIS   | 138A | 0097 | **Developing** |
 | UPEK TouchStrip | 147e | 2016 | **Planned**    |
 
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the PID:VID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
