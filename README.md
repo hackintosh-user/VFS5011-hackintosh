@@ -37,12 +37,12 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 ## Supported Sensors
 
 This Table will have the currently Supported Sensors or sensors in **Development** or **Planned Support**. Please keep your expectations in check, this is a hobby project.
-| Sensor Name     | PID  | VID  | Support status |
-|-----------------|------|------|----------------|
-| Validty VFS5011 | 138A | 0018 | **Supported**  |
-| Metallica MIS   | 006cb| 009a | **Developing** |
-| Metallica MIS   | 138A | 0097 | **Developing** |
-| UPEK TouchStrip | 147e | 2016 | **Planned**    |
+| Sensor Name / Model    | PID  | VID  | Support status |
+|------------------------|------|------|----------------|
+| Validty VFS5011        | 138A | 0018 | **Supported**  |
+| Synaptics Metallica MIS| 006cb| 009a | **Developing** |
+| Synaptics Metallica MIS| 138A | 0097 | **Developing** |
+| UPEK TouchStrip        | 147e | 2016 | **Planned**    |
 
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the PID:VID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
 ## Features
