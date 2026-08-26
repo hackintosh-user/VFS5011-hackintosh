@@ -74,6 +74,39 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
         .install_script_name  = "metallica_mis_agent_install.sh",
         .backend_available    = 0,
     },
+    {
+        /* Confirmed Aug 26 2026: python-validity's blobs_97.py is
+         * byte-for-byte identical to blobs_9a.py, and firmware_tables.py
+         * maps 0097 to the exact same driver URL / firmware sha512 /
+         * firmware filename (6_07f_lenovo_mis_qm.xpfwext) as 09a -- this
+         * is the same Synaptics Metallica MIS silicon under a different
+         * OEM-branded USB ID, not a different sensor. metallica_mis_daemon
+         * already handles this identity (see its
+         * METALLICA_MIS_IDENTITIES table); nothing sensor-specific to
+         * build here, same backend_available gate as 09a above.
+         * p0cketl1nt's spare ThinkPad X1C5 has this exact identity
+         * (confirmed via lsusb), untested against real hardware yet. */
+        .display_name        = "Synaptics Metallica MIS",
+        .vid                  = 0x138a,
+        .pid                  = 0x0097,
+        .daemon_binary_name   = "metallica_mis_daemon",
+        .install_script_name  = "metallica_mis_agent_install.sh",
+        .backend_available    = 0,
+    },
+    {
+        /* Same reasoning as the 138a:0097 entry above -- blobs_9d.py is
+         * also byte-for-byte identical to blobs_9a.py/blobs_97.py, and
+         * firmware_tables.py maps 009d to the same driver/firmware as
+         * 09a and 97. No hardware confirmed on this exact identity yet
+         * (unlike 09a and 97, which both have real ThinkPads behind
+         * them); included for completeness since it's the same chip. */
+        .display_name        = "Synaptics Metallica MIS",
+        .vid                  = 0x138a,
+        .pid                  = 0x009d,
+        .daemon_binary_name   = "metallica_mis_daemon",
+        .install_script_name  = "metallica_mis_agent_install.sh",
+        .backend_available    = 0,
+    },
 };
 
 #define HACK_TOUCHID_SENSOR_COUNT \
