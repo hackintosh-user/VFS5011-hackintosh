@@ -85,29 +85,72 @@
 /* #include "vfs5011_matcher.h"        -- reused unmodified once capture works */
 /* #include "vfs5011_menubar_ipc.h"    -- reused unmodified once capture works */
 
-#define METALLICA_MIS_VID 0x06cb
-#define METALLICA_MIS_PID 0x009a
+/*
+ * Known Metallica MIS USB identities. python-validity's blobs_9a.py,
+ * blobs_97.py, and blobs_9d.py are byte-for-byte identical (confirmed
+ * via direct diff Aug 26 2026), and firmware_tables.py maps all three
+ * to the same driver URL, same firmware sha512, and same firmware
+ * filename (6_07f_lenovo_mis_qm.xpfwext) -- these are the same
+ * underlying Synaptics silicon under different OEM-branded VID:PIDs,
+ * not different hardware. 138a:0090 is deliberately NOT listed here:
+ * its blobs and firmware genuinely differ (see blobs_90.py /
+ * firmware_tables.py DEV_90), and metallica_mis_init_flash.c already
+ * has a separate, explicitly-unsafe-for-real-hardware special case
+ * for it. Do not add 0090 to this table without porting its own
+ * blobs first.
+ */
+typedef struct {
+    unsigned short vid;
+    unsigned short pid;
+    const char *label; /* for log messages only */
+} metallica_mis_ident_t;
+
+static const metallica_mis_ident_t METALLICA_MIS_IDENTITIES[] = {
+    { 0x06cb, 0x009a, "06cb:009a" },
+    { 0x138a, 0x0097, "138a:0097" },
+    { 0x138a, 0x009d, "138a:009d" },
+};
+#define METALLICA_MIS_IDENTITIES_COUNT \
+    (sizeof(METALLICA_MIS_IDENTITIES) / sizeof(METALLICA_MIS_IDENTITIES[0]))
 
 static libusb_context *g_ctx = NULL;
 static libusb_device_handle *g_handle = NULL;
+static unsigned short g_detected_vid = 0;
+static unsigned short g_detected_pid = 0;
 
 /*
  * open_device() -- transport open/claim is genuinely reusable in
  * shape from vfs5011_daemon.c's open_device(), same libusb calls,
  * same macOS quirks likely apply (kernel driver auto-detach before
  * claim, retry-before-reset on claim failure). Copied structurally,
- * NOT verified against real 06cb:009a hardware yet -- p0cketl1nt's
- * ioreg/System Info check only confirmed the device enumerates
- * unclaimed, not that these exact retry/timeout values are right for
- * this sensor. Treat the retry counts/sleep durations as inherited
- * defaults to revisit once this actually runs against hardware.
+ * NOT verified against real hardware for the 138a:0097/009d
+ * identities yet -- only 06cb:009a has an actual hardware test log
+ * (p0cketl1nt, Aug 25-26). Treat the retry counts/sleep durations as
+ * inherited defaults to revisit once each identity actually runs
+ * against hardware.
+ *
+ * Tries each known identity in turn rather than a single hardcoded
+ * VID/PID, since 09a/97/9d are the same chip under different OEM
+ * USB IDs (see METALLICA_MIS_IDENTITIES comment above). Whichever
+ * one opens first is recorded in g_detected_vid/g_detected_pid for
+ * later use (e.g. metallica_mis_init_flash()'s 0090 special case).
  */
 static int open_device(void) {
     if (libusb_init(&g_ctx) < 0) return -1;
     libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
 
-    for (int i = 0; i < 5; i++) {
-        g_handle = libusb_open_device_with_vid_pid(g_ctx, METALLICA_MIS_VID, METALLICA_MIS_PID);
+    for (int i = 0; i < 5 && !g_handle; i++) {
+        for (size_t j = 0; j < METALLICA_MIS_IDENTITIES_COUNT; j++) {
+            g_handle = libusb_open_device_with_vid_pid(
+                g_ctx, METALLICA_MIS_IDENTITIES[j].vid, METALLICA_MIS_IDENTITIES[j].pid);
+            if (g_handle) {
+                g_detected_vid = METALLICA_MIS_IDENTITIES[j].vid;
+                g_detected_pid = METALLICA_MIS_IDENTITIES[j].pid;
+                fprintf(stderr, "metallica_mis: matched identity %s\n",
+                        METALLICA_MIS_IDENTITIES[j].label);
+                break;
+            }
+        }
         if (g_handle) break;
         usleep(300000);
     }
@@ -400,7 +443,7 @@ static int do_pairing(void) {
     memset(&identity, 0, sizeof(identity));
 
     if (metallica_mis_init_flash(&tls, &identity, product_name, serial_number,
-                                  METALLICA_MIS_VID, METALLICA_MIS_PID) != 0) {
+                                  g_detected_vid, g_detected_pid) != 0) {
         fprintf(stderr, "metallica_mis: do_pairing(): init_flash() FAILED\n");
         return -1;
     }
