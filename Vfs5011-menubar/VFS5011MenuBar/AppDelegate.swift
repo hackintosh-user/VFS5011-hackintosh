@@ -28,10 +28,10 @@ import Cocoa
 import UserNotifications
 import ServiceManagement
 
-// MARK: - Notification names (must match vfs5011_menubar_ipc.h exactly)
+// MARK: - Notification names (must match hack-touchid-menubar-ipc.h exactly)
 // NOTE: kept as "VFS5011Notification"/"com.vfs5011.hackintosh" even
 // after the user-facing rename to "Hackintosh Touch-ID" -- this is a
-// wire-protocol identifier shared with vfs5011_menubar_ipc.c/.h (two
+// wire-protocol identifier shared with hack-touchid-menubar-ipc.c/.h (two
 // copies: repo root + Vfs5011-menubar/daemon-patch/). Renaming it
 // would mean updating three files in lockstep for zero user-visible
 // benefit (nobody sees this string), so it was left alone. Only
