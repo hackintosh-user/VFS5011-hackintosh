@@ -5,13 +5,14 @@
 <h3 align="center">VFS5011 Fingerprint Daemon for macOS</h3>
 
 <p align="center">
-  A libusb-based capture pipeline and NBIS matcher bringing Validity VFS5011
+  A libusb-based capture pipeline and NBIS matcher bringing Fingerprint sensors
   fingerprint authentication to macOS on unsupported (Hackintosh) hardware —
   lock screen unlock and System Settings authentication prompts, driven by
   a real fingerprint sensor instead of a password.
   
   * Current version: v1.1.0
   * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/main/CHANGELOG.md)
+  * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development#supported-sensors)
 </p>
 
 ---
