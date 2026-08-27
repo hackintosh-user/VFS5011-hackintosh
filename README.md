@@ -19,8 +19,7 @@
 
 ## Overview
 
-This project ports the USB capture protocol for the Validity Sensors
-VFS5011 fingerprint reader (USB VID `138A`, PID `0018`) to standalone
+This project ports the USB capture protocol for supported fingerprint sensors to a standalone
 macOS C code, and pairs it with NIST's NBIS fingerprint matching suite
 (`mindtct` for minutiae extraction, `bozorth3` for matching) to provide
 working fingerprint authentication on Hackintosh hardware that shipped
@@ -32,8 +31,6 @@ Accessibility APIs, captures a fingerprint swipe on demand, matches it
 against enrolled templates, and — on a match — types the stored password
 into the prompt automatically.
 
-Confirmed working end-to-end on macOS Sequoia and macOS Tahoe, on an
-Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint Sensor) And Confirmed Working on Sonoma on another DV6 (Sandy bridge with VFS5011 fingerprint Sensor)
 
 ## Supported Sensors
 
@@ -47,6 +44,8 @@ This Table will have the currently Supported Sensors or sensors in **Development
 
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the PID:VID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
 ## Features
+
+Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt a full Dev-Ops team.
 
 - Fingerprint capture and matching entirely native to macOS, no Linux
   kernel driver or libfprint dependency at runtime
