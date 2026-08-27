@@ -90,7 +90,7 @@ A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/
 cd vfs5011-menubar
 chmod +x build_menubar_app.sh
 ./build_menubar_app.sh
-open "build/VFS5011 Menu Bar.app"
+open "build/Hackintosh Touch-ID.app"
 ```
 
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
@@ -125,7 +125,7 @@ Known limitations:
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
-- `openssl@3` (`brew install openssl@3`)
+- `openssl@3` (`brew install openssl@3`) [will offically be Deprecated on Novemeber 1st 2026 but should work fine stil]
 - `innoextract` (`brew install innoextract`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
