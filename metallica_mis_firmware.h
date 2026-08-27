@@ -17,7 +17,7 @@
  * client detects a not-yet-paired Metallica MIS sensor and fetches
  * the firmware automatically into a fixed, predictable location
  * before enrollment ever starts -- same spirit as how
- * vfs5011_setup_volume.sh's one-time setup became a checked
+ * hack-touchid-setup-volume.sh's one-time setup became a checked
  * precondition rather than something the user has to remember to
  * run first.
  *

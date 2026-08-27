@@ -47,9 +47,9 @@
  *
  * REUSED AS-IS FROM vfs5011_daemon.c (do not reimplement, just wire
  * these same subsystems to this daemon once capture works):
- *   - vfs5011_matcher.c / NBIS mindtct+bozorth3 matching
- *   - Template volume mount/unmount (encrypted APFS "VFSStore" volume)
- *   - LaunchAgent / vfs5011_menubar_ipc.c notification plumbing
+ *   - hack-touchid-matcher.c / NBIS mindtct+bozorth3 matching
+ *   - Template volume mount/unmount (encrypted APFS "HackTouchIDStore" volume)
+ *   - LaunchAgent / hack-touchid-menubar-ipc.c notification plumbing
  *   - Screen-lock trigger (on_screen_locked/on_screen_unlocked) and
  *     the AX watchers for the padlock/coreautha auth surface
  *   - OpenCore min-version NVRAM gate (check_opencore_version_requirement)
@@ -82,8 +82,8 @@
 #include "metallica_mis_flash.h"
 #include "metallica_mis_blobs_9a.h"
 #include "metallica_mis_upload_fwext.h"
-/* #include "vfs5011_matcher.h"        -- reused unmodified once capture works */
-/* #include "vfs5011_menubar_ipc.h"    -- reused unmodified once capture works */
+/* #include "hack-touchid-matcher.h"        -- reused unmodified once capture works */
+/* #include "hack-touchid-menubar-ipc.h"    -- reused unmodified once capture works */
 
 /*
  * Known Metallica MIS USB identities. python-validity's blobs_9a.py,
