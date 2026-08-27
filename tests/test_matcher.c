@@ -1,7 +1,7 @@
 /*
  * test_matcher.c
  *
- * Standalone unit tests for the parts of vfs5011_matcher.c that don't
+ * Standalone unit tests for the parts of hack-touchid-matcher.c that don't
  * touch the sensor: template serialization (vfs5011_save_templates /
  * vfs5011_load_templates) and the fingers/ directory scan pattern used
  * by both vfs_client.c (list_enrolled_fingers) and vfs5011_daemon.c
@@ -28,7 +28,7 @@
 #include "fp_types.h"
 #include "lfs.h"
 #include "bozorth.h"
-#include "vfs5011_matcher.h"
+#include "hack-touchid-matcher.h"
 
 #define MAX_STORED_TEMPLATES 8 /* mirrors vfs5011_daemon.c */
 
