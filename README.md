@@ -77,7 +77,7 @@ LED can be too dim to notice on its own.
 - One-click toggle to pause/resume fingerprint auth without touching Terminal
 - Registers itself as a login item automatically on first launch (macOS
   13+, via `SMAppService` — no manual LaunchAgent setup needed)
-- "About VFS5011" menu item with a short project summary and a link back
+- "About hackintosh Touch-ID" menu item with a short project summary and a link back
   here
 
 Completely optional — the daemon works identically with or without it
@@ -118,7 +118,7 @@ Known limitations:
   Time Machine, Apple ID's local password step), not just one surface.
 - Not notarized (see Gatekeeper note above).
 - Pre-Login is not a simple workaround. Could takes months or years to fix.
-- 
+- Requires you to go into System settings -> notfifications -> show Previews: set to ```Always``` otherwise it will show up but wont tell you if its ready to swipe or a failed the swipe test.
 
 
 ## Requirements
