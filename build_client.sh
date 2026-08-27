@@ -4,7 +4,7 @@
 # files and the nbis/ folder.
 set -e
 
-clang hack_touchid_client.c vfs5011_matcher.c metallica_mis_firmware.c \
+clang hack_touchid_client.c hack-touchid-matcher.c metallica_mis_firmware.c \
     nbis/mindtct/*.c nbis/bozorth3/*.c \
     -o hack-touchid \
     -I. -Inbis/include \
