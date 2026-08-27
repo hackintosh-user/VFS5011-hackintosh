@@ -165,9 +165,9 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 Run the client with this command:
 
 ```bash
-sudo ./vfs_client
+sudo ./hack-touchid
 ```
-Then, you should be greeted with this **interactive CLI menu for VFS client**
+Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
 ```
 [1] Enroll a Finger
 [2] Verify Fingerprint Match [Score / 20]
@@ -199,7 +199,7 @@ password automatically.
 
 ## How it works
 
-- **Capture**: the VFS5011's raw USB protocol (initialization sequence,
+- **Capture**: the raw USB protocol (initialization sequence,
   swipe capture, image reassembly) is implemented directly against
   `libusb`, without going through any Linux-specific driver stack.
 - **Matching**: captured swipes are run through NIST's `mindtct` for
@@ -227,8 +227,7 @@ password automatically.
 | Sonoma | lock screen And padlock confirmed working on DV6-7080ee Sandy bridge.   |
 | Ventura| Remains to be TESTED.                                                   |
 
-Tested on an Intel Ivy Bridge Hackintosh laptop (HP Pavilion DV6/EliteBook
-class hardware) with the VFS5011 sensor at USB `138A:0018`.
+* Tested on an Intel Ivy Bridge Hackintosh laptop (HP Pavilion DV6/EliteBook class hardware) with the VFS5011 sensor at USB `138A:0018`.
 
 ## Limitations
 
@@ -240,7 +239,7 @@ class hardware) with the VFS5011 sensor at USB `138A:0018`.
 - No PAM module exists for `sudo` in a terminal. An Accessibility-based
   approach for `sudo` prompts was prototyped during development and
   intentionally removed to keep scope limited to lock screen and System
-  Settings authentication. (there are still plans to attempt coding This)
+  Settings authentication. (there are still plans to attempt codingt this. But unknown if Modern macOS allows this type of access)
 - Ad hoc code signing is used for the daemon binary and its
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
