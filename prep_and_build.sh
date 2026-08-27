@@ -4,14 +4,14 @@
 #
 # Fixes the recurring "some .sh files aren't executable" problem
 # (build.sh only ever chmod'd itself + build_client.sh + build_daemon.sh,
-# never the runtime helper scripts like vfs5011_volume_mount.sh) by
+# never the runtime helper scripts like hack-touchid-volume-mount.sh) by
 # chmod +x'ing EVERY .sh file in this folder, and rebuilds both
 # binaries from source.
 #
 # NOTE (v1.1): this used to also deploy the daemon itself (rebuild,
 # copy to /usr/local/libexec/hack-touchid/, re-sign, re-grant
 # Accessibility, reinstall the LaunchAgent) by shelling out to
-# vfs5011_agent_install.sh directly. That's exactly what Deploy [3]
+# hack-touchid-agent-install.sh directly. That's exactly what Deploy [3]
 # in the client does -- doing it here too meant the daemon could end
 # up live and running before the user ever launched the client once,
 # which makes Deploy [3] pointless the first time around. Deploy is
