@@ -64,15 +64,7 @@ Please Keep in mind some features for other sensors may be **broken** or **buggy
 - Interactive terminal client (`vfs_client`) for enrollment, verification,
   and one-command deployment of the background daemon
 -  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
--  Growing supported sensor list
-  ## Screenshots
-
-  <p align="center"> <img src="Screenshots/Sequoia.png" width="45%"> <img src="Screenshots/tahoe-26.6-no-accel.png" width="45%"> </p> <p align="center"><em>vfs_client running on macOS Sequoia 15.7.8 (24G824) (left), and macOS Tahoe 26.6 (25G72) (right)</em></p>
-
-
-  * Please keep in mind that macOS tahoe Currently is **NOT supported by OpenCore legacy patcher.** Things may change when we have graphic acceleration But until then, the image for tahoe is a **proof-of-concept.**
-  * Also Please keep in mind that the minimum version is macOS 13 Ventura. Other older versions may work, but I offer **0 support for them** when using a version older than Ventura (Darwin 22.0.0) you are on your own
-
+-  Growing supported sensor list with testers.
 
 ## Menu Bar Companion App (optional)
 
