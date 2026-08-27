@@ -94,11 +94,11 @@ open "build/Hackintosh Touch-ID.app"
 ```
 
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-and `iconutil`. No other dependencies. And it needs **macOS 13 Ventura and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on Sonoma and older.
+and `iconutil`. No other dependencies. And it needs **macOS 13 Ventura and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
 
 First launch will be blocked by Gatekeeper since this is ad-hoc signed,
 not notarized with a paid Apple Developer account — right-click the app →
-**Open** → **Open** again, or run `xattr -cr "VFS5011 Menu Bar.app"` once.
+**Open** → **Open** again, or run `xattr -cr "Hackintosh Touch-ID.app"` once.
 
 ### Wiring it to the daemon
 
@@ -117,7 +117,8 @@ Known limitations:
   recognized prompt at once (lock screen, padlock, Finder, pkg installer,
   Time Machine, Apple ID's local password step), not just one surface.
 - Not notarized (see Gatekeeper note above).
-
+- Pre-Login is not a simple workaround. Could takes months or years to fix.
+- 
 
 
 ## Requirements
@@ -239,11 +240,11 @@ class hardware) with the VFS5011 sensor at USB `138A:0018`.
 - No PAM module exists for `sudo` in a terminal. An Accessibility-based
   approach for `sudo` prompts was prototyped during development and
   intentionally removed to keep scope limited to lock screen and System
-  Settings authentication.
+  Settings authentication. (there are still plans to attempt coding This)
 - Ad hoc code signing is used for the daemon binary and its
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
-- a Cold boot sign in is not supported yet.
+- a Cold boot sign in is not supported. Could take Months or Years to produce something usable.
 
 ## Acknowledgments
 
@@ -264,7 +265,7 @@ This project would not exist without the following prior work:
   informed by that original driver's protocol logic.
   https://github.com/ars3niy/fprint_vfs5011
 
-If you are on Linux and have a VFS5011 sensor, the libfprint driver
+If you are on Linux and have a Fingerprint sensor, the libfprint driver
 linked above is the right tool to use directly — this project exists
 specifically to bring the same capability to macOS, where no equivalent
 driver exists.
