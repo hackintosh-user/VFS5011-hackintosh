@@ -15,7 +15,7 @@
  * Build (macOS) — compiles the capture/init code, the matcher
  * wrapper, and every mindtct + bozorth3 source file together:
  *
- *   clang vfs5011_enroll_verify.c vfs5011_matcher.c \
+ *   clang vfs5011_enroll_verify.c hack-touchid-matcher.c \
  *       nbis/mindtct/*.c nbis/bozorth3/*.c \
  *       -o vfs5011_enroll_verify \
  *       -I. -Inbis/include \
@@ -45,7 +45,7 @@
 #include <IOKit/IOKitLib.h>
 
 #include "vfs5011_proto.h"
-#include "vfs5011_matcher.h"
+#include "hack-touchid-matcher.h"
 #include "supported_sensors.h"
 #include "metallica_mis_firmware.h"
 
@@ -569,12 +569,12 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
  * ------------------------------------------------------------------ */
 
 #define VFSC_RULE "--------------------------------------------------------------------"
-#define MOUNT_SCRIPT_NAME "vfs5011_volume_mount.sh"
-#define UNMOUNT_SCRIPT_NAME "vfs5011_volume_unmount.sh"
-#define SETUP_VOLUME_SCRIPT_NAME "vfs5011_setup_volume.sh"
-#define GRANT_ACCESSIBILITY_SCRIPT_NAME "vfs5011_grant_accessibility.sh"
+#define MOUNT_SCRIPT_NAME "hack-touchid-volume-mount.sh"
+#define UNMOUNT_SCRIPT_NAME "hack-touchid-volume-unmount.sh"
+#define SETUP_VOLUME_SCRIPT_NAME "hack-touchid-setup-volume.sh"
+#define GRANT_ACCESSIBILITY_SCRIPT_NAME "hack-touchid-grant-accessibility.sh"
 #define AGENT_LABEL "com.hackintosh.vfs5011agent"
-#define VOLUME_NAME "VFSStore"
+#define VOLUME_NAME "HackTouchIDStore"
 #define TCC_DB_PATH "/Library/Application Support/com.apple.TCC/TCC.db"
 
 /* ------------------------------------------------------------------ *
@@ -737,7 +737,7 @@ static void clear_screen_and_redraw_banner(void) {
 #define FINGERS_DIRNAME "fingers"
 #define MAX_FINGER_LABEL 40
 #define MAX_ENROLLED_FINGERS 10
-#define PASSWORD_FILENAME "password.txt" /* must match vfs5011_store_password.sh / vfs5011_daemon.c */
+#define PASSWORD_FILENAME "password.txt" /* must match hack-touchid-store-password.sh / vfs5011_daemon.c */
 
 /* Reads one line of input with terminal echo turned off (like a
  * normal sudo password prompt), stripping the trailing newline.
@@ -764,9 +764,9 @@ static int read_hidden_line(char *buf, size_t buf_size) {
 }
 
 /* Prompts for and stores the password the daemon auto-types on a
- * fingerprint match, directly onto the already-mounted VFSStore
+ * fingerprint match, directly onto the already-mounted HackTouchIDStore
  * volume at mount_path — same file, same permissions (root:wheel,
- * 600) as vfs5011_store_password.sh, just inline in the client so
+ * 600) as hack-touchid-store-password.sh, just inline in the client so
  * Deploy can offer this as part of the same flow instead of requiring
  * a separate manual script run. Does NOT mount/unmount the volume
  * itself — the caller is expected to already have it mounted, since
@@ -902,7 +902,7 @@ static int list_enrolled_fingers(const char *fingers_dir,
     return count;
 }
 
-/* Mounts the encrypted template volume via vfs5011_volume_mount.sh,
+/* Mounts the encrypted template volume via hack-touchid-volume-mount.sh,
  * capturing the mount point path it prints on success. The script's
  * own diagnostic lines are captured but only surfaced if the mount
  * actually fails — on the success path they're just noise ahead of
@@ -952,7 +952,7 @@ static void unmount_template_volume(void) {
     if (status != 0) {
         vfsc_err(
                 "Warning: volume unmount script exited with status %d — the volume may "
-                "still be mounted. Run vfs5011_volume_unmount.sh manually to check.\n",
+                "still be mounted. Run hack-touchid-volume-unmount.sh manually to check.\n",
                 status);
     }
 }
@@ -1035,7 +1035,7 @@ static int probe_sensor_present(void) {
  * the hack-touchid client re-execs itself under sudo at startup and getuid() at
  * that point would report the invoking user, but geteuid() reports
  * 0. Reads the true console user via $SUDO_USER (set by sudo), same
- * as vfs5011_agent_install.sh does, so this check targets the same
+ * as hack-touchid-agent-install.sh does, so this check targets the same
  * domain the installer bootstraps into. */
 static int is_auth_service_deployed(void) {
     const char *sudo_user = getenv("SUDO_USER");
@@ -1057,7 +1057,7 @@ static int is_auth_service_deployed(void) {
     return system(cmd) == 0;
 }
 
-/* Does the encrypted VFSStore volume exist at all yet (regardless of
+/* Does the encrypted HackTouchIDStore volume exist at all yet (regardless of
  * whether it's currently mounted)? A quick, non-mounting check --
  * `diskutil info` on a volume name that doesn't exist exits non-zero,
  * which is all this needs to know for the status line and for
@@ -1070,7 +1070,7 @@ static int is_volume_configured(void) {
 
 /* Checks the system TCC database directly for an Allowed
  * (auth_value=2) Accessibility grant tied to the daemon's installed
- * path -- the same table vfs5011_grant_accessibility.sh writes to.
+ * path -- the same table hack-touchid-grant-accessibility.sh writes to.
  * Returns 0 if the daemon isn't installed yet, the TCC db is missing,
  * or no matching row exists. */
 static int is_accessibility_granted(void) {
@@ -1456,9 +1456,9 @@ static void do_settings_delete_fingers(void) {
 /* --- Settings: [2] Clear Password Cache --- */
 /* Removes password.txt from the volume — the login password the
  * daemon reads at lock time and auto-types on a match (see
- * vfs5011_store_password.sh / vfs5011_daemon.c). This does NOT touch
+ * hack-touchid-store-password.sh / vfs5011_daemon.c). This does NOT touch
  * enrolled fingerprints. After clearing, the daemon has nothing to
- * type until vfs5011_store_password.sh is run again. */
+ * type until hack-touchid-store-password.sh is run again. */
 static void do_settings_clear_password_cache(void) {
     char mount_path[PATH_MAX];
     if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
@@ -1475,7 +1475,7 @@ static void do_settings_clear_password_cache(void) {
     }
 
     printf("Clear the cached login password? The daemon won't be able to auto-type\n");
-    printf("on unlock until you run vfs5011_store_password.sh again. [y/N]: ");
+    printf("on unlock until you run hack-touchid-store-password.sh again. [y/N]: ");
     fflush(stdout);
     char confirm[8];
     if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
@@ -1503,7 +1503,7 @@ static void do_settings_set_password(void) {
     unmount_template_volume();
 }
 
-/* Runs vfs5011_setup_volume.sh (the one-time encrypted-volume creation
+/* Runs hack-touchid-setup-volume.sh (the one-time encrypted-volume creation
  * script), streaming its output live rather than capturing-then-
  * dumping like do_deploy() does — this one runs interactively rarely
  * enough, and takes long enough (diskutil work), that the person
@@ -1528,8 +1528,8 @@ static int do_run_volume_setup(void) {
 
 /* --- Settings: [4] Set Up / Repair Template Volume ---
  * Guards against the easy mistake of re-running this against an
- * already-configured volume: vfs5011_setup_volume.sh doesn't check
- * for an existing VFSStore, so running it twice would create a SECOND
+ * already-configured volume: hack-touchid-setup-volume.sh doesn't check
+ * for an existing HackTouchIDStore, so running it twice would create a SECOND
  * volume of the same name rather than repairing the first one. */
 static void do_settings_setup_volume(void) {
     if (is_volume_configured()) {
@@ -1550,7 +1550,7 @@ static void do_settings_setup_volume(void) {
     do_run_volume_setup();
 }
 
-/* Runs vfs5011_grant_accessibility.sh against the daemon's fixed
+/* Runs hack-touchid-grant-accessibility.sh against the daemon's fixed
  * install path. Safe to call even if the daemon hasn't been deployed
  * yet — the script itself checks the binary exists and reports a
  * clear error rather than doing anything destructive. */
@@ -1716,7 +1716,7 @@ static void do_settings_menu(void) {
     }
 }
 
-/* Deploy installs/reinstalls vfs5011_agent_install.sh, which handles
+/* Deploy installs/reinstalls hack-touchid-agent-install.sh, which handles
  * everything: rebuilding the daemon from source, copying it into
  * place, tearing down any prior registration, the scoped NOPASSWD
  * sudoers rule, writing the LaunchAgent plist to the console user's
@@ -1798,7 +1798,7 @@ static void do_deploy(void) {
     printf("%sRegistering background service...%s\n", VFSC_DIM, VFSC_RESET);
     vfsc_ok("Service deployed successfully with 0 errors.\n");
 
-    /* vfs5011_agent_install.sh already re-grants Accessibility on every
+    /* hack-touchid-agent-install.sh already re-grants Accessibility on every
      * deploy internally (see that script's header for why it must be
      * redone every rebuild). This just surfaces whether it actually
      * took, since a silent TCC failure would otherwise only show up
@@ -1812,7 +1812,7 @@ static void do_deploy(void) {
 
     /* Now that the service is live, make sure it actually has a
      * password to type on a match — a fresh deploy on a machine that
-     * has never run vfs5011_store_password.sh (or the older manual
+     * has never run hack-touchid-store-password.sh (or the older manual
      * script flow) would otherwise sit there matching fingerprints
      * and silently failing to type anything. */
     char mount_path[PATH_MAX];
@@ -2079,7 +2079,7 @@ int main(int argc, char **argv) {
     }
 
     /* Needed so mount_template_volume()/unmount_template_volume() can
-     * find vfs5011_volume_mount.sh / _unmount.sh by absolute path,
+     * find hack-touchid-volume-mount.sh / _unmount.sh by absolute path,
      * regardless of what directory this was launched from. */
     init_exec_dir(argv[0]);
     init_color_support();
@@ -2115,7 +2115,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    vfsc_boot_line("VFSStore: mounting encrypted APFS volume...");
+    vfsc_boot_line("HackTouchIDStore: mounting encrypted APFS volume...");
     vfsc_boot_line("AX: checking Accessibility grant...");
 
     /* Mount the template volume once up front to find out what's
