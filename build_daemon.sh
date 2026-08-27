@@ -3,7 +3,7 @@
 # Run this from the folder containing all the vfs5011_* files and the nbis/ folder.
 set -e
 
-clang vfs5011_daemon.c vfs5011_matcher.c vfs5011_menubar_ipc.c \
+clang vfs5011_daemon.c hack-touchid-matcher.c hack-touchid-menubar-ipc.c \
     nbis/mindtct/*.c nbis/bozorth3/*.c \
     -o vfs5011_daemon \
     -I. -Inbis/include \
