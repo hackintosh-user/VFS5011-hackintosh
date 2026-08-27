@@ -23,7 +23,7 @@
  * instead of CGEventPost.
  *
  * Build:
- *   clang vfs5011_daemon.c vfs5011_matcher.c \
+ *   clang vfs5011_daemon.c hack-touchid-matcher.c \
  *       nbis/mindtct/*.c nbis/bozorth3/*.c \
  *       -o vfs5011_daemon \
  *       -I. -Inbis/include \
@@ -56,8 +56,8 @@
 #include <IOKit/IOKitLib.h>
 
 #include "vfs5011_proto.h"
-#include "vfs5011_matcher.h"
-#include "vfs5011_menubar_ipc.h"
+#include "hack-touchid-matcher.h"
+#include "hack-touchid-menubar-ipc.h"
 
 #define VFS5011_VID 0x138a
 #define VFS5011_PID 0x0018
@@ -635,8 +635,8 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 #define VFSC_RULE "--------------------------------------------------------------------"
 #define TEMPLATE_FILENAME "template.dat"  /* legacy single-finger fallback only */
 #define FINGERS_DIRNAME "fingers"
-#define MOUNT_SCRIPT_NAME "vfs5011_volume_mount.sh"
-#define UNMOUNT_SCRIPT_NAME "vfs5011_volume_unmount.sh"
+#define MOUNT_SCRIPT_NAME "hack-touchid-volume-mount.sh"
+#define UNMOUNT_SCRIPT_NAME "hack-touchid-volume-unmount.sh"
 
 /* Directory this binary is running from, resolved once at startup, so
  * the mount/unmount scripts can be found by absolute path regardless
@@ -664,7 +664,7 @@ static void init_exec_dir(const char *argv0) {
  * side effect since they already have the volume mounted anyway. */
 static int g_cached_template_count = -1; /* -1 = not checked yet this session */
 
-/* Mounts the encrypted template volume via vfs5011_volume_mount.sh,
+/* Mounts the encrypted template volume via hack-touchid-volume-mount.sh,
  * capturing the mount point path it prints on success. Echoes the
  * script's own diagnostic lines so the behavior looks the same as
  * running it directly. Returns 0 and fills out_path on success. */
@@ -710,7 +710,7 @@ static void unmount_template_volume(void) {
     if (status != 0) {
         fprintf(stderr,
                 "Warning: volume unmount script exited with status %d — the volume may "
-                "still be mounted. Run vfs5011_volume_unmount.sh manually to check.\n",
+                "still be mounted. Run hack-touchid-volume-unmount.sh manually to check.\n",
                 status);
     }
 }
@@ -1141,7 +1141,7 @@ static int load_templates_for_episode(void) {
         fclose(pf);
         g_cached_password_valid = 1;
     } else {
-        fprintf(stderr, "No stored password found (run vfs5011_store_password.sh first).\n");
+        fprintf(stderr, "No stored password found (run hack-touchid-store-password.sh first).\n");
     }
 
     int enrolled_count = g_enrolled_count; /* snapshot before unlocking, for the check below */
