@@ -15,7 +15,7 @@
  *      LaunchAgent IPC are all reusable as-is -- only the USB init
  *      handshake and image capture are sensor-specific).
  *   3. Flip backend_available to true once that daemon is built,
- *      tested on real hardware, and its own vfs5011_agent_install.sh-
+ *      tested on real hardware, and its own hack-touchid-agent-install.sh-
  *      style installer exists.
  * Until backend_available is true, the client will detect the sensor
  * and say so, but Enroll/Verify/Deploy will refuse with a clear
@@ -30,7 +30,7 @@ typedef struct {
     unsigned short vid;
     unsigned short pid;
     const char *daemon_binary_name; /* installed under /usr/local/libexec/hack-touchid/ */
-    const char *install_script_name; /* e.g. "vfs5011_agent_install.sh", run alongside the client */
+    const char *install_script_name; /* e.g. "hack-touchid-agent-install.sh", run alongside the client */
     int backend_available;          /* 1 = Enroll/Verify/Deploy actually work, 0 = detected only */
 } hack_touchid_sensor_t;
 
@@ -40,7 +40,7 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
         .vid                  = 0x138a,
         .pid                  = 0x0018,
         .daemon_binary_name   = "vfs5011_daemon",
-        .install_script_name  = "vfs5011_agent_install.sh",
+        .install_script_name  = "hack-touchid-agent-install.sh",
         .backend_available    = 1,
     },
     {
