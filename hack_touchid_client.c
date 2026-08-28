@@ -1152,6 +1152,11 @@ static void print_about(void) {
            VFSC_DIM, g_match_threshold, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
 }
 
+/* Forward declaration -- defined later in this file (Settings [4]
+ * section), but now also called from do_enroll() below for the same
+ * first-run auto-setup do_deploy() already does. */
+static int do_run_volume_setup(void);
+
 /* Enrolls ONE named finger. Multiple fingers can be enrolled by
  * calling this repeatedly with different names — each gets its own
  * file under fingers/ on the volume, holding its own ENROLL_SWIPES
@@ -1183,6 +1188,22 @@ static void do_enroll(void) {
                 return;
             }
             printf("\n");
+        }
+    }
+
+    /* First-run convenience, same reasoning as do_deploy()'s identical
+     * check: Enroll needs the template volume to exist to save
+     * anything, so set it up automatically here too rather than
+     * letting the person complete ENROLL_SWIPES swipes only to hit
+     * "template volume unavailable" at the very last step. Sharing
+     * do_run_volume_setup() with do_deploy() means this stays in sync
+     * with whatever that does (Settings volume repair prompt is
+     * unaffected -- this only fires when no volume exists at all). */
+    if (!is_volume_configured()) {
+        vfsc_warn("\nTemplate volume isn't set up yet — setting it up now...\n\n");
+        if (do_run_volume_setup() != 0) {
+            vfsc_err("Cannot continue enrollment without the template volume.\n\n");
+            return;
         }
     }
 
