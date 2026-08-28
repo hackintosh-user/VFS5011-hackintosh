@@ -45,11 +45,17 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
     },
     {
         /* r/hackintosh-confirmed on a ThinkPad T420 (Aug 16 2026); the
-         * committed first multi-sensor target. Capture backend not
-         * built yet -- needs its own from-scratch USB init sequence,
-         * ported similarly to how VFS5011's was pulled from libfprint.
-         * install_script_name is a placeholder name for the installer
-         * that will exist once upek_daemon.c does. */
+         * committed first multi-sensor target. Capture backend now
+         * exists in upek_daemon.c/upek_proto.h, ported directly from
+         * libfprint's upeksonly.c (register read/write + interrupt +
+         * bulk image stream, no blob playback or handshake needed --
+         * a simpler port than VFS5011 or Metallica MIS). NOT yet
+         * tested against real hardware and NOT yet wired into
+         * hack_touchid_client.c's capture dispatch (still hardcoded
+         * to VFS5011) -- backend_available stays 0 until both of
+         * those happen, same policy as Metallica MIS below.
+         * install_script_name is still a placeholder; no installer
+         * exists until the wiring/testing above is done. */
         .display_name        = "UPEK/AuthenTec TouchStrip",
         .vid                  = 0x147e,
         .pid                  = 0x2016,
