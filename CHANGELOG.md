@@ -4,7 +4,7 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 
 ---
 ## v1.1.0 - Current Development Target
-**CHANGES ARE YET TO BE ADDED**
+**CHANGES ARE YET TO BE MERGED INTO ```MAIN```** 
 
 **Metallica MIS pairing wired into the client (Aug 28)**
 - `hack_touchid_client.c` gains a `[P] Pair Sensor` menu item, shown only when a Metallica MIS identity (`06cb:009a` / `138a:0097` / `138a:009d`) is detected. It runs the same plaintext-bootstrap + pairing + firmware-upload sequence the standalone `metallica_mis_daemon` test harness does, with the same destructive-write warnings and a typed `PAIR` confirmation gate.
