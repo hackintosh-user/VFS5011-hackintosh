@@ -2,7 +2,7 @@
   <img src="vfs_client_logo.svg" alt="VFS Client — Validity VFS5011 Fingerprint Auth" width="560">
 </p>
 
-<h3 align="center">VFS5011 Fingerprint Daemon for macOS</h3>
+<h3 align="center">Hackintosh Touch-ID, Fingerprint authentication for macOS</h3>
 
 <p align="center">
   A libusb-based capture pipeline and NBIS matcher bringing Fingerprint sensors
