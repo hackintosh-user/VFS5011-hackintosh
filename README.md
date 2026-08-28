@@ -13,6 +13,7 @@
   * Current version: v1.0.5 | August 18th 2026
   * Current version in active development: v1.1.0 | ETA not set.
   * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/main/CHANGELOG.md)
+  * Please note that the ```main``` Branch only gets Commits for the Current Version. If you wish to see the current working development towards upcoming versions please head into the ```active-development``` branch!
 </p>
 
 ---
