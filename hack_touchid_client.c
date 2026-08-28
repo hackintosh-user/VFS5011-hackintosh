@@ -48,6 +48,7 @@
 #include "hack-touchid-matcher.h"
 #include "supported_sensors.h"
 #include "metallica_mis_firmware.h"
+#include "metallica_mis_daemon.h"
 
 #define VFS5011_VID 0x138a
 #define VFS5011_PID 0x0018
@@ -1092,6 +1093,10 @@ static int is_accessibility_granted(void) {
     return atoi(line) == 2;
 }
 
+/* Forward declaration -- defined further below, but needed here so
+ * print_menu() can decide whether to show [P] Pair Sensor. */
+static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s);
+
 static void print_menu(void) {
     int sensor_present = (g_detected_sensor != NULL);
     int deployed = is_auth_service_deployed();
@@ -1102,6 +1107,9 @@ static void print_menu(void) {
     printf("%s[1]%s Enroll a Finger\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[2]%s Verify Fingerprint Match [Score / %d]\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
     printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        printf("%s[P]%s Pair Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+    }
     printf("\n");
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
@@ -1156,6 +1164,103 @@ static void print_about(void) {
  * section), but now also called from do_enroll() below for the same
  * first-run auto-setup do_deploy() already does. */
 static int do_run_volume_setup(void);
+
+/* True for any of the three Metallica MIS USB identities (same
+ * underlying Synaptics chip under different OEM VID:PIDs -- see
+ * METALLICA_MIS_IDENTITIES in metallica_mis_daemon.c). Used to gate
+ * the [P] Pair Sensor menu item so it only appears for a sensor
+ * family that actually has a pairing routine, and to decide which
+ * concrete pairing function to call. */
+static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s) {
+    if (!s) return 0;
+    return (s->vid == 0x06cb && s->pid == 0x009a) ||
+           (s->vid == 0x138a && s->pid == 0x0097) ||
+           (s->vid == 0x138a && s->pid == 0x009d);
+}
+
+/* Runs the Metallica MIS plaintext-bootstrap + pairing + firmware-
+ * upload sequence directly from the client, reusing
+ * metallica_mis_open_device()/metallica_mis_send_init()/
+ * metallica_mis_do_pairing() from metallica_mis_daemon.c (Aug 28 --
+ * see metallica_mis_daemon.h) instead of requiring the tester to
+ * separately build and run the standalone metallica_mis_daemon test
+ * harness. Mirrors that harness's exact flow and warnings; keep the
+ * two in sync if either changes.
+ *
+ * This is deliberately its own menu action, NOT part of do_enroll()
+ * -- pairing is a one-time, destructive-to-existing-templates flash
+ * write with no capture step after it (capture_quality_template()
+ * for this sensor family isn't built yet), so it doesn't belong in
+ * the Enroll/Verify/Deploy flow that assumes a working capture
+ * backend. backend_available stays 0 in supported_sensors.h until
+ * capture actually exists -- this menu item only covers pairing. */
+static void do_pair_metallica_mis(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. Nothing to pair.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis will attempt REAL pairing against %s {0x%04X:0x%04X}.\n"
+        "Pairing writes a new partition table + cert material to the\n"
+        "sensor's flash, uploads the Metallica MIS firmware blob\n"
+        "(downloading it from Lenovo first if not already cached), and\n"
+        "ends with a real reboot command sent to the device.\n\n"
+        "This is NOT reversible by just running this again, and it WILL\n"
+        "make any existing Windows Hello (or other OS) fingerprint\n"
+        "enrollments on this sensor unreadable -- pairing swaps the\n"
+        "sensor's trusted host identity, which orphans templates\n"
+        "enrolled under the previous pairing rather than deleting them\n"
+        "individually. This has only been exercised against real\n"
+        "hardware in the plaintext-bootstrap stage so far -- the actual\n"
+        "flash write + firmware upload has NOT been tested on real\n"
+        "hardware yet.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    printf("Type PAIR (all caps) to proceed, anything else to cancel: ");
+    fflush(stdout);
+    char confirm[16];
+    if (!fgets(confirm, sizeof(confirm), stdin)) {
+        printf("\nPairing cancelled.\n\n");
+        return;
+    }
+    size_t clen = strlen(confirm);
+    while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+    if (strcmp(confirm, "PAIR") != 0) {
+        printf("Pairing cancelled.\n\n");
+        return;
+    }
+
+    if (metallica_mis_open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("\nRunning plaintext bootstrap stage...\n");
+    if (metallica_mis_send_init() != 0) {
+        vfsc_err("Plaintext bootstrap stage failed. Check the diagnostic output "
+                  "above for the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Bootstrap OK.\n\n");
+
+    printf("Attempting real pairing + firmware upload now...\n");
+    if (metallica_mis_do_pairing() != 0) {
+        vfsc_err("Pairing failed. Sensor flash state is whatever the last "
+                  "completed step left it in -- there is no rollback. Do not "
+                  "assume the device is in a clean/unpaired state before "
+                  "trying again.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+
+    vfsc_ok("\nPairing + firmware upload succeeded. The device sent itself a "
+            "reboot command as the last step and should be re-enumerating "
+            "now -- give it a moment before running Enroll/Verify (once "
+            "this sensor's capture backend exists).\n\n");
+    metallica_mis_close_device();
+}
 
 /* Enrolls ONE named finger. Multiple fingers can be enrolled by
  * calling this repeatedly with different names — each gets its own
@@ -2181,6 +2286,14 @@ int main(int argc, char **argv) {
             case '1': do_enroll(); break;
             case '2': do_verify(); break;
             case '3': do_deploy(); break;
+            case 'P': case 'p':
+                if (is_metallica_mis_sensor(g_detected_sensor)) {
+                    do_pair_metallica_mis();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
             case 'S': case 's': do_settings_menu(); break;
             case 'A': case 'a': print_about(); break;
             case 'Q': case 'q':
