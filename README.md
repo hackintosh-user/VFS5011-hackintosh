@@ -62,11 +62,9 @@ Please Keep in mind some features for other sensors may be **broken** or **buggy
   encrypted APFS volume, not in plaintext on the boot volume
 - Self-elevating daemon with a narrowly scoped, single-purpose sudoers
   rule rather than a blanket NOPASSWD grant
-- Interactive terminal client (`vfs_client`) for enrollment, verification,
-  and one-command deployment of the background daemon
+- Interactive terminal client (`hack-touchid_client`) for enrollment, verification, and one-command deployment of the background daemon
 -  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
 -  Growing supported sensor list with testers.
-
 ## Menu Bar Companion App (optional)
 
 `vfs5011-menubar/` contains an optional menu bar app that surfaces the
