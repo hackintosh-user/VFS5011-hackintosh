@@ -135,7 +135,7 @@ static unsigned short g_detected_pid = 0;
  * one opens first is recorded in g_detected_vid/g_detected_pid for
  * later use (e.g. metallica_mis_init_flash()'s 0090 special case).
  */
-static int open_device(void) {
+int metallica_mis_open_device(void) {
     if (libusb_init(&g_ctx) < 0) return -1;
     libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
 
@@ -179,7 +179,7 @@ static int open_device(void) {
     return 0;
 }
 
-static void close_device(void) {
+void metallica_mis_close_device(void) {
     if (g_handle) {
         libusb_clear_halt(g_handle, METALLICA_MIS_IN_ENDPOINT_CTRL);
         libusb_clear_halt(g_handle, METALLICA_MIS_IN_ENDPOINT_DATA);
@@ -421,7 +421,7 @@ static int mis_transport(void *ctx, const unsigned char *out, size_t out_len,
  * metallica_mis_upload_fwext()) -- see the loud warning in main()
  * about what NOT to do immediately after this returns.
  */
-static int do_pairing(void) {
+int metallica_mis_do_pairing(void) {
     char product_name[256];
     char serial_number[256];
     metallica_mis_tls_t tls;
@@ -465,7 +465,7 @@ static int do_pairing(void) {
     return 0;
 }
 
-static int send_init(void) {
+int metallica_mis_send_init(void) {
     unsigned char reply[256];
     int n;
 
@@ -532,6 +532,18 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 }
 */
 
+/*
+ * main() is compiled ONLY for the standalone metallica_mis_daemon
+ * test-harness binary (build_metallica_mis.sh). hack_touchid_client.c
+ * links this same .c file to reuse metallica_mis_open_device(),
+ * metallica_mis_send_init(), and metallica_mis_do_pairing() directly
+ * (see metallica_mis_daemon.h + do_pair_metallica_mis() in the
+ * client, Aug 28), and defines HACK_TOUCHID_CLIENT_BUILD before
+ * including this file's object so the two binaries don't fight over
+ * having two main()s. The client's own menu action reproduces this
+ * exact sequence and exact warnings -- keep them in sync if either
+ * changes. */
+#ifndef HACK_TOUCHID_CLIENT_BUILD
 int main(int argc, char **argv) {
     bool do_pair = false;
     for (int i = 1; i < argc; i++) {
@@ -543,16 +555,16 @@ int main(int argc, char **argv) {
         "upload stage. Calibration/capture still require work beyond\n"
         "this. See file header for status.\n");
 
-    if (open_device() != 0) {
+    if (metallica_mis_open_device() != 0) {
         return 1;
     }
 
-    int rc = send_init();
+    int rc = metallica_mis_send_init();
     if (rc != 0) {
         fprintf(stderr, "metallica_mis: plaintext bootstrap stage FAILED. "
                          "This is the first real signal from hardware -- "
                          "check the specific step that failed above.\n");
-        close_device();
+        metallica_mis_close_device();
         return 1;
     }
 
@@ -567,21 +579,21 @@ int main(int argc, char **argv) {
             "ends with a real reboot command -- this is NOT reversible by\n"
             "just re-running the daemon, and has not been tested against\n"
             "real hardware yet. Don't pass --pair casually; understand what\n"
-            "it does first (see do_pairing()'s doc comment above).\n");
-        close_device();
+            "it does first (see metallica_mis_do_pairing()'s doc comment above).\n");
+        metallica_mis_close_device();
         return 0;
     }
 
     fprintf(stderr, "metallica_mis: --pair given, attempting real pairing "
                      "+ firmware upload now...\n");
-    rc = do_pairing();
+    rc = metallica_mis_do_pairing();
     if (rc != 0) {
         fprintf(stderr, "metallica_mis: do_pairing() FAILED. Sensor flash state is "
                          "whatever the last completed step left it in -- there is no "
                          "rollback. Do not assume the device is in a clean/unpaired "
                          "state before trying again; get_flash_info() on the next run "
                          "will report the truth.\n");
-        close_device();
+        metallica_mis_close_device();
         return 1;
     }
 
@@ -592,6 +604,7 @@ int main(int argc, char **argv) {
                      "a handle whose device just disconnected; it's not another "
                      "command to the sensor itself.\n");
 
-    close_device();
+    metallica_mis_close_device();
     return 0;
 }
+#endif /* HACK_TOUCHID_CLIENT_BUILD */
