@@ -35,7 +35,7 @@ into the prompt automatically.
 ## Supported Sensors
 
 This Table will have the currently Supported Sensors or sensors in **Development** or **Planned Support**. Please keep your expectations in check, this is a hobby project.
-| Sensor Name / Model    | PID  | VID  | Support status |
+| Sensor Name / Model    | VID  | PID  | Support status |
 |------------------------|------|------|----------------|
 | Validty VFS5011        | 138A | 0018 | **Supported**  |
 | Synaptics Metallica MIS| 006cb| 009a | **Developing** |
