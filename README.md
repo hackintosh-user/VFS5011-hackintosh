@@ -46,7 +46,7 @@ This Table will have the currently Supported Sensors or sensors in **Development
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the VID:PID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
 ## Features
 
-Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt a full Dev-Ops team.
+Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt maintained by a full Dev-Ops team.
 
 - Fingerprint capture and matching entirely native to macOS, no Linux
   kernel driver or libfprint dependency at runtime
