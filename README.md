@@ -173,6 +173,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 [1] Enroll a Finger
 [2] Verify Fingerprint Match [Score / 20]
 [3] Deploy VFS Client for Authentication Services
+[P] (ONLY FOR METALLICA MIS SENSORS) Pair
 
 [S] Settings
 [A] About
