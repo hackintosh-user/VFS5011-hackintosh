@@ -125,7 +125,7 @@ Known limitations:
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
-- `openssl@3` (`brew install openssl@3`) [will offically be Deprecated on Novemeber 1st 2026 but should work fine stil]
+- `openssl@3` (`brew install openssl@3`) [will be Deprecated on Novemeber 1st 2026 but should work fine still]
 - `innoextract` (`brew install innoextract`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
