@@ -72,7 +72,17 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * meaning it needs an ECDH handshake + session-cipher-wrapped
          * commands, not a flat plaintext init script. See
          * metallica_mis_daemon.c's header comment before touching this.
-         * install_script_name is a placeholder; nothing to install yet. */
+         * install_script_name is a placeholder; nothing to install yet.
+         * Aug 28: hack_touchid_client.c now has its own [P] Pair Sensor
+         * menu item (do_pair_metallica_mis()) that calls straight into
+         * metallica_mis_open_device()/metallica_mis_send_init()/
+         * metallica_mis_do_pairing() via metallica_mis_daemon.h -- a
+         * tester no longer needs to separately build/run the standalone
+         * metallica_mis_daemon test harness to attempt --pair. This is
+         * PAIRING ONLY: capture_quality_template() for this sensor
+         * family still doesn't exist, so backend_available stays 0
+         * until that's built -- Enroll/Verify/Deploy still refuse for
+         * this sensor exactly as before. */
         .display_name        = "Synaptics Metallica MIS",
         .vid                  = 0x06cb,
         .pid                  = 0x009a,
