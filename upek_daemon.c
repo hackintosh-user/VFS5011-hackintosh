@@ -46,6 +46,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <libusb.h>
 
 #include "upek_proto.h"
@@ -452,6 +453,115 @@ unsigned char *upek_capture_fingerprint_image(libusb_device_handle *handle, int 
     return image;
 }
 
+/* ---- device open/close/presence, promoted out of main() below into
+ * standalone functions (Aug 29) so they match the shape
+ * vfs5011_daemon.c's own open_device()/close_device()/
+ * vfs5011_sensor_is_present() already have -- this is prep for the
+ * eventual shared daemon core (see hack_touchid_client.c's capture
+ * dispatch comment and the project's own notes on that refactor),
+ * which expects every sensor backend to expose exactly this shape:
+ * backend_open_device(), backend_close_device(),
+ * backend_sensor_is_present(), backend_image_width(). Naming these
+ * with the upek_ prefix rather than backend_ for now since this file
+ * isn't linked into that shared core yet -- rename is a 1-line sed
+ * away whenever that wiring actually happens. */
+
+static libusb_context *g_upek_ctx = NULL;
+static libusb_device_handle *g_upek_handle = NULL;
+
+/* Same retry-with-backoff shape as vfs5011_daemon.c's open_device() --
+ * copied deliberately rather than reinvented, since that logic exists
+ * specifically to paper over real macOS/IOKit timing quirks seen on
+ * real hardware (a device not being immediately re-openable right
+ * after a previous close, IOKit holding the interface exclusively for
+ * a brief moment after enumeration). UPEK hasn't been run against
+ * real hardware yet, so there's no confirmation these same quirks
+ * apply here too -- but there's no reason to assume a T420's USB
+ * stack behaves any better than a DV6's, so start with the same
+ * defensiveness rather than adding it reactively after a tester hits
+ * the same "Claim failed" problem VFS5011 already solved. */
+int upek_open_device(void) {
+    if (libusb_init(&g_upek_ctx) < 0) return -1;
+    libusb_set_option(g_upek_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    for (int i = 0; i < 5; i++) {
+        g_upek_handle = libusb_open_device_with_vid_pid(g_upek_ctx, UPEK_VID, UPEK_PID);
+        if (g_upek_handle) break;
+        usleep(300000);
+    }
+    if (!g_upek_handle) {
+        fprintf(stderr, "upek: device not found\n");
+        return -1;
+    }
+
+    libusb_set_auto_detach_kernel_driver(g_upek_handle, 1);
+
+    if (libusb_claim_interface(g_upek_handle, 0) == 0) return 0;
+
+    for (int i = 0; i < 3; i++) {
+        usleep(150000);
+        if (libusb_claim_interface(g_upek_handle, 0) == 0) return 0;
+    }
+
+    fprintf(stderr, "upek: claim failed, resetting device and retrying...\n");
+    int reset_r = libusb_reset_device(g_upek_handle);
+    if (reset_r != 0) {
+        fprintf(stderr, "upek: device reset failed: %s\n", libusb_error_name(reset_r));
+    }
+    usleep(500000);
+
+    if (libusb_claim_interface(g_upek_handle, 0) != 0) {
+        fprintf(stderr, "upek: claim failed again after reset\n");
+        return -1;
+    }
+    return 0;
+}
+
+void upek_close_device(void) {
+    if (g_upek_handle) {
+        /* UPEK has no bulk OUT endpoint like VFS5011 -- just the bulk
+         * IN image stream and a separate interrupt IN for finger
+         * presence, both already given endpoint macros in
+         * upek_proto.h (see hack_touchid_client.c's close_device(),
+         * which already clears these same two for the client's own
+         * UPEK path). */
+        libusb_clear_halt(g_upek_handle, UPEK_IN_ENDPOINT_BULK);
+        libusb_clear_halt(g_upek_handle, UPEK_IN_ENDPOINT_INTR);
+        libusb_release_interface(g_upek_handle, 0);
+        libusb_close(g_upek_handle);
+    }
+    if (g_upek_ctx) libusb_exit(g_upek_ctx);
+}
+
+/* Same non-invasive presence-check shape as
+ * vfs5011_sensor_is_present() -- its own short-lived context, never
+ * opens/claims, safe to call speculatively without disturbing an
+ * in-flight capture on g_upek_ctx/g_upek_handle. */
+bool upek_sensor_is_present(void) {
+    libusb_context *probe_ctx = NULL;
+    if (libusb_init(&probe_ctx) < 0) return true;
+    libusb_set_option(probe_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(probe_ctx, &list);
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        if (desc.idVendor == UPEK_VID && desc.idProduct == UPEK_PID) {
+            found = true;
+            break;
+        }
+    }
+    if (list) libusb_free_device_list(list, 1);
+    libusb_exit(probe_ctx);
+    return found;
+}
+
+int upek_image_width(void) {
+    return UPEK_IMG_WIDTH;
+}
+
 /* ---- Standalone smoke-test harness ----
  *
  * Not part of the real client integration -- this exists so a first
@@ -468,41 +578,22 @@ unsigned char *upek_capture_fingerprint_image(libusb_device_handle *handle, int 
 int main(int argc, char **argv) {
     const char *out_path = (argc > 1) ? argv[1] : "upek_capture.pgm";
 
-    libusb_context *ctx = NULL;
-    if (libusb_init(&ctx) < 0) {
-        fprintf(stderr, "libusb_init failed\n");
-        return 1;
-    }
-
-    libusb_device_handle *handle = libusb_open_device_with_vid_pid(ctx, UPEK_VID, UPEK_PID);
-    if (!handle) {
-        fprintf(stderr, "UPEK sensor (147e:2016) not found\n");
-        libusb_exit(ctx);
-        return 1;
-    }
-
-    libusb_set_auto_detach_kernel_driver(handle, 1);
-    if (libusb_claim_interface(handle, 0) != 0) {
-        fprintf(stderr, "Could not claim interface 0\n");
-        libusb_close(handle);
-        libusb_exit(ctx);
+    if (upek_open_device() != 0) {
         return 1;
     }
 
     printf("Swipe your finger now...\n");
     int height = 0;
-    unsigned char *image = upek_capture_fingerprint_image(handle, &height);
+    unsigned char *image = upek_capture_fingerprint_image(g_upek_handle, &height);
 
-    libusb_release_interface(handle, 0);
-    libusb_close(handle);
-    libusb_exit(ctx);
+    upek_close_device();
 
     if (!image) {
         fprintf(stderr, "Capture failed\n");
         return 1;
     }
 
-    printf("Captured %d rows x %d columns\n", height, UPEK_IMG_WIDTH);
+    printf("Captured %d rows x %d columns\n", height, upek_image_width());
 
     FILE *f = fopen(out_path, "wb");
     if (!f) {
@@ -510,8 +601,8 @@ int main(int argc, char **argv) {
         free(image);
         return 1;
     }
-    fprintf(f, "P5\n%d %d\n255\n", UPEK_IMG_WIDTH, height);
-    fwrite(image, 1, (size_t)UPEK_IMG_WIDTH * height, f);
+    fprintf(f, "P5\n%d %d\n255\n", upek_image_width(), height);
+    fwrite(image, 1, (size_t)upek_image_width() * height, f);
     fclose(f);
     free(image);
 
