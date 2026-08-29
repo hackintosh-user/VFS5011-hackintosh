@@ -12,6 +12,13 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 - `build_client.sh` now links `metallica_mis_daemon.c` + its TLS/flash/firmware-upload dependencies and requires OpenSSL, same as `build_metallica_mis.sh`.
 - Pairing only — capture (`Enroll`/`Verify`) for this sensor family still doesn't exist, so `backend_available` stays `0` in `supported_sensors.h` and those menu items still refuse for Metallica MIS exactly as before.
 
+**UPEK capture wired into the client (Aug 29)**
+- `hack_touchid_client.c`'s capture dispatch is no longer hardcoded to VFS5011: `capture_fingerprint_image()` is now a real dispatch wrapper that routes to `vfs5011_capture_fingerprint_image()` or the new `upek_capture_fingerprint_image()` based on `g_detected_sensor`. `open_device()`/`close_device()` are similarly generalized (correct VID:PID, correct endpoints to clear per sensor family).
+- New `[U] Test Capture (UPEK, experimental, no save)` menu item, shown only when a UPEK/AuthenTec TouchStrip (`147e:2016`) is detected — runs one real capture + minutiae extraction and reports the result (plus a debug `.pgm` saved to `/tmp`), without touching enrolled-finger storage. Lets Cold_Salamander7764 test straight from the client instead of separately building `upek_daemon.c`'s own `UPEK_STANDALONE_TEST` smoke-test binary.
+- `upek_capture_fingerprint_image()` is now exposed via a new `upek_daemon.h`. `upek_daemon.c`'s own smoke-test `main()` was already gated behind `#ifdef UPEK_STANDALONE_TEST`, so no build-flag gymnastics were needed to link it into the client (unlike Metallica MIS's `-DHACK_TOUCHID_CLIENT_BUILD`).
+- `build_client.sh` now also links `upek_daemon.c`.
+- This is a capture *test*, not full Enroll/Verify support — `backend_available` stays `0` for UPEK until this has an actual successful real-hardware pass; `Enroll`/`Verify`/`Deploy` still refuse for this sensor exactly as before.
+
 
   
 ## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
