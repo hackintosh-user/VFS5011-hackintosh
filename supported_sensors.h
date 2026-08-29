@@ -49,13 +49,22 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * exists in upek_daemon.c/upek_proto.h, ported directly from
          * libfprint's upeksonly.c (register read/write + interrupt +
          * bulk image stream, no blob playback or handshake needed --
-         * a simpler port than VFS5011 or Metallica MIS). NOT yet
-         * tested against real hardware and NOT yet wired into
-         * hack_touchid_client.c's capture dispatch (still hardcoded
-         * to VFS5011) -- backend_available stays 0 until both of
-         * those happen, same policy as Metallica MIS below.
-         * install_script_name is still a placeholder; no installer
-         * exists until the wiring/testing above is done. */
+         * a simpler port than VFS5011 or Metallica MIS).
+         * Aug 29: wired into hack_touchid_client.c's capture dispatch
+         * (capture_fingerprint_image() now branches on g_detected_sensor
+         * instead of being hardcoded to VFS5011 -- see upek_daemon.h)
+         * behind a new experimental [U] Test Capture menu item, so
+         * Cold_Salamander7764 can run a real capture test straight from
+         * the client instead of separately building upek_daemon.c's own
+         * UPEK_STANDALONE_TEST smoke-test binary. That menu item is
+         * intentionally NOT the same as backend_available=1: it proves
+         * capture produces a plausible image, not that the full
+         * Enroll/Verify/Deploy flow works end-to-end. backend_available
+         * stays 0 -- and Enroll/Verify/Deploy keep refusing for this
+         * sensor exactly as before -- until that real-hardware pass via
+         * [U] actually happens and looks good, same policy as Metallica
+         * MIS below. install_script_name is still a placeholder; no
+         * installer exists until backend_available flips. */
         .display_name        = "UPEK/AuthenTec TouchStrip",
         .vid                  = 0x147e,
         .pid                  = 0x2016,
