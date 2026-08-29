@@ -49,6 +49,8 @@
 #include "supported_sensors.h"
 #include "metallica_mis_firmware.h"
 #include "metallica_mis_daemon.h"
+#include "upek_proto.h"
+#include "upek_daemon.h"
 
 #define VFS5011_VID 0x138a
 #define VFS5011_PID 0x0018
@@ -316,8 +318,13 @@ out:
 /* Runs the full pipeline: init -> initiate-capture -> swipe capture ->
  * alignment. Returns a malloc'd VFS5011_IMAGE_WIDTH x *out_height
  * grayscale buffer, or NULL on failure. Caller must libusb_init/open
- * the device and pass a claimed handle. */
-static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+ * the device and pass a claimed handle.
+ *
+ * Renamed from capture_fingerprint_image() (Aug 29) when this became
+ * one of two capture backends behind a dispatch wrapper of that name
+ * further below -- this function itself is unchanged, VFS5011-only,
+ * same as it always was. */
+static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
     if (run_sequence(handle, vfs5011_initialization,
                       sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
         fprintf(stderr, "Init sequence failed\n");
@@ -387,9 +394,62 @@ static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, in
 static libusb_context *g_ctx = NULL;
 static libusb_device_handle *g_handle = NULL;
 
+/* Set once by detect_supported_sensor() at startup (defined further
+ * below) and reused for the rest of the session -- everything
+ * downstream (status line, gates, Enroll/Verify/Deploy dispatch, and
+ * the capture dispatch immediately below) reads this instead of
+ * re-probing or hardcoding one sensor's VID:PID. NULL means nothing
+ * in supported_sensors.h was found on the bus. Moved up here (Aug
+ * 29) from its original spot right before detect_supported_sensor()
+ * so the capture dispatch helpers below -- which need to read it --
+ * can come before that function without a forward declaration. */
+static const hack_touchid_sensor_t *g_detected_sensor = NULL;
+
+/* True for the UPEK/AuthenTec TouchStrip identity (147e:2016). Used
+ * to pick the right capture backend and image width below, same
+ * shape as is_metallica_mis_sensor() further down for that family. */
+static int is_upek_sensor(const hack_touchid_sensor_t *s) {
+    return s && s->vid == UPEK_VID && s->pid == UPEK_PID;
+}
+
+/* Image width varies by sensor; height is always however many rows
+ * that sensor's capture produced this swipe. vfs5011_extract_template()
+ * (despite its name) is genuinely sensor-generic -- any width*height
+ * 8-bit grayscale buffer works, see hack-touchid-matcher.c's own
+ * header comment -- so no extraction changes are needed, only the
+ * width fed into it. */
+static int current_sensor_image_width(void) {
+    if (is_upek_sensor(g_detected_sensor)) return UPEK_IMG_WIDTH;
+    return VFS5011_IMAGE_WIDTH;
+}
+
+/* Capture dispatch (Aug 29) -- picks the real capture backend based
+ * on g_detected_sensor instead of the old hardcoded-to-VFS5011 call.
+ * UPEK's backend_available is still 0 in supported_sensors.h (no
+ * real-hardware pass yet -- see do_test_upek_capture() below, which
+ * is how that first pass is meant to happen), so this dispatch is
+ * reachable today only through that experimental menu item, not
+ * through Enroll/Verify. VFS5011 remains the default/fallback so
+ * existing behavior for that sensor is completely unchanged. */
+static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    if (is_upek_sensor(g_detected_sensor)) {
+        return upek_capture_fingerprint_image(handle, out_height);
+    }
+    return vfs5011_capture_fingerprint_image(handle, out_height);
+}
+
 static int open_device(void) {
     if (libusb_init(&g_ctx) < 0) return -1;
     libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    /* Aug 29: opens whichever sensor was actually detected instead of
+     * a hardcoded VFS5011 VID:PID, so this works for UPEK too. Falls
+     * back to VFS5011's constants if somehow called with no sensor
+     * detected yet (shouldn't happen in practice -- detection always
+     * runs first at startup -- but keeps this safe rather than
+     * dereferencing a NULL g_detected_sensor). */
+    unsigned short vid = g_detected_sensor ? g_detected_sensor->vid : VFS5011_VID;
+    unsigned short pid = g_detected_sensor ? g_detected_sensor->pid : VFS5011_PID;
 
     /* Right after a close_device() from a previous attempt, macOS
      * sometimes hasn't finished settling the device back into a
@@ -398,7 +458,7 @@ static int open_device(void) {
      * physically present. Retry a few times with backoff before
      * treating it as a genuine "device not found". */
     for (int i = 0; i < 5; i++) {
-        g_handle = libusb_open_device_with_vid_pid(g_ctx, VFS5011_VID, VFS5011_PID);
+        g_handle = libusb_open_device_with_vid_pid(g_ctx, vid, pid);
         if (g_handle) break;
         usleep(300000); /* 300ms between open attempts */
     }
@@ -445,10 +505,18 @@ static void close_device(void) {
         /* Proactively clear any halt on the endpoints we use before
          * releasing, so the *next* run doesn't inherit a stalled pipe
          * from this session (this is what caused the PIPE error /
-         * cascading Claim failed seen after a previous run). */
-        libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_CTRL);
-        libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_DATA);
-        libusb_clear_halt(g_handle, VFS5011_OUT_ENDPOINT);
+         * cascading Claim failed seen after a previous run). Aug 29:
+         * which endpoints to clear now depends on which sensor is
+         * actually open -- UPEK doesn't have a VFS5011-style bulk OUT
+         * endpoint, it has a bulk IN + a separate interrupt IN. */
+        if (is_upek_sensor(g_detected_sensor)) {
+            libusb_clear_halt(g_handle, UPEK_IN_ENDPOINT_BULK);
+            libusb_clear_halt(g_handle, UPEK_IN_ENDPOINT_INTR);
+        } else {
+            libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_CTRL);
+            libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_DATA);
+            libusb_clear_halt(g_handle, VFS5011_OUT_ENDPOINT);
+        }
         libusb_release_interface(g_handle, 0);
         libusb_close(g_handle);
     }
@@ -538,7 +606,7 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
         }
 
         memset(out_tmpl, 0, sizeof(*out_tmpl));
-        int r = vfs5011_extract_template(image, VFS5011_IMAGE_WIDTH, height, out_tmpl);
+        int r = vfs5011_extract_template(image, current_sensor_image_width(), height, out_tmpl);
         free(image);
         close_device();
 
@@ -1109,13 +1177,6 @@ static int refresh_finger_cache(void) {
     return g_finger_count;
 }
 
-/* Set once by detect_supported_sensor() at startup and reused for the
- * rest of the session -- everything downstream (status line, gates,
- * Enroll/Verify/Deploy dispatch) reads this instead of re-probing or
- * hardcoding one sensor's VID:PID. NULL means nothing in
- * supported_sensors.h was found on the bus. */
-static const hack_touchid_sensor_t *g_detected_sensor = NULL;
-
 /* Scans supported_sensors.h against whatever's actually on the USB
  * bus and returns the first match (or NULL). Deliberately does NOT
  * claim the interface -- this is a presence check only, so it doesn't
@@ -1244,6 +1305,9 @@ static void print_menu(void) {
     printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
     if (is_metallica_mis_sensor(g_detected_sensor)) {
         printf("%s[P]%s Pair Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+    }
+    if (is_upek_sensor(g_detected_sensor)) {
+        printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
     }
     printf("\n");
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
@@ -1395,6 +1459,89 @@ static void do_pair_metallica_mis(void) {
             "now -- give it a moment before running Enroll/Verify (once "
             "this sensor's capture backend exists).\n\n");
     metallica_mis_close_device();
+}
+
+/* Runs ONE real capture attempt against a UPEK/AuthenTec TouchStrip
+ * sensor using the capture dispatch wired in Aug 29 (see
+ * capture_fingerprint_image() and upek_daemon.h above), and reports
+ * what came back -- WITHOUT touching enrolled-finger storage.
+ *
+ * This is the "first real-hardware pass" upek_daemon.c's own header
+ * comment says needs to happen before backend_available flips to 1
+ * for this sensor -- it exists so Cold_Salamander7764 (or anyone
+ * else with this hardware) can run it from the one client binary
+ * instead of separately building upek_daemon.c's own
+ * UPEK_STANDALONE_TEST smoke-test harness. Non-destructive: reading
+ * a swipe image has none of the flash-write risk Metallica MIS
+ * pairing does, so this doesn't need that action's typed-confirmation
+ * gate -- just a heads-up that it's unproven on real hardware yet.
+ *
+ * Deliberately separate from do_enroll()/do_verify() rather than
+ * flipping backend_available early: this only proves capture
+ * produces a plausible image with enough minutiae, not that the
+ * whole Enroll/Verify/Deploy flow works end-to-end for this sensor.
+ * Once this has been run successfully against real hardware,
+ * backend_available can flip to 1 in supported_sensors.h and this
+ * menu item can eventually be retired in favor of the normal flow. */
+static void do_test_upek_capture(void) {
+    if (!g_detected_sensor || !is_upek_sensor(g_detected_sensor)) {
+        vfsc_err("No UPEK sensor detected. Nothing to test.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis performs ONE real capture attempt against %s "
+        "{0x%04X:0x%04X} using a capture backend that has NOT been "
+        "confirmed against real hardware yet. Nothing is saved to "
+        "enrolled-finger storage -- this only reports what the sensor "
+        "returned, plus a raw debug image for visual inspection.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    if (open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("Swipe your finger across the sensor now...\n");
+    int height = 0;
+    unsigned char *image = capture_fingerprint_image(g_handle, &height);
+    close_device();
+
+    if (!image) {
+        vfsc_err("Capture failed -- check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        return;
+    }
+
+    int width = current_sensor_image_width();
+    const char *debug_path = "/tmp/upek_test_capture.pgm";
+    FILE *fp = fopen(debug_path, "wb");
+    if (fp) {
+        fprintf(fp, "P5\n%d %d\n255\n", width, height);
+        fwrite(image, 1, (size_t)width * (size_t)height, fp);
+        fclose(fp);
+    } else {
+        vfsc_warn("Could not save debug image to %s: %s (continuing anyway)\n",
+                  debug_path, strerror(errno));
+    }
+
+    struct xyt_struct tmpl;
+    memset(&tmpl, 0, sizeof(tmpl));
+    int r = vfs5011_extract_template(image, width, height, &tmpl);
+    free(image);
+
+    if (r != 0) {
+        vfsc_err("Capture succeeded (%d x %d image) but minutiae extraction "
+                  "failed (code %d). Raw capture saved to %s for inspection "
+                  "-- check whether it actually looks like a fingerprint.\n\n",
+                  width, height, r, debug_path);
+        return;
+    }
+
+    vfsc_ok("Capture succeeded: %d x %d image, %d minutiae extracted "
+            "(need >= %d to be usable for Enroll/Verify). Raw capture "
+            "also saved to %s.\n\n",
+            width, height, tmpl.nrows, MIN_MINUTIAE, debug_path);
 }
 
 /* Enrolls ONE named finger. Multiple fingers can be enrolled by
@@ -2434,6 +2581,14 @@ int main(int argc, char **argv) {
             case 'P': case 'p':
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_pair_metallica_mis();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'U': case 'u':
+                if (is_upek_sensor(g_detected_sensor)) {
+                    do_test_upek_capture();
                 } else {
                     printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
                     ran_action = false;
