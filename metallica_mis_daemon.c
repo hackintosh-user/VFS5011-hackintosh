@@ -194,6 +194,39 @@ void metallica_mis_close_device(void) {
     }
 }
 
+/* Non-invasive presence check (Aug 29) -- same shape as
+ * vfs5011_sensor_is_present()/upek_sensor_is_present(): its own
+ * short-lived context, never opens or claims the device, safe to
+ * call speculatively without disturbing an in-flight
+ * open_device()/close_device() cycle on g_ctx/g_handle. Checks all
+ * three known identities (see METALLICA_MIS_IDENTITIES above),
+ * unlike the single-identity checks the other two sensors use, since
+ * this is the same chip under three different OEM USB IDs. */
+bool metallica_mis_sensor_is_present(void) {
+    libusb_context *probe_ctx = NULL;
+    if (libusb_init(&probe_ctx) < 0) return true;
+    libusb_set_option(probe_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(probe_ctx, &list);
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        for (size_t j = 0; j < METALLICA_MIS_IDENTITIES_COUNT; j++) {
+            if (desc.idVendor == METALLICA_MIS_IDENTITIES[j].vid &&
+                desc.idProduct == METALLICA_MIS_IDENTITIES[j].pid) {
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+    if (list) libusb_free_device_list(list, 1);
+    libusb_exit(probe_ctx);
+    return found;
+}
+
 /*
  * bulk_transfer_with_pipe_retry() -- copied verbatim from
  * vfs5011_daemon.c. This is pure libusb/macOS glue, not sensor
