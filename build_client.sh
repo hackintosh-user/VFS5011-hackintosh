@@ -13,6 +13,13 @@
 # collide with this binary's main(). Needs OpenSSL (ECDH/HMAC/SHA/
 # ECDSA for metallica_mis_tls.c/metallica_mis_init_flash.c), same
 # keg-only Homebrew path as build_metallica_mis.sh.
+# Aug 29: also links upek_daemon.c so the client's own [U] Test
+# Capture (UPEK, experimental) menu item can call
+# upek_capture_fingerprint_image() directly -- see upek_daemon.h.
+# upek_daemon.c's own smoke-test main() is gated behind
+# UPEK_STANDALONE_TEST (undefined here), so no macro is needed to
+# avoid a duplicate main() the way Metallica MIS needed
+# -DHACK_TOUCHID_CLIENT_BUILD.
 set -e
 
 OPENSSL_PREFIX="/usr/local/opt/openssl@3"
@@ -26,6 +33,7 @@ clang -DHACK_TOUCHID_CLIENT_BUILD \
     hack_touchid_client.c hack-touchid-matcher.c metallica_mis_firmware.c \
     metallica_mis_daemon.c metallica_mis_tls.c metallica_mis_init_flash.c \
     metallica_mis_flash.c metallica_mis_blobs_9a.c metallica_mis_upload_fwext.c \
+    upek_daemon.c \
     nbis/mindtct/*.c nbis/bozorth3/*.c \
     -o hack-touchid \
     -I. -Inbis/include \
