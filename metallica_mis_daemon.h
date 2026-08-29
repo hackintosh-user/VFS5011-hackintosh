@@ -7,19 +7,21 @@
  * p0cketl1nt (or any tester) to separately build and run the
  * standalone metallica_mis_daemon test-harness binary.
  *
- * Only these four calls are exposed -- everything else in
+ * Only these calls are exposed -- everything else in
  * metallica_mis_daemon.c (cmd(), assert_status(), mis_transport(),
  * get_host_identity(), the METALLICA_MIS_IDENTITIES table) stays
  * static/internal. Capture (Enroll/Verify) is NOT exposed here
  * because it doesn't exist yet -- see metallica_mis_daemon.c's
- * capture_quality_template() stub comment. This header is pairing
- * only.
+ * capture_quality_template() stub comment. This header is pairing +
+ * presence-check only.
  *
  * Callers must define HACK_TOUCHID_CLIENT_BUILD before compiling
  * metallica_mis_daemon.c into their binary, so that file's own
  * main() (the standalone test-harness entry point) is compiled out
  * and doesn't collide with the client's main().
  */
+
+#include <stdbool.h>
 
 #ifndef __METALLICA_MIS_DAEMON_H
 #define __METALLICA_MIS_DAEMON_H
@@ -35,6 +37,12 @@ int metallica_mis_open_device(void);
  * after the device has disconnected (e.g. right after a successful
  * pairing reboot). */
 void metallica_mis_close_device(void);
+
+/* Non-invasive presence check -- own short-lived context, never
+ * opens/claims, safe to call speculatively without disturbing an
+ * in-flight open_device()/close_device() cycle. Checks all three
+ * known OEM identities (06cb:009a, 138a:0097, 138a:009d). */
+bool metallica_mis_sensor_is_present(void);
 
 /* Plaintext bootstrap stage only (RomInfo, unknown cmd_19,
  * get_fw_info, hardcoded init blob, clean-slate blob if needed).
