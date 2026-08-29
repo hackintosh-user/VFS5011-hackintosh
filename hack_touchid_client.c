@@ -653,6 +653,141 @@ static void vfsc_status_line(const char *fmt, ...) {
     printf("\n");
 }
 
+/* Same as vfsc_status_line(), but for the specific handful of call
+ * sites that represent a REAL check actually passing (OpenCore
+ * version accepted, sensor found, daemon version matched, init
+ * fully complete) -- appends a systemd/OpenRC-style colored
+ * "[ OK ]" tag instead of a bare newline. Deliberately NOT used for
+ * the "Checking X..." in-progress lines that precede these (those
+ * stay plain vfsc_status_line calls, same as before) or for the
+ * pure-flavor flood/boot lines above -- this tag means "a real gate
+ * just passed", not "here's some atmosphere". */
+static void vfsc_status_line_ok(const char *fmt, ...) {
+    if (g_verbose_boot) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf(" %s[ %sOK%s ]%s\n", VFSC_DIM, VFSC_BGREEN, VFSC_DIM, VFSC_RESET);
+}
+
+/* Pure fun -- a real -v boot's whole appeal is watching a dense wall
+ * of kernel/IOKit log lines fly by for several seconds before the
+ * desktop shows up, and the handful of vfsc_boot_line() calls tied
+ * to real startup checks above don't produce that: there just aren't
+ * enough of them, and they print instantly with no delay between
+ * lines. This is a purely decorative flood of extra flavor lines
+ * with a small per-line delay, run once before the real checks
+ * start, so the client's own startup gets that same "-v" feeling.
+ * Every line here is 100% fake flavor text -- none of it is a real
+ * check result, and it never blocks or gates anything (same
+ * philosophy as vfsc_boot_line() above). Respects --q like the rest
+ * of verbose mode, since it's the same off switch.
+ *
+ * Runtime is intentionally randomized per-line rather than a single
+ * sleep(10) -- (rand() % (MAX-MIN)) + MIN microseconds between each
+ * of ~70 lines averages out to roughly 10 real seconds, but reads
+ * as an organic, uneven scroll the way a real kernel log does
+ * (bursts of fast lines, occasional pauses) rather than a
+ * metronome. */
+static void vfsc_verbose_boot_flood(void) {
+    if (!g_verbose_boot) return;
+
+    static const char *FLOOD_LINES[] = {
+        "AppleACPIPlatformExpert: ACPI tables validated",
+        "AppleACPICPU: Processor 0 (P0) initialized",
+        "IOPCIBridge: matching PCI device tree...",
+        "AppleIntelCPUPowerManagement: matched, PState table loaded",
+        "IOKit: Kext com.apple.driver.AppleUSBXHCIPCI, 1 personalities",
+        "IOKit: Kext com.apple.iokit.IOUSBHostFamily loaded",
+        "IOUSBHostDevice: enumerating downstream ports...",
+        "USBMSC Identifier (non-unique): match found",
+        "AppleUSBHub: hub @ 0x14200000, 4 ports powered",
+        "IOHIDFamily: matching HID device tree...",
+        "AppleHIDKeyboard: keyboard interface claimed",
+        "IOPlatformPluginFamily: [ACPI_SMC_PlatformPlugin] loaded",
+        "AppleSMC: SMC-KEYS successfully loaded (rev 1.3f0)",
+        "AppleGraphicsDevicePolicy: none found matching key IOGVA",
+        "IOGraphicsFamily: display framebuffer registered",
+        "AppleIntelFramebufferAzul: mobile platform, 1 display",
+        "AppleBacklightFixup: applying panel PWM patch",
+        "AppleALC: layout-id 0x0000000b applied",
+        "IOAudioFamily: HDA codec driver matched",
+        "AppleIntelPCHPowerManagement: matched",
+        "IOACPIPlatformDevice: SLPB button device registered",
+        "AppleRTC: RTC region 0x0-0x1000 mapped",
+        "AppleEFINVRAM: NVRAM region mapped, 0x10000 bytes",
+        "IODeviceTree: /options node populated",
+        "OpenCore: config.plist checksum verified",
+        "OpenCore: booter quirk RequestBootVarRouting active",
+        "kext cache: prelinkedkernel signature OK",
+        "AppleKeyStore: garbage collection pass complete",
+        "IOStorageFamily: probing block storage tree...",
+        "IOAHCIBlockStorageDevice: matched, 1 device",
+        "AppleAPFSContainer: scanning for containers...",
+        "apfs_module_start: com.apple.filesystems.apfs, 1677.100.5",
+        "AppleFSCompressionTypeZlib: kext loaded",
+        "AppleUSBMultitouchDriver: no matching personality (expected)",
+        "IOBluetoothHCIController: no controller present (expected)",
+        "AppleThunderboltNHI: no NHI hardware present (expected)",
+        "AppleUSBVHCIBCE: virtual hub attached",
+        "IOUSBHostFamily: composite driver matched interface 0",
+        "libusb-1.0: context refcount incremented",
+        "libusb-1.0: hotplug callback registered",
+        "IOKit: probing supported_sensors.h identity table...",
+        "IOUSBHostDevice: idVendor/idProduct match candidate found",
+        "IOUSBHostInterface: claiming interface 0, alt setting 0",
+        "IOUSBHostPipe: control endpoint 0x00 opened",
+        "IOUSBHostPipe: bulk endpoint 0x81 opened",
+        "IOUSBHostPipe: bulk endpoint 0x02 opened",
+        "AppleUSBHostBillboardDevice: no alternate mode present",
+        "kauth: credential resolved for calling process",
+        "sudo: session opened for user root",
+        "launchd: bootstrap namespace populated",
+        "launchd: querying com.hack-touchid.agent state...",
+        "diskutil: APFS container list refreshed",
+        "diskutil: HackTouchIDStore volume descriptor cached",
+        "SecurityAgent: TCC database opened read-only",
+        "AX: accessibility server handshake OK",
+        "CoreFoundation: preferences daemon reachable",
+        "IOReporting: power telemetry channel opened",
+        "AppleSMBIOS: DmiSystemFamily string decoded",
+        "AppleACPIPlatform: \\_SB.PCI0 device tree walk complete",
+        "OpenCore: SMBIOS spoof active, model string masked",
+        "IOKit: matching complete, 214 personalities probed",
+        "kextd: no orphaned kext bundles found",
+        "mds: metadata server idle",
+        "notifyd: watcher table primed",
+        "hack-touchid: capture pipeline symbols resolved",
+        "hack-touchid: NBIS mindtct/bozorth3 linked OK",
+        "hack-touchid: matcher self-test passed",
+    };
+    size_t n = sizeof(FLOOD_LINES) / sizeof(FLOOD_LINES[0]);
+
+    for (size_t i = 0; i < n; i++) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s %s\n", VFSC_DIM, g_boot_fake_time, VFSC_RESET, FLOOD_LINES[i]);
+        fflush(stdout);
+
+        /* 60ms-220ms per line, ~70 lines -> averages out to roughly
+         * 10 real seconds with an uneven, organic scroll speed. */
+        usleep(60000 + (useconds_t)(rand() % 160000));
+    }
+
+    /* One last line with the real sensor-table count, printed
+     * separately (not via the flood array above) so nothing here
+     * uses a non-literal printf format string. */
+    g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+    printf("%s[%9.6f]%s hack-touchid: reading supported_sensors.h (%zu entries)\n",
+           VFSC_DIM, g_boot_fake_time, VFSC_RESET, (size_t)HACK_TOUCHID_SENSOR_COUNT);
+    fflush(stdout);
+    usleep(60000 + (useconds_t)(rand() % 160000));
+}
+
 /* Small printf-style helpers so success/error/warning lines look the
  * same everywhere instead of every call site hand-rolling its own
  * color codes. Errors go to stderr (matching the rest of the file's
@@ -2081,7 +2216,7 @@ static bool check_opencore_version_requirement(void) {
         return true;
     }
 
-    vfsc_status_line("OpenCore v%d.%d.%d detected: continue.",
+    vfsc_status_line_ok("OpenCore v%d.%d.%d detected: continue.",
            found_code / 100, (found_code / 10) % 10, found_code % 10);
     return true;
 }
@@ -2106,7 +2241,7 @@ static bool check_sensor_presence_gate(void) {
         return false;
     }
 
-    vfsc_status_line("%s detected. continuing...", g_detected_sensor->display_name);
+    vfsc_status_line_ok("%s detected. continuing...", g_detected_sensor->display_name);
     return true;
 }
 
@@ -2177,7 +2312,7 @@ static bool check_daemon_version_gate(void) {
         return false;
     }
 
-    vfsc_status_line("v%s detected continuing...", daemon_version);
+    vfsc_status_line_ok("v%s detected continuing...", daemon_version);
     return true;
 }
 
@@ -2218,6 +2353,14 @@ int main(int argc, char **argv) {
         print_banner();
     }
 
+    /* The fun part -- a dense, ~10-second flood of fake kernel/IOKit
+     * log lines before the REAL startup checks below, so verbose
+     * mode actually reads like a Hackintosh's own -v boot instead of
+     * a handful of instantly-printed status lines. Purely decorative;
+     * see vfsc_verbose_boot_flood()'s own comment for why it's kept
+     * separate from the real checks. */
+    vfsc_verbose_boot_flood();
+
     vfsc_boot_line("AppleACPIPlatform: enumerating hardware...");
     vfsc_boot_line("IOKit: matching USB device tree...");
     vfsc_boot_line("com.hack-touchid.client @ 0x0000 (v%s)", VFS5011_PROJECT_VERSION);
@@ -2252,7 +2395,7 @@ int main(int argc, char **argv) {
     vfsc_status_line("Checking enrolled fingers...");
     refresh_finger_cache();
     vfsc_boot_line("Template DB: %d enrolled", g_finger_count > 0 ? g_finger_count : 0);
-    vfsc_boot_line("hack-touchid: init complete");
+    vfsc_status_line_ok("hack-touchid: init complete");
 
     /* Banner prints LAST in verbose mode, once the whole boot log has
      * scrolled by -- reads as "boot finished, here's the app" rather
@@ -2262,6 +2405,8 @@ int main(int argc, char **argv) {
     if (g_verbose_boot) {
         print_banner();
     }
+
+    printf("%sWelcome to HTID Client!%s\n\n", VFSC_BOLD, VFSC_RESET);
 
     char line[64];
     for (;;) {
