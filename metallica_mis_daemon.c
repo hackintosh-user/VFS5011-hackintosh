@@ -484,6 +484,45 @@ int metallica_mis_do_pairing(void) {
     fprintf(stderr, "metallica_mis: init_flash() succeeded (session still open). "
                      "Proceeding to firmware upload before any reboot...\n");
 
+    /* Diagnostic-only probe: identify_sensor(), ported from python-validity's
+     * sensor.py identify_sensor(). Sends opcode 0x75 over this SAME already-
+     * authenticated TLS session (piggybacking on the exact pairing flow just
+     * confirmed working on real hardware, rather than building a separate
+     * "reopen session on an already-paired device" path that's untested).
+     * Read-only, changes nothing on the sensor -- purely to find out which
+     * internal sensor "type" this chip reports, since upstream's own
+     * Sensor.open() only has hardcoded capture/calibration constants for two
+     * types (0x199 and 0xdb) and raises for anything else. This tells us
+     * whether full capture/enroll support is even feasible on this chip
+     * before any of that gets built. Deliberately does NOT abort do_pairing()
+     * on failure here -- this is pure diagnostics layered on top of a flow
+     * that has already fully succeeded by this point. */
+    {
+        unsigned char identify_cmd[1] = { 0x75 };
+        unsigned char identify_reply[64];
+        int idn = metallica_mis_tls_cmd(&tls, identify_cmd, sizeof(identify_cmd),
+                                         identify_reply, sizeof(identify_reply));
+        if (idn < 0) {
+            fprintf(stderr, "metallica_mis: [diagnostic] identify_sensor() probe failed to send/receive\n");
+        } else if (assert_status(identify_reply, idn) != 0) {
+            fprintf(stderr, "metallica_mis: [diagnostic] identify_sensor() probe returned an error status\n");
+        } else if (idn < 2 + 8) {
+            fprintf(stderr, "metallica_mis: [diagnostic] identify_sensor() reply too short (%d bytes)\n", idn);
+        } else {
+            const unsigned char *p = identify_reply + 2; /* skip status word */
+            unsigned int zeroes = (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+                                   ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+            unsigned short minor = (unsigned short)p[4] | ((unsigned short)p[5] << 8);
+            unsigned short major = (unsigned short)p[6] | ((unsigned short)p[7] << 8);
+            fprintf(stderr, "metallica_mis: [diagnostic] identify_sensor(): zeroes=0x%08x minor=0x%04x major=0x%04x\n",
+                    zeroes, minor, major);
+            if (zeroes != 0) {
+                fprintf(stderr, "metallica_mis: [diagnostic] NOTE: zeroes field was expected to be 0 -- "
+                                 "unexpected reply shape, treat major/minor above with caution\n");
+            }
+        }
+    }
+
     if (metallica_mis_upload_fwext(&tls) != 0) {
         fprintf(stderr, "metallica_mis: do_pairing(): upload_fwext() FAILED. Pairing itself "
                          "(partition table + cert material) already succeeded and was "
