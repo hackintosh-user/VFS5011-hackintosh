@@ -19,6 +19,16 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 - `build_client.sh` now also links `upek_daemon.c`.
 - This is a capture *test*, not full Enroll/Verify support — `backend_available` stays `0` for UPEK until this has an actual successful real-hardware pass; `Enroll`/`Verify`/`Deploy` still refuse for this sensor exactly as before.
 
+**Fun verbose boot + Linux-style `[ OK ]` status (Aug 29)**
+- New `vfsc_verbose_boot_flood()` prints a ~67-line fake macOS/IOKit/XNU-style kernel log flood before the real startup checks, with randomized 60-220ms per-line delays (~10 seconds total, organic uneven pacing) — a real reference to a Hackintosh's own `-v` boot flag. Runs automatically on launch, respects `--q`/`--quiet`.
+- The 3 real startup gate checks (OpenCore version, sensor detected, daemon version match) plus the final init-complete line now print a green Linux/systemd-style `[ OK ]` tag via a new `vfsc_status_line_ok()` helper — kept strictly separate from the purely decorative flood lines above, which never get the tag.
+- A bold `Welcome to HTID Client!` greeting now prints right before the menu shows for the first time.
+
+**Sensor backend parity: UPEK gains real open/close/presence, Metallica MIS gains a presence check (Aug 29-30)**
+- `upek_daemon.c` gains `upek_open_device()` / `upek_close_device()` / `upek_sensor_is_present()` / `upek_image_width()`, promoted out of its standalone smoke-test `main()`'s old bare inline logic — now uses the same retry-with-backoff pattern (`vfs5011_daemon.c`'s `open_device()`) since there's no reason to assume a T420's USB stack is any less finicky than the one that pattern was originally written for. Declared in `upek_daemon.h`.
+- `metallica_mis_daemon.c` gains `metallica_mis_sensor_is_present()` — its own short-lived libusb context, never opens/claims, checks all three known OEM identities (`06cb:009a` / `138a:0097` / `138a:009d`) rather than just one. `metallica_mis_open_device()`/`close_device()` already existed with full retry + multi-identity logic from the pairing work above, so this was the one missing piece to match the other two sensors' backend shape. Declared in `metallica_mis_daemon.h`.
+- All three sensor backends (VFS5011, Metallica MIS, UPEK) now expose the same consistent shape (open/close/presence-check), which is prep work for an eventual shared daemon-core refactor — deferred for now since it would require moving ~1,270 lines of `vfs5011_daemon.c`'s sensor-agnostic logic (state machine, AX/padlock watcher, notification callbacks, password typing) behind a backend interface, which needs a real compiler in the loop to do safely rather than blind chat-based edits.
+
 
   
 ## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
