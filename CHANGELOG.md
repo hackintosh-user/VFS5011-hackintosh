@@ -6,6 +6,11 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```** 
 
+**Real-hardware pairing bug fixed: false failure on clean-slate init (Aug 30)**
+- First real-hardware `PAIR` attempt (p0cketl1nt, X1C6, `06cb:009a`) failed immediately at the plaintext bootstrap stage with `status=0x04aa` on the `init_hardcoded_clean_slate` blob. Diffing against upstream python-validity's `usb.py` `send_init()` showed this daemon had added an `assert_status()` check on that specific command's reply that upstream never has — upstream fires it fire-and-forget (`self.cmd(init_hardcoded_clean_slate)`, no wrapper), unlike the `init_hardcoded` call right before it, which upstream does wrap in `assert_status()`.
+- The blob bytes themselves are confirmed byte-identical to upstream's `blobs_9a.py`, ruling out a data mismatch — this was purely an over-strict status check the port added on its own. Removed it in `metallica_mis_send_init()` to match upstream exactly.
+- This also explains why an earlier hardware test's first run reported "bootstrap OK": that run's sensor likely already had `fwext` loaded (`fw_err == 0`), skipping the clean-slate branch entirely. A sensor coming from an existing Windows Hello pairing (like p0cketl1nt's) legitimately needs that branch, making his run the first real exercise of this specific path.
+
 **Metallica MIS pairing wired into the client (Aug 28)**
 - `hack_touchid_client.c` gains a `[P] Pair Sensor` menu item, shown only when a Metallica MIS identity (`06cb:009a` / `138a:0097` / `138a:009d`) is detected. It runs the same plaintext-bootstrap + pairing + firmware-upload sequence the standalone `metallica_mis_daemon` test harness does, with the same destructive-write warnings and a typed `PAIR` confirmation gate.
 - `metallica_mis_open_device()`, `metallica_mis_close_device()`, `metallica_mis_send_init()`, and `metallica_mis_do_pairing()` are now exposed from `metallica_mis_daemon.c` via a new `metallica_mis_daemon.h`, so the client links and calls them directly instead of requiring a separate binary. `metallica_mis_daemon.c`'s own `main()` is compiled out for this build via `-DHACK_TOUCHID_CLIENT_BUILD`, so the standalone test harness (`build_metallica_mis.sh`) still works unchanged.
