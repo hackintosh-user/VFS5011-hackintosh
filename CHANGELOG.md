@@ -20,7 +20,7 @@ All notable changes to the VFS5011 Hackintosh fingerprint authentication project
 - This is a capture *test*, not full Enroll/Verify support — `backend_available` stays `0` for UPEK until this has an actual successful real-hardware pass; `Enroll`/`Verify`/`Deploy` still refuse for this sensor exactly as before.
 
 **Fun verbose boot + Linux-style `[ OK ]` status (Aug 29)**
-- New `vfsc_verbose_boot_flood()` prints a ~67-line fake macOS/IOKit/XNU-style kernel log flood before the real startup checks, with randomized 60-220ms per-line delays (~10 seconds total, organic uneven pacing) — a real reference to a Hackintosh's own `-v` boot flag. Runs automatically on launch, respects `--q`/`--quiet`.
+- New `vfsc_verbose_boot_flood()` prints a ~67-line macOS/IOKit/XNU-style kernel log flood before the real startup checks, with randomized 60-220ms per-line delays (~10 seconds total, organic uneven pacing) — a real reference to a Hackintosh's own `-v` boot flag. Runs automatically on launch, respects `--q`/`--quiet`.
 - The 3 real startup gate checks (OpenCore version, sensor detected, daemon version match) plus the final init-complete line now print a green Linux/systemd-style `[ OK ]` tag via a new `vfsc_status_line_ok()` helper — kept strictly separate from the purely decorative flood lines above, which never get the tag.
 - A bold `Welcome to HTID Client!` greeting now prints right before the menu shows for the first time.
 
