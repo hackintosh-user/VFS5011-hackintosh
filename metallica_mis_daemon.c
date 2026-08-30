@@ -542,10 +542,22 @@ int metallica_mis_send_init(void) {
         n = cmd(metallica_mis_init_hardcoded_clean_slate,
                 sizeof(metallica_mis_init_hardcoded_clean_slate), reply, sizeof(reply));
         if (n < 0) return -1;
-        if (assert_status(reply, n) != 0) {
-            fprintf(stderr, "metallica_mis: init_hardcoded_clean_slate blob rejected\n");
-            return -1;
-        }
+        /* Deliberately NOT status-checked -- upstream python-validity's
+         * usb.py send_init() fires this exact command with no
+         * assert_status() wrapper at all:
+         *
+         *     if err != 0:
+         *         logging.info('Clean slate')
+         *         self.cmd(init_hardcoded_clean_slate)
+         *
+         * (compare to the init_hardcoded call two lines above it, which
+         * upstream DOES wrap in assert_status()). A real Metallica MIS
+         * sensor (06cb:009a) replied status=0x04aa here during live
+         * testing (Aug 30, p0cketl1nt's X1C6) -- this daemon had added a
+         * status check on the clean-slate reply that upstream never had,
+         * causing a false failure. This device's reply to this specific
+         * command just doesn't follow the normal 0x0000-success
+         * convention; don't treat it as fatal, matching upstream. */
     }
 
     fprintf(stderr, "metallica_mis: plaintext bootstrap stage completed OK\n");
