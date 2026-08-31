@@ -62,3 +62,28 @@ size_t mmis_split_chunks(const uint8_t *b, size_t len, mmis_chunk_t *out, size_t
 size_t mmis_merge_chunks(const mmis_chunk_t *chunks, size_t n_chunks, uint8_t *out, size_t out_max);
 
 #endif /* MMIS_TIMESLOT_H */
+
+/* ---- patch_timeslot_table / patch_timeslot_again ------------------------
+ * Ports of Sensor.patch_timeslot_table()/patch_timeslot_again() from
+ * sensor.py. Both mutate a copy of the Timeslot Table 2D (tag 0x34) chunk
+ * in place before it's re-packed into the outgoing cmd_02.
+ * -------------------------------------------------------------------- */
+
+/* Scans from the start of the buffer patching Call instructions
+ * (b[i]&0xf8==0x10): repeat *= mult (if >1), address += 1 (if inc_address),
+ * skipping over leading NOOP (0x00) and Idle Rx (0x07 xx) instructions.
+ * Stops at the first byte that isn't Call/NOOP/IdleRx (mirrors the `break`
+ * in sensor.py -- this is NOT a full-buffer decode, only the leading run).
+ * buf is mutated in place. */
+void mmis_patch_timeslot_table(uint8_t *buf, size_t len, bool inc_address, uint8_t mult);
+
+/* Finds the last Call instruction's destination (jump target) before the
+ * first End-of-Table/Return/End-of-Data, then within the block starting at
+ * that destination, finds the last Register Write to 0x8000203C and patches
+ * its low value byte to factory_calibration_values[key_calibration_line].
+ * buf is mutated in place. Returns false if either scan finds nothing
+ * (buffer is left unmodified, mirrors sensor.py returning bytes(b) as-is). */
+bool mmis_patch_timeslot_again(uint8_t *buf, size_t len,
+                                const uint8_t *factory_calibration_values,
+                                size_t factory_calibration_values_len,
+                                uint8_t key_calibration_line);
