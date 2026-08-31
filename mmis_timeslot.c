@@ -155,3 +155,76 @@ size_t mmis_merge_chunks(const mmis_chunk_t *chunks, size_t n_chunks, uint8_t *o
     }
     return off;
 }
+
+void mmis_patch_timeslot_table(uint8_t *buf, size_t len, bool inc_address, uint8_t mult) {
+    size_t i = 0;
+    while (i + 3 < len) {
+        if ((buf[i] & 0xf8) == 0x10) {
+            if (buf[i + 2] > 1) {
+                buf[i + 2] = (uint8_t)(buf[i + 2] * mult);
+            }
+            if (inc_address) {
+                buf[i + 1] = (uint8_t)(buf[i + 1] + 1);
+            }
+            i += 3;
+            continue;
+        }
+        if (buf[i] == 0) {
+            i += 1;
+            continue;
+        }
+        if (buf[i] == 7) {
+            i += 2;
+            continue;
+        }
+        break;
+    }
+}
+
+bool mmis_patch_timeslot_again(uint8_t *buf, size_t len,
+                                const uint8_t *factory_calibration_values,
+                                size_t factory_calibration_values_len,
+                                uint8_t key_calibration_line) {
+    /* Pass 1: find the last Call before End-of-Table/Return/End-of-Data */
+    size_t pc = 0;
+    bool have_dest = false;
+    size_t dest = 0;
+    while (pc < len) {
+        mmis_insn_t insn;
+        if (!mmis_decode_insn(buf + pc, len - pc, &insn)) return false;
+        if (insn.op == MMIS_OP_END_OF_TABLE || insn.op == MMIS_OP_RETURN ||
+            insn.op == MMIS_OP_END_OF_DATA) {
+            break;
+        }
+        if (insn.op == MMIS_OP_CALL) {
+            dest = insn.operand[1]; /* destination address, b[1]<<2 */
+            have_dest = true;
+        }
+        pc += insn.size;
+    }
+    if (!have_dest || dest >= len) return false;
+
+    /* Pass 2: within [dest, ...), find the last Register Write to 0x8000203C */
+    pc = dest;
+    bool have_match = false;
+    size_t match_pc = 0;
+    while (pc < len) {
+        mmis_insn_t insn;
+        if (!mmis_decode_insn(buf + pc, len - pc, &insn)) return false;
+        if (insn.op == MMIS_OP_END_OF_TABLE || insn.op == MMIS_OP_RETURN ||
+            insn.op == MMIS_OP_END_OF_DATA) {
+            break;
+        }
+        if (insn.op == MMIS_OP_REGISTER_WRITE && insn.operand[0] == 0x8000203cu) {
+            match_pc = pc;
+            have_match = true;
+        }
+        pc += insn.size;
+    }
+    if (!have_match) return false;
+    if (key_calibration_line >= factory_calibration_values_len) return false;
+    if (match_pc + 1 >= len) return false;
+
+    buf[match_pc + 1] = factory_calibration_values[key_calibration_line];
+    return true;
+}
