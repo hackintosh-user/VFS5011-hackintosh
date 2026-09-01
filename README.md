@@ -129,7 +129,7 @@ Known limitations:
 - `innoextract` (`brew install innoextract`)
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
-- OpenCore v1.0.6 or later (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
+- ```OpenCore v1.0.6 or later``` (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
 
 ## Building
 
