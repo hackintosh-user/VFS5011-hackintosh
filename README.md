@@ -170,7 +170,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 ```
 [1] Enroll a Finger
 [2] Verify Fingerprint Match [Score / 20]
-[3] Deploy VFS Client for Authentication Services
+[3] Deploy Authentication Services
 [P] (ONLY FOR METALLICA MIS SENSORS) Pair
 [U] (ONLY FOR UPEK 147e:2016) capture .pgm
 
@@ -186,7 +186,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 - **Verify Fingerprint Match** — a standalone test of the capture and
   matching pipeline, independent of the daemon, useful for confirming
   the sensor and templates are working before deploying.
-- **Deploy for Authentication Services** — rebuilds the
+- **Deploy Authentication Services** — rebuilds the
   daemon from source, installs it as a per-user LaunchAgent, re-signs it
   and regenerates its Accessibility permission grant, and installs a
   narrowly scoped sudoers rule so the daemon can self-elevate when it
