@@ -139,3 +139,29 @@ bool mmis_line_update_type_1(mmis_capture_mode_t mode,
                               size_t lines_per_calibration_data, size_t line_width,
                               const uint8_t *calibration_blob, size_t calibration_blob_len,
                               uint8_t *scratch, size_t scratch_len);
+
+/* ---- build_cmd_02() -------------------------------------------------------
+ * Ports Sensor.build_cmd_02(). Splits hardcoded_prog into chunks, runs
+ * line_update_type_1() over them, then prepends the 5-byte command header
+ * (cmd=2, bytes_per_line u16 LE, req_lines u16 LE). req_lines is nonzero
+ * only for CALIBRATE (calibration_frames * lines_per_frame + 1); note
+ * upstream also gates this on rom_info.product == 0x30 (raises otherwise) --
+ * caller is responsible for that check since RomInfo isn't modeled here yet.
+ * Returns total bytes written to out (header + merged chunks), or 0 on
+ * failure (chunk pool exhausted, missing 0x34 chunk, etc). ---------------- */
+size_t mmis_build_cmd_02(mmis_capture_mode_t mode,
+                          const uint8_t *hardcoded_prog, size_t hardcoded_prog_len,
+                          uint16_t bytes_per_line, uint8_t calibration_frames, size_t lines_per_frame,
+                          uint8_t repeat_multiplier, uint8_t key_calibration_line,
+                          const uint8_t *factory_calibration_values, size_t factory_calibration_values_len,
+                          const uint8_t *calib_data, size_t calib_data_len,
+                          size_t lines_per_calibration_data, size_t line_width,
+                          const uint8_t *calibration_blob, size_t calibration_blob_len,
+                          uint8_t *out, size_t out_max,
+                          uint8_t *scratch, size_t scratch_len);
+
+/* Helper mirroring the "2D" chunk lookup Sensor.open() does once to compute
+ * self.lines_per_frame = lines_2d * repeat_multiplier. Call once after
+ * pulling hardcoded_prog and pass the result into mmis_build_cmd_02(). */
+bool mmis_get_lines_per_frame(const uint8_t *hardcoded_prog, size_t len,
+                               uint8_t repeat_multiplier, size_t *out);
