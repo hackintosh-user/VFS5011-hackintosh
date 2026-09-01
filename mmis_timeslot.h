@@ -87,3 +87,55 @@ bool mmis_patch_timeslot_again(uint8_t *buf, size_t len,
                                 const uint8_t *factory_calibration_values,
                                 size_t factory_calibration_values_len,
                                 uint8_t key_calibration_line);
+
+/* ---- bitpack() -----------------------------------------------------------
+ * Ports Sensor's module-level bitpack(): packs `count` bytes into a
+ * little-endian, LSB-first bitstream where value[i] occupies bits
+ * [u*i, u*i+u), each stored as (value[i] - min). u is the minimum number of
+ * bits needed to represent (max-min). Returns u via *u_out, min via
+ * *min_out, and writes ceil(u*count/8) bytes to out (out_max must be large
+ * enough -- caller sizes it as (count+1) to be safe). Returns bytes written.
+ * ------------------------------------------------------------------------ */
+size_t mmis_bitpack(const uint8_t *values, size_t count,
+                     uint8_t *u_out, uint8_t *min_out,
+                     uint8_t *out, size_t out_max);
+
+/* ---- get_key_line() -------------------------------------------------------
+ * Ports Sensor.get_key_line(). If calib_data is non-empty, extracts the
+ * `key_calibration_line`-th row (each row is len(calib_data)/lines_per_cal
+ * bytes wide, first 8 bytes are a per-line header skipped here), takes
+ * `line_width` bytes from offset 8 into that row, and replaces any byte
+ * equal to 5 with 4 (sensor.py's `i - 1 if i == 5 else i` quirk). If
+ * calib_data is empty, returns line_width zero bytes (pre-calibration case).
+ * Writes line_width bytes to out. -------------------------------------- */
+void mmis_get_key_line(const uint8_t *calib_data, size_t calib_data_len,
+                        size_t lines_per_calibration_data, size_t key_calibration_line,
+                        size_t line_width, uint8_t *out);
+
+/* ---- line_update_type_1() ------------------------------------------------
+ * Ports Sensor.line_update_type_1() for devices in line_update_type1_devices
+ * (0x199 among them). Consumes the already-split chunk list (must contain
+ * exactly one 0x34 Timeslot Table 2D chunk), mutates it in place (patches +
+ * truncates the 0x34 payload per get_key_line()), appends the mode-specific
+ * fixed fragments (0x17/0x4e-or-0x26/0x2e/0x44), builds the Line list
+ * (calibration-blob line + bitpacked-factory-values line +, if calib_data is
+ * non-empty, 28 additional 448-byte column lines), and appends the final
+ * 0x30 (Line Update) and 0x43 (Line Update Transform) chunks.
+ *
+ * chunks_io is modified in place; *n_chunks_io is updated to the new count
+ * (grows by up to 6). chunk_buf_pool/chunk_buf_pool_len is scratch space the
+ * function carves new chunk payloads out of (must outlive chunks_io, since
+ * chunk data pointers point into it) -- size it generously, a few KB is
+ * plenty for one capture-program's worth of chunks.
+ * Returns false on any internal inconsistency (missing 0x34 chunk, pool
+ * exhausted, decode failure propagated from the timeslot patch functions). */
+typedef enum { MMIS_CAPTURE_CALIBRATE, MMIS_CAPTURE_IDENTIFY, MMIS_CAPTURE_ENROLL } mmis_capture_mode_t;
+
+bool mmis_line_update_type_1(mmis_capture_mode_t mode,
+                              mmis_chunk_t *chunks_io, size_t *n_chunks_io, size_t max_chunks,
+                              uint8_t repeat_multiplier, uint8_t key_calibration_line,
+                              const uint8_t *factory_calibration_values, size_t factory_calibration_values_len,
+                              const uint8_t *calib_data, size_t calib_data_len,
+                              size_t lines_per_calibration_data, size_t line_width,
+                              const uint8_t *calibration_blob, size_t calibration_blob_len,
+                              uint8_t *scratch, size_t scratch_len);
