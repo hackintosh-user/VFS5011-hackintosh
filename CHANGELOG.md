@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the VFS5011 Hackintosh fingerprint authentication project are documented here.
+All notable changes to the Hackintosh-TouchID fingerprint authentication project are documented here.
 
 ---
 ## v1.1.0 - Current Development Target
