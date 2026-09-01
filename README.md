@@ -172,6 +172,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 [2] Verify Fingerprint Match [Score / 20]
 [3] Deploy VFS Client for Authentication Services
 [P] (ONLY FOR METALLICA MIS SENSORS) Pair
+[U] (ONLY FOR UPEK 147e:2016) capture .pgm
 
 [S] Settings
 [A] About
