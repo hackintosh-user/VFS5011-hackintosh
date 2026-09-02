@@ -552,3 +552,94 @@ size_t mmis_build_cmd_02(mmis_capture_mode_t mode,
     if (merged_len == 0 && n > 0) return 0;
     return 5 + merged_len;
 }
+
+static int8_t mmis__clip(int x) {
+    if (x < -128) x = -128;
+    if (x > 127) x = 127;
+    return (int8_t)x;
+}
+
+static uint8_t mmis__scale(uint8_t xin) {
+    int x = (int)xin - 0x80;
+    x = (int)((double)(x * 10) / 0x22); /* matches Python's int(x*10/0x22), truncation toward zero */
+    return (uint8_t)mmis__clip(x);
+}
+
+static uint8_t mmis__add(uint8_t l, uint8_t r) {
+    int8_t ls = (int8_t)l;
+    int8_t rs = (int8_t)r;
+    return (uint8_t)mmis__clip((int)ls + (int)rs);
+}
+
+bool mmis_average(const uint8_t *raw_calib_data, size_t raw_calib_data_len,
+                   size_t lines_per_frame, size_t bytes_per_line,
+                   size_t lines_per_calibration_data,
+                   uint8_t *out, size_t out_max, size_t *out_len) {
+    size_t frame_size = lines_per_frame * bytes_per_line;
+    if (lines_per_calibration_data == 0) return false;
+    size_t interleave_lines = lines_per_frame / lines_per_calibration_data;
+    if (interleave_lines <= 1) return false; /* not implemented, see header note */
+
+    size_t base_address = frame_size;
+    if (base_address + frame_size > raw_calib_data_len) return false;
+    const uint8_t *frame = raw_calib_data + base_address;
+
+    size_t group_size = interleave_lines * bytes_per_line;
+    if (frame_size % group_size != 0) return false;
+    size_t n_groups = frame_size / group_size;
+
+    size_t needed = n_groups * bytes_per_line;
+    if (needed > out_max) return false;
+
+    for (size_t g = 0; g < n_groups; g++) {
+        const uint8_t *group = frame + g * group_size;
+        for (size_t col = 0; col < bytes_per_line; col++) {
+            uint32_t sum = 0;
+            for (size_t sub = 0; sub < interleave_lines; sub++) {
+                sum += group[sub * bytes_per_line + col];
+            }
+            out[g * bytes_per_line + col] = (uint8_t)(sum / interleave_lines);
+        }
+    }
+    *out_len = needed;
+    return true;
+}
+
+bool mmis_process_calibration_results(const uint8_t *cooked_data, size_t cooked_data_len,
+                                       size_t bytes_per_line,
+                                       const uint8_t *prev_calib_data, size_t prev_calib_data_len,
+                                       uint8_t *out, size_t out_max, size_t *out_len) {
+    if (bytes_per_line == 0 || cooked_data_len % bytes_per_line != 0) return false;
+    if (cooked_data_len > out_max) return false;
+    size_t n_lines = cooked_data_len / bytes_per_line;
+
+    /* scale every byte from offset 8 onward, per line; copy first 8 as-is */
+    for (size_t i = 0; i < n_lines; i++) {
+        const uint8_t *src = cooked_data + i * bytes_per_line;
+        uint8_t *dst = out + i * bytes_per_line;
+        size_t header = (bytes_per_line < 8) ? bytes_per_line : 8;
+        memcpy(dst, src, header);
+        for (size_t j = header; j < bytes_per_line; j++) {
+            dst[j] = mmis__scale(src[j]);
+        }
+    }
+
+    if (prev_calib_data_len > 0) {
+        if (prev_calib_data_len != cooked_data_len) return false; /* shape mismatch */
+        for (size_t i = 0; i < n_lines; i++) {
+            const uint8_t *prevln = prev_calib_data + i * bytes_per_line;
+            uint8_t *dst = out + i * bytes_per_line;
+            size_t header = (bytes_per_line < 8) ? bytes_per_line : 8;
+            /* dst[0:header] currently holds cooked_data's header bytes; per
+             * sensor.py, the combined line's header comes from prev
+             * (ll[:8]), not from the newly scaled frame -- overwrite it. */
+            memcpy(dst, prevln, header);
+            for (size_t j = header; j < bytes_per_line; j++) {
+                dst[j] = mmis__add(prevln[j], dst[j]);
+            }
+        }
+    }
+
+    *out_len = cooked_data_len;
+    return true;
+}
