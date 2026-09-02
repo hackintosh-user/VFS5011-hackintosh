@@ -165,3 +165,32 @@ size_t mmis_build_cmd_02(mmis_capture_mode_t mode,
  * pulling hardcoded_prog and pass the result into mmis_build_cmd_02(). */
 bool mmis_get_lines_per_frame(const uint8_t *hardcoded_prog, size_t len,
                                uint8_t repeat_multiplier, size_t *out);
+
+/* ---- average() / process_calibration_results() ---------------------------
+ * Ports Sensor.average() and Sensor.process_calibration_results(). Pure byte
+ * math, no I/O -- these turn a raw multi-frame USB read into the running
+ * self.calib_data accumulator, called once per calibrate() iteration.
+ * -------------------------------------------------------------------- */
+
+/* average(): only implements the interleave_lines > 1 path (the one that
+ * applies to type 0x199 -- lines_per_frame=224, lines_per_calibration_data=
+ * 112 -> interleave_lines=2). The interleave_lines <= 1 path (type 0xdb's
+ * shape) is not implemented; returns false if called with parameters that
+ * would hit it, so the gap is loud rather than silently wrong.
+ * out must be at least lines_per_calibration_data * bytes_per_line bytes. */
+bool mmis_average(const uint8_t *raw_calib_data, size_t raw_calib_data_len,
+                   size_t lines_per_frame, size_t bytes_per_line,
+                   size_t lines_per_calibration_data,
+                   uint8_t *out, size_t out_max, size_t *out_len);
+
+/* process_calibration_results(): scales cooked_data (via scale()/clip() on
+ * every byte after the first 8 per line) and, if prev_calib_data is
+ * non-empty, signed-adds it into prev_calib_data (via add()/clip()) --
+ * mirrors self.calib_data's running accumulation across calibration
+ * iterations. out may alias prev_calib_data's buffer only if the caller
+ * has already copied prev_calib_data elsewhere (this reads prev_calib_data
+ * while writing out). */
+bool mmis_process_calibration_results(const uint8_t *cooked_data, size_t cooked_data_len,
+                                       size_t bytes_per_line,
+                                       const uint8_t *prev_calib_data, size_t prev_calib_data_len,
+                                       uint8_t *out, size_t out_max, size_t *out_len);
