@@ -50,7 +50,8 @@ jobs:
             ax_probe.c vfs5011_daemon.c hack_touchid_client.c hack-touchid-matcher.c \
             hack-touchid-menubar-ipc.c metallica_mis_daemon.c metallica_mis_firmware.c \
             metallica_mis_tls.c metallica_mis_init_flash.c metallica_mis_flash.c \
-            metallica_mis_blobs_9a.c
+            metallica_mis_blobs_9a.c metallica_mis_upload_fwext.c \
+            mmis_timeslot.c mmis_calibrate.c mmis_rom_info.c
           # NOTE (Aug 2026): metallica_mis_tls.c/init_flash.c had been sitting in
           # the tree since Aug 19-20 without appearing in this list at all --
           # meaning cppcheck (and the build jobs below, which also don't
