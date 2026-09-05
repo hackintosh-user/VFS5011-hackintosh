@@ -42,6 +42,7 @@ This Table will have the currently Supported Sensors or sensors in **Development
 | Synaptics Metallica MIS| 138A | 0097 | **Developing** |
 | Synaptics Metallica MIS| 138A | 009d | **Developing** |
 | UPEK TouchStrip        | 147e | 2016 | **Developing** |
+| Validity VFS101        | 138A | 0001 | **Planned**    |
 
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the VID:PID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
 ## Features
