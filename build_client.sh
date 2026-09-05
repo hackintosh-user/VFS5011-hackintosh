@@ -33,6 +33,7 @@ clang -DHACK_TOUCHID_CLIENT_BUILD \
     hack_touchid_client.c hack-touchid-matcher.c metallica_mis_firmware.c \
     metallica_mis_daemon.c metallica_mis_tls.c metallica_mis_init_flash.c \
     metallica_mis_flash.c metallica_mis_blobs_9a.c metallica_mis_upload_fwext.c \
+    mmis_rom_info.c \
     upek_daemon.c \
     nbis/mindtct/*.c nbis/bozorth3/*.c \
     -o hack-touchid \
