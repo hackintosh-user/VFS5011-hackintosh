@@ -80,6 +80,7 @@
 #include "metallica_mis_proto.h"
 #include "metallica_mis_tls.h"
 #include "metallica_mis_flash.h"
+#include "mmis_rom_info.h"
 #include "metallica_mis_blobs_9a.h"
 #include "metallica_mis_upload_fwext.h"
 /* #include "hack-touchid-matcher.h"        -- reused unmodified once capture works */
@@ -520,6 +521,25 @@ int metallica_mis_do_pairing(void) {
                 fprintf(stderr, "metallica_mis: [diagnostic] NOTE: zeroes field was expected to be 0 -- "
                                  "unexpected reply shape, treat major/minor above with caution\n");
             }
+        }
+    }
+
+    /* Diagnostic-only probe: RomInfo.get(), ported from python-validity's
+     * sensor.py RomInfo class. Same rationale as the identify_sensor()
+     * probe just above -- piggybacks on this already-open, already-secure
+     * TLS session. Read-only, changes nothing. Purpose: build_cmd_02()
+     * hard-gates on rom_info.product == 0x30 (raises for anything else,
+     * and no other value has a ported code path); this tells us whether
+     * that gate will actually pass on this hardware before capture/
+     * calibrate gets built out further. Deliberately does NOT abort
+     * do_pairing() on failure -- pure diagnostics on top of an already-
+     * succeeded flow. */
+    {
+        MmisRomInfo rom_info;
+        if (metallica_mis_rom_info_get(&tls, &rom_info) != 0) {
+            fprintf(stderr, "metallica_mis: [diagnostic] RomInfo.get() probe failed\n");
+        } else {
+            mmis_rom_info_print(&rom_info);
         }
     }
 
