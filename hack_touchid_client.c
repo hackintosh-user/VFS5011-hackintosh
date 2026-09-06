@@ -2275,8 +2275,359 @@ static void check_macos_version_warning(void) {
 }
 
 /* ------------------------------------------------------------------ *
- * OpenCore version gate (v1.0.2 requirement)
+ * Update checker
  * ------------------------------------------------------------------ *
+ * Reads this build's own VERSION.txt (shipped alongside the binary,
+ * next to hack-touchid itself) and compares it against the SAME
+ * branch's VERSION.txt fetched fresh from GitHub. Deliberately NOT a
+ * gate -- unlike check_daemon_version_gate() or
+ * check_opencore_version_requirement(), this never stops launch on
+ * its own. The three outcomes:
+ *
+ *   - No local VERSION.txt (an old build from before this feature
+ *     existed) -- silently skip. Nothing to compare against.
+ *   - Fetch failed (offline, DNS, rate limited, GitHub down) -- tells
+ *     the user explicitly why, rather than saying nothing and letting
+ *     silence be mistaken for "you're up to date."
+ *   - Remote isn't newer -- silently skip, same "no fuss" precedent
+ *     the rest of this project's checks already follow.
+ *   - Remote IS newer -- prompts. On Y, hands off to
+ *     download_build_and_swap_update(), which either relaunches
+ *     straight into the new build or returns false (having already
+ *     explained why) so boot just continues on the current version.
+ *
+ * Uses curl via popen()/system(), same pattern the rest of this file
+ * already uses for scripts and downloads -- no new library dependency
+ * (curl ships with macOS). -m 3 on the VERSION.txt fetch specifically
+ * caps DNS+connect+transfer at 3 seconds so a stalled network can't
+ * hang startup; the zip download further down has no such cap since
+ * that one only runs after the user has already said yes.
+ *
+ * Fetches raw.githubusercontent.com directly rather than GitHub's API
+ * -- a plain two-field text file has no JSON to parse and isn't
+ * subject to the REST API's per-hour rate limit, unlike the tags API
+ * this used to hit. */
+
+#define VERSION_FILE_NAME "VERSION.txt"
+#define UPDATE_REPO_URL "https://github.com/hackintosh-user/VFS5011-hackintosh"
+#define UPDATE_RAW_BASE_URL "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
+
+typedef struct {
+    char version[32];  /* e.g. "1.1.0" */
+    char build[32];    /* e.g. "26B126" -- YY + revision letter + build number */
+    char branch[64];   /* e.g. "active-development" or "main" */
+    bool critical;
+} client_version_info_t;
+
+/* Parses "vX.Y.Z" or "X.Y.Z" into a single comparable int
+ * (MAJOR*10000 + MINOR*100 + PATCH). Returns -1 if it doesn't look
+ * like a version string at all (couldn't parse a major number) --
+ * callers must treat -1 as "not a real version" rather than a valid
+ * (if unlikely) code, so a malformed value can't accidentally sort
+ * higher/lower than a real one. */
+static int parse_version_code(const char *v) {
+    if (v == NULL) return -1;
+    if (*v == 'v' || *v == 'V') v++;
+
+    int major = 0, minor = 0, patch = 0;
+    int n = sscanf(v, "%d.%d.%d", &major, &minor, &patch);
+    if (n < 1) return -1;
+
+    return major * 10000 + minor * 100 + patch;
+}
+
+/* Parses a build string like "26B126" (2-digit year, one revision
+ * letter, then a build number) into a single comparable long. Used
+ * only as a tiebreaker when two builds share the same VERSION= --
+ * e.g. a same-day hotfix. Returns -1 if it doesn't match that shape
+ * at all, same "don't compare against garbage" rule as
+ * parse_version_code(). */
+static long parse_build_code(const char *b) {
+    if (b == NULL) return -1;
+    size_t len = strlen(b);
+    if (len < 4) return -1;
+    if (!isdigit((unsigned char)b[0]) || !isdigit((unsigned char)b[1])) return -1;
+    if (!isupper((unsigned char)b[2])) return -1;
+    for (size_t i = 3; i < len; i++) {
+        if (!isdigit((unsigned char)b[i])) return -1;
+    }
+
+    int year = (b[0] - '0') * 10 + (b[1] - '0');
+    int letter = b[2] - 'A';
+    long num = atol(b + 3);
+
+    return (long)year * 1000000L + (long)letter * 10000L + num;
+}
+
+/* Parses VERSION.txt's simple KEY=value line format (VERSION=, BUILD=,
+ * BRANCH=, CRITICAL=) out of an in-memory buffer -- used for both the
+ * local file and the curl'd remote copy, since they're the same
+ * format. Tolerates trailing \r (GitHub serves raw files with plain
+ * \n, but this costs nothing to handle in case that ever changes).
+ * Returns false only if VERSION= itself was never found -- BUILD=/
+ * BRANCH=/CRITICAL= missing just leaves those fields at their zeroed
+ * defaults rather than failing the whole parse. */
+static bool parse_version_file(const char *buf, client_version_info_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    bool got_version = false;
+    const char *p = buf;
+
+    while (*p != '\0') {
+        char line[128];
+        size_t i = 0;
+        while (*p != '\0' && *p != '\n' && i < sizeof(line) - 1) {
+            line[i++] = *p++;
+        }
+        line[i] = '\0';
+        if (*p == '\n') p++;
+        if (i > 0 && line[i - 1] == '\r') line[i - 1] = '\0';
+
+        if (strncmp(line, "VERSION=", 8) == 0) {
+            snprintf(out->version, sizeof(out->version), "%s", line + 8);
+            got_version = true;
+        } else if (strncmp(line, "BUILD=", 6) == 0) {
+            snprintf(out->build, sizeof(out->build), "%s", line + 6);
+        } else if (strncmp(line, "BRANCH=", 7) == 0) {
+            snprintf(out->branch, sizeof(out->branch), "%s", line + 7);
+        } else if (strncmp(line, "CRITICAL=", 9) == 0) {
+            out->critical = (strncmp(line + 9, "true", 4) == 0);
+        }
+    }
+
+    return got_version;
+}
+
+/* Reads VERSION.txt from the same directory hack-touchid itself is
+ * running from (g_exec_dir), NOT from GitHub -- this is "what version
+ * am I right now," the baseline everything else compares against.
+ * Missing file (e.g. a build from before this feature existed) just
+ * returns false -- not an error, this whole feature quietly opts
+ * itself out rather than nagging about something it can't check. */
+static bool read_local_version_file(client_version_info_t *out) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    buf[n] = '\0';
+    fclose(fp);
+
+    return parse_version_file(buf, out);
+}
+
+/* Fetches <branch>'s VERSION.txt fresh from GitHub -- deliberately the
+ * SAME branch the local copy says it's on (local.branch), so someone
+ * running active-development only ever gets prompted to update to a
+ * newer active-development build, never accidentally offered main
+ * (which could be an OLDER version number) or vice versa. Returns
+ * false on anything that isn't a clean 200 -- offline, DNS failure,
+ * curl not installed, branch renamed, whatever; all treated the same
+ * as "couldn't check," per the caller's disconnected-notice handling. */
+static bool fetch_remote_version_file(const char *branch, client_version_info_t *out) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "curl -fsS -m 3 '%s/%s/%s' 2>/dev/null",
+             UPDATE_RAW_BASE_URL, branch, VERSION_FILE_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+
+    char buf[512];
+    size_t total = 0;
+    size_t n;
+    while (total < sizeof(buf) - 1 &&
+           (n = fread(buf + total, 1, sizeof(buf) - 1 - total, fp)) > 0) {
+        total += n;
+    }
+    buf[total] = '\0';
+    pclose(fp);
+
+    if (total == 0) return false;
+
+    return parse_version_file(buf, out);
+}
+
+/* Downloads <branch>'s zip from GitHub, extracts it, chmod's its
+ * scripts, and builds it via prep_and_build.sh -- and ONLY if that
+ * build actually succeeds does it touch the current install at all:
+ * replaces g_exec_dir's contents in place with the freshly built
+ * source, then execv()s straight into the new hack-touchid binary
+ * (which, since this whole process is already running as root by the
+ * time this runs, needs no second sudo prompt).
+ *
+ * Build-success-gates-delete is deliberate and load-bearing:
+ * active-development is a moving target by definition, so if a build
+ * is ever broken when this runs, the user must be left exactly where
+ * they started -- their previously-working install untouched -- never
+ * bricked by an update that didn't actually work. On any failure
+ * (download, extract, or build), this returns false having already
+ * explained what went wrong; the caller just lets boot continue
+ * normally on the current version.
+ *
+ * Only returns on failure -- success means execv() replaced this
+ * process image and never came back here. */
+static bool download_build_and_swap_update(const char *branch) {
+    char tmp_dir[PATH_MAX];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/hack-touchid-update-%d", (int)getpid());
+
+    char cmd[PATH_MAX * 3];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", tmp_dir, tmp_dir);
+    system(cmd);
+
+    printf("\nDownloading %s...\n", branch);
+    char zip_path[PATH_MAX];
+    snprintf(zip_path, sizeof(zip_path), "%s/update.zip", tmp_dir);
+    snprintf(cmd, sizeof(cmd),
+             "curl -fsSL -o \"%s\" '%s/archive/refs/heads/%s.zip'",
+             zip_path, UPDATE_REPO_URL, branch);
+    if (system(cmd) != 0) {
+        vfsc_err("Download failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    printf("Extracting...\n");
+    char extract_dir[PATH_MAX];
+    snprintf(extract_dir, sizeof(extract_dir), "%s/extracted", tmp_dir);
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" && unzip -q \"%s\" -d \"%s\"",
+             extract_dir, zip_path, extract_dir);
+    if (system(cmd) != 0) {
+        vfsc_err("Extraction failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    /* GitHub's branch zip always contains exactly one top-level
+     * folder (named "<repo>-<branch>/", slashes in the branch name
+     * turned into dashes) -- found by scanning rather than
+     * hardcoding that name, so this doesn't silently break if
+     * GitHub ever changes the convention. */
+    char src_dir[PATH_MAX] = {0};
+    DIR *d = opendir(extract_dir);
+    if (d != NULL) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            snprintf(src_dir, sizeof(src_dir), "%s/%s", extract_dir, ent->d_name);
+            break;
+        }
+        closedir(d);
+    }
+
+    if (src_dir[0] == '\0') {
+        vfsc_err("Could not locate the extracted source folder. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    printf("Building...\n");
+    char build_log[PATH_MAX];
+    snprintf(build_log, sizeof(build_log), "%s/build.log", tmp_dir);
+    snprintf(cmd, sizeof(cmd),
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh > \"%s\" 2>&1",
+             src_dir, build_log);
+    int build_status = system(cmd);
+
+    char new_binary[PATH_MAX];
+    snprintf(new_binary, sizeof(new_binary), "%s/hack-touchid", src_dir);
+
+    if (build_status != 0 || access(new_binary, X_OK) != 0) {
+        vfsc_err("Build failed. Staying on the current version.\n");
+        printf("  Build log kept for debugging: %s\n\n", build_log);
+        /* Deliberately NOT deleting tmp_dir here -- the build log is
+         * the whole point of leaving it behind; delete manually once
+         * you're done with it. */
+        return false;
+    }
+
+    printf("Build succeeded. Installing...\n");
+    snprintf(cmd, sizeof(cmd),
+             "rm -rf \"%s\"/* \"%s\"/.[!.]* 2>/dev/null; cp -R \"%s\"/. \"%s\"/",
+             g_exec_dir, g_exec_dir, src_dir, g_exec_dir);
+    system(cmd);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+    system(cmd);
+
+    printf("Update installed. Relaunching...\n\n");
+    fflush(stdout);
+
+    char new_path[PATH_MAX];
+    snprintf(new_path, sizeof(new_path), "%s/hack-touchid", g_exec_dir);
+    char *new_argv[3];
+    new_argv[0] = new_path;
+    new_argv[1] = g_verbose_boot ? NULL : (char *)"--q";
+    new_argv[2] = NULL;
+    execv(new_path, new_argv);
+
+    /* execv() only returns on failure -- the update itself did
+     * succeed at this point, just the relaunch didn't. */
+    vfsc_err("Update installed, but relaunch failed: %s\n", strerror(errno));
+    vfsc_err("Please run hack-touchid manually.\n\n");
+    exit(1);
+}
+
+static void check_for_client_update(void) {
+    client_version_info_t local;
+    if (!read_local_version_file(&local)) return;
+
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) {
+        printf("\n");
+        vfsc_warn("Your system is currently disconnected from the internet -- "
+                  "we cannot verify if you are running the most up-to-date "
+                  "version with the latest patches. Please connect to the "
+                  "internet to update.\n");
+        printf("\n");
+        return;
+    }
+
+    int local_code = parse_version_code(local.version);
+    int remote_code = parse_version_code(remote.version);
+    if (local_code < 0 || remote_code < 0) return;
+
+    bool is_newer = remote_code > local_code;
+    if (!is_newer && remote_code == local_code) {
+        long local_build = parse_build_code(local.build);
+        long remote_build = parse_build_code(remote.build);
+        if (local_build >= 0 && remote_build >= 0 && remote_build > local_build) {
+            is_newer = true;
+        }
+    }
+    if (!is_newer) return;
+
+    printf("\n");
+    if (remote.critical) {
+        printf("%s[NEW | CRITICAL]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BRED, VFSC_RESET);
+    } else {
+        printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BYELLOW, VFSC_RESET);
+    }
+    printf("Would you like to download the new update v%s (%s)? [Y/n]: ",
+           remote.version, remote.build);
+    fflush(stdout);
+
+    char confirm[8];
+    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("Skipping update. Continuing with v%s (%s).\n\n", local.version, local.build);
+        return;
+    }
+
+    download_build_and_swap_update(local.branch);
+    /* Only reachable if the update attempt failed -- already explained
+     * why above. Fall through and let the caller continue booting the
+     * current version. */
+}
+
+/* ------------------------------------------------------------------ *
  * Same gate as vfs5011_daemon.c -- kept as a separate copy here rather
  * than a shared header, matching this project's existing pattern of
  * self-contained client/daemon .c files. See the daemon's copy of this
@@ -2519,6 +2870,9 @@ int main(int argc, char **argv) {
     }
 
     check_macos_version_warning();
+
+    vfsc_boot_line("Checking for updates...");
+    check_for_client_update();
 
     vfsc_boot_line("USB: probing supported_sensors.h device table...");
     if (!check_sensor_presence_gate()) {
