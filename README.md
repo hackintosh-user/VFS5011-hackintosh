@@ -48,7 +48,7 @@ This Table will have the currently Supported Sensors or sensors in **Development
  * Please also keep in mind that when you want to open a **Github Issue** that the sensor VID:PID is **Required**. I won't be able to help if you open an issue and say my sensor doesnt work.
 ## Features
 
-Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt maintained by a **full Dev-Ops team.** So i would love if you encounter any issues to Open a **github issue** with as much information provided in the issue so i can work on the fix. Thanks! :)
+Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt maintained by a **full Dev-Ops team.** So i would love if you encounter any issues to Open a **Github Issue** with as much information provided in the issue so i can work on the fix. Thanks! :)
 
 
 Features with Hackintosh Touch-ID:
@@ -60,8 +60,8 @@ Features with Hackintosh Touch-ID:
 - System Settings / System Preferences authentication sheet ("padlock")
   unlock via fingerprint swipe
 - Authentication for Finder password prompts.
-- Works with browsers (Currently confirmed working with Orion but im not sure for others)
-- Passwords.app lock screen unlock via fingerprint swipe
+- Works with browsers (Currently confirmed working with Orion but I'm not sure for others)
+- Passwords.app Padlock unlock via fingerprint swipe
 - Keychain Access "confidential information" consent prompt unlock via fingerprint swipe
 - Enrolled templates and the stored password are kept on a dedicated,
   encrypted APFS volume, not in plaintext on the boot volume
