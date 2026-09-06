@@ -905,7 +905,152 @@ static void init_color_support(void) {
     }
 }
 
+/* Directory this binary is running from, resolved once at startup, so
+ * the mount/unmount scripts (and VERSION.txt, below) can be found by
+ * absolute path regardless of the caller's current working directory.
+ * Moved up here (used to live right before the finger-list globals,
+ * much later in the file) specifically so print_banner() -- which
+ * needs g_exec_dir to find VERSION.txt for the build number -- can
+ * see it without a forward declaration. */
+static char g_exec_dir[PATH_MAX];
+
+static void init_exec_dir(const char *argv0) {
+    char resolved[PATH_MAX];
+    if (realpath(argv0, resolved) == NULL) {
+        /* Fall back to argv0 as-is if realpath fails (unusual, but
+         * don't crash the whole menu over a cosmetic path lookup). */
+        strncpy(resolved, argv0, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
+    char *dir = dirname(resolved); /* may alias into `resolved` — copy immediately */
+    strncpy(g_exec_dir, dir, sizeof(g_exec_dir) - 1);
+    g_exec_dir[sizeof(g_exec_dir) - 1] = '\0';
+}
+
+#define VERSION_FILE_NAME "VERSION.txt"
+
+typedef struct {
+    char version[32];  /* e.g. "1.1.0" */
+    char build[32];    /* e.g. "26B126" -- YY + revision letter + build number */
+    char branch[64];   /* e.g. "active-development" or "main" */
+    bool critical;
+} client_version_info_t;
+
+/* Parses "vX.Y.Z" or "X.Y.Z" into a single comparable int
+ * (MAJOR*10000 + MINOR*100 + PATCH). Returns -1 if it doesn't look
+ * like a version string at all (couldn't parse a major number) --
+ * callers must treat -1 as "not a real version" rather than a valid
+ * (if unlikely) code, so a malformed value can't accidentally sort
+ * higher/lower than a real one. */
+static int parse_version_code(const char *v) {
+    if (v == NULL) return -1;
+    if (*v == 'v' || *v == 'V') v++;
+
+    int major = 0, minor = 0, patch = 0;
+    int n = sscanf(v, "%d.%d.%d", &major, &minor, &patch);
+    if (n < 1) return -1;
+
+    return major * 10000 + minor * 100 + patch;
+}
+
+/* Parses a build string like "26B126" (2-digit year, one revision
+ * letter, then a build number) into a single comparable long. Used
+ * only as a tiebreaker when two builds share the same VERSION= --
+ * e.g. a same-day hotfix, or the beta cycle this was built for where
+ * VERSION= doesn't move but BUILD= does on every push. Returns -1 if
+ * it doesn't match that shape at all, same "don't compare against
+ * garbage" rule as parse_version_code(). */
+static long parse_build_code(const char *b) {
+    if (b == NULL) return -1;
+    size_t len = strlen(b);
+    if (len < 4) return -1;
+    if (!isdigit((unsigned char)b[0]) || !isdigit((unsigned char)b[1])) return -1;
+    if (!isupper((unsigned char)b[2])) return -1;
+    for (size_t i = 3; i < len; i++) {
+        if (!isdigit((unsigned char)b[i])) return -1;
+    }
+
+    int year = (b[0] - '0') * 10 + (b[1] - '0');
+    int letter = b[2] - 'A';
+    long num = atol(b + 3);
+
+    return (long)year * 1000000L + (long)letter * 10000L + num;
+}
+
+/* Parses VERSION.txt's simple KEY=value line format (VERSION=, BUILD=,
+ * BRANCH=, CRITICAL=) out of an in-memory buffer -- used for both the
+ * local file and the curl'd remote copy, since they're the same
+ * format. Tolerates trailing \r (GitHub serves raw files with plain
+ * \n, but this costs nothing to handle in case that ever changes).
+ * Returns false only if VERSION= itself was never found -- BUILD=/
+ * BRANCH=/CRITICAL= missing just leaves those fields at their zeroed
+ * defaults rather than failing the whole parse. */
+static bool parse_version_file(const char *buf, client_version_info_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    bool got_version = false;
+    const char *p = buf;
+
+    while (*p != '\0') {
+        char line[128];
+        size_t i = 0;
+        while (*p != '\0' && *p != '\n' && i < sizeof(line) - 1) {
+            line[i++] = *p++;
+        }
+        line[i] = '\0';
+        if (*p == '\n') p++;
+        if (i > 0 && line[i - 1] == '\r') line[i - 1] = '\0';
+
+        if (strncmp(line, "VERSION=", 8) == 0) {
+            snprintf(out->version, sizeof(out->version), "%s", line + 8);
+            got_version = true;
+        } else if (strncmp(line, "BUILD=", 6) == 0) {
+            snprintf(out->build, sizeof(out->build), "%s", line + 6);
+        } else if (strncmp(line, "BRANCH=", 7) == 0) {
+            snprintf(out->branch, sizeof(out->branch), "%s", line + 7);
+        } else if (strncmp(line, "CRITICAL=", 9) == 0) {
+            out->critical = (strncmp(line + 9, "true", 4) == 0);
+        }
+    }
+
+    return got_version;
+}
+
+/* Reads VERSION.txt from the same directory hack-touchid itself is
+ * running from (g_exec_dir), NOT from GitHub -- this is "what version
+ * am I right now," the baseline everything else compares against.
+ * Missing file (e.g. a build from before this feature existed) just
+ * returns false -- not an error, this whole feature quietly opts
+ * itself out rather than nagging about something it can't check. */
+static bool read_local_version_file(client_version_info_t *out) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    buf[n] = '\0';
+    fclose(fp);
+
+    return parse_version_file(buf, out);
+}
+
+/* Loaded once, lazily, on the first call to print_banner() (the
+ * earliest point in every boot path where g_exec_dir is already
+ * populated) -- both print_banner() itself (build number in the
+ * ASCII banner) and check_for_client_update() (the whole update
+ * check) read from this cache instead of hitting VERSION.txt on disk
+ * twice per run. */
+static client_version_info_t g_local_version_info;
+static bool g_local_version_loaded = false;
+
 static void print_banner(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+
     printf("%s", VFSC_CYAN);
     printf("        ,ad8888ba,             %s█   █ █████ █████ ████ %s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      ,8P'  \"Y8\"  `Y8,         %s█   █   █     █   █   █%s\n", VFSC_BCYAN, VFSC_CYAN);
@@ -915,7 +1060,13 @@ static void print_banner(void) {
     printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
     printf("      `8,   `-..-'   ,8'\n");
     printf("       `8a,        ,a8'   %sMulti-Sensor Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
-    printf("         `\"Y8888P\"'%s                              %sv%s%s\n", VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, VFSC_RESET);
+    if (g_local_version_loaded && g_local_version_info.build[0] != '\0') {
+        printf("         `\"Y8888P\"'%s                              %sv%s (%s)%s\n",
+               VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, g_local_version_info.build, VFSC_RESET);
+    } else {
+        printf("         `\"Y8888P\"'%s                              %sv%s%s\n",
+               VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, VFSC_RESET);
+    }
 }
 
 /* Clears the terminal and homes the cursor, then redraws the banner --
@@ -1026,24 +1177,6 @@ static int prompt_and_store_password(const char *mount_path, int only_if_missing
     memset(confirm, 0, sizeof(confirm));
     printf("Password stored.\n\n");
     return 0;
-}
-
-/* Directory this binary is running from, resolved once at startup, so
- * the mount/unmount scripts can be found by absolute path regardless
- * of the caller's current working directory. */
-static char g_exec_dir[PATH_MAX];
-
-static void init_exec_dir(const char *argv0) {
-    char resolved[PATH_MAX];
-    if (realpath(argv0, resolved) == NULL) {
-        /* Fall back to argv0 as-is if realpath fails (unusual, but
-         * don't crash the whole menu over a cosmetic path lookup). */
-        strncpy(resolved, argv0, sizeof(resolved) - 1);
-        resolved[sizeof(resolved) - 1] = '\0';
-    }
-    char *dir = dirname(resolved); /* may alias into `resolved` — copy immediately */
-    strncpy(g_exec_dir, dir, sizeof(g_exec_dir) - 1);
-    g_exec_dir[sizeof(g_exec_dir) - 1] = '\0';
 }
 
 /* Cached enrolled-finger list for the status line and for Enroll's
@@ -2308,116 +2441,8 @@ static void check_macos_version_warning(void) {
  * subject to the REST API's per-hour rate limit, unlike the tags API
  * this used to hit. */
 
-#define VERSION_FILE_NAME "VERSION.txt"
 #define UPDATE_REPO_URL "https://github.com/hackintosh-user/VFS5011-hackintosh"
 #define UPDATE_RAW_BASE_URL "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
-
-typedef struct {
-    char version[32];  /* e.g. "1.1.0" */
-    char build[32];    /* e.g. "26B126" -- YY + revision letter + build number */
-    char branch[64];   /* e.g. "active-development" or "main" */
-    bool critical;
-} client_version_info_t;
-
-/* Parses "vX.Y.Z" or "X.Y.Z" into a single comparable int
- * (MAJOR*10000 + MINOR*100 + PATCH). Returns -1 if it doesn't look
- * like a version string at all (couldn't parse a major number) --
- * callers must treat -1 as "not a real version" rather than a valid
- * (if unlikely) code, so a malformed value can't accidentally sort
- * higher/lower than a real one. */
-static int parse_version_code(const char *v) {
-    if (v == NULL) return -1;
-    if (*v == 'v' || *v == 'V') v++;
-
-    int major = 0, minor = 0, patch = 0;
-    int n = sscanf(v, "%d.%d.%d", &major, &minor, &patch);
-    if (n < 1) return -1;
-
-    return major * 10000 + minor * 100 + patch;
-}
-
-/* Parses a build string like "26B126" (2-digit year, one revision
- * letter, then a build number) into a single comparable long. Used
- * only as a tiebreaker when two builds share the same VERSION= --
- * e.g. a same-day hotfix. Returns -1 if it doesn't match that shape
- * at all, same "don't compare against garbage" rule as
- * parse_version_code(). */
-static long parse_build_code(const char *b) {
-    if (b == NULL) return -1;
-    size_t len = strlen(b);
-    if (len < 4) return -1;
-    if (!isdigit((unsigned char)b[0]) || !isdigit((unsigned char)b[1])) return -1;
-    if (!isupper((unsigned char)b[2])) return -1;
-    for (size_t i = 3; i < len; i++) {
-        if (!isdigit((unsigned char)b[i])) return -1;
-    }
-
-    int year = (b[0] - '0') * 10 + (b[1] - '0');
-    int letter = b[2] - 'A';
-    long num = atol(b + 3);
-
-    return (long)year * 1000000L + (long)letter * 10000L + num;
-}
-
-/* Parses VERSION.txt's simple KEY=value line format (VERSION=, BUILD=,
- * BRANCH=, CRITICAL=) out of an in-memory buffer -- used for both the
- * local file and the curl'd remote copy, since they're the same
- * format. Tolerates trailing \r (GitHub serves raw files with plain
- * \n, but this costs nothing to handle in case that ever changes).
- * Returns false only if VERSION= itself was never found -- BUILD=/
- * BRANCH=/CRITICAL= missing just leaves those fields at their zeroed
- * defaults rather than failing the whole parse. */
-static bool parse_version_file(const char *buf, client_version_info_t *out) {
-    memset(out, 0, sizeof(*out));
-
-    bool got_version = false;
-    const char *p = buf;
-
-    while (*p != '\0') {
-        char line[128];
-        size_t i = 0;
-        while (*p != '\0' && *p != '\n' && i < sizeof(line) - 1) {
-            line[i++] = *p++;
-        }
-        line[i] = '\0';
-        if (*p == '\n') p++;
-        if (i > 0 && line[i - 1] == '\r') line[i - 1] = '\0';
-
-        if (strncmp(line, "VERSION=", 8) == 0) {
-            snprintf(out->version, sizeof(out->version), "%s", line + 8);
-            got_version = true;
-        } else if (strncmp(line, "BUILD=", 6) == 0) {
-            snprintf(out->build, sizeof(out->build), "%s", line + 6);
-        } else if (strncmp(line, "BRANCH=", 7) == 0) {
-            snprintf(out->branch, sizeof(out->branch), "%s", line + 7);
-        } else if (strncmp(line, "CRITICAL=", 9) == 0) {
-            out->critical = (strncmp(line + 9, "true", 4) == 0);
-        }
-    }
-
-    return got_version;
-}
-
-/* Reads VERSION.txt from the same directory hack-touchid itself is
- * running from (g_exec_dir), NOT from GitHub -- this is "what version
- * am I right now," the baseline everything else compares against.
- * Missing file (e.g. a build from before this feature existed) just
- * returns false -- not an error, this whole feature quietly opts
- * itself out rather than nagging about something it can't check. */
-static bool read_local_version_file(client_version_info_t *out) {
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
-
-    FILE *fp = fopen(path, "r");
-    if (!fp) return false;
-
-    char buf[512];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-    buf[n] = '\0';
-    fclose(fp);
-
-    return parse_version_file(buf, out);
-}
 
 /* Fetches <branch>'s VERSION.txt fresh from GitHub -- deliberately the
  * SAME branch the local copy says it's on (local.branch), so someone
@@ -2575,8 +2600,11 @@ static bool download_build_and_swap_update(const char *branch) {
 }
 
 static void check_for_client_update(void) {
-    client_version_info_t local;
-    if (!read_local_version_file(&local)) return;
+    /* g_local_version_info is loaded once by print_banner() (called
+     * before this in every boot path) -- reuse it instead of reading
+     * VERSION.txt from disk a second time. */
+    if (!g_local_version_loaded) return;
+    const client_version_info_t local = g_local_version_info;
 
     client_version_info_t remote;
     if (!fetch_remote_version_file(local.branch, &remote)) {
@@ -2611,8 +2639,10 @@ static void check_for_client_update(void) {
         printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
                VFSC_BYELLOW, VFSC_RESET);
     }
-    printf("Would you like to download the new update v%s (%s)? [Y/n]: ",
+    printf("Would you like to download the new update v%s (%s)?\n",
            remote.version, remote.build);
+    printf("You are currently running v%s (%s). [Y/n]: ",
+           local.version, local.build);
     fflush(stdout);
 
     char confirm[8];
