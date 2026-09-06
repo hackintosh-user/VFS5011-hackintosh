@@ -38,10 +38,10 @@ This Table will have the currently Supported Sensors or sensors in **Development
 | Sensor Name / Model    | VID  | PID  | Support status                                                  | 
 |------------------------|------|------|---------------------------------------------------------------- |
 | Validty VFS5011        | 138A | 0018 | **Supported & Confirmed working on a DV6-7070ex with VFS5011**  |
-| Synaptics Metallica MIS| 006cb| 009a | **Developing**                                                  |
-| Prometheus 97          | 138A | 0097 | **Developing**                                                  |
+| Synaptics Metallica MIS| 006cb| 009a | **Developing & actively Testing**                               |
+| Prometheus 97          | 138A | 0097 | **Developing & planned testing**                                |
 | Prometheus 9d          | 138A | 009d | **Developing / Supposed to work acording to libfprint**         |
-| UPEK TouchStrip        | 147e | 2016 | **Developing**                                                  | 
+| UPEK TouchStrip        | 147e | 2016 | **Developing & planned testing**                                | 
 | Validity VFS101        | 138A | 0001 | **Planned / only plans until i get access to the device**       | 
 
  * Please Keep in Mind that some sensor names are **too long to fit in the table** the VID:PID for each currently or planned sensor will be in the table and regardless the client it self checks if your sensor is supported.
