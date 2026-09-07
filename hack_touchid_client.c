@@ -43,6 +43,7 @@
 #include <libusb.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <mach-o/dyld.h>
 
 #include "vfs5011_proto.h"
 #include "hack-touchid-matcher.h"
@@ -915,17 +916,106 @@ static void init_color_support(void) {
  * see it without a forward declaration. */
 static char g_exec_dir[PATH_MAX];
 
+/* Resolves g_exec_dir to the directory the ACTUAL running binary lives
+ * in, regardless of how it was invoked -- "./hack-touchid",
+ * "sudo ./hack-touchid", an absolute path, or (since ensure_path_symlink()
+ * below) a bare "hack-touchid" found via PATH.
+ *
+ * That last case is exactly why this can't just be realpath(argv0) like
+ * it used to be: when a command is found via PATH, argv[0] is typically
+ * still just the literal string the user typed ("hack-touchid", no
+ * slash) -- realpath() on a bare filename resolves it relative to the
+ * CURRENT directory, not a PATH search, so g_exec_dir would silently end
+ * up wherever the terminal happened to be sitting instead of the real
+ * install directory. That would break VERSION.txt reads, the mount/
+ * unmount scripts, everything downstream of g_exec_dir -- exactly the
+ * scenario ensure_path_symlink() exists to make possible in the first
+ * place, so this has to be fixed for that feature to actually work.
+ *
+ * _NSGetExecutablePath() (macOS-specific, <mach-o/dyld.h>) gives the
+ * path actually used to exec() this process, independent of argv[0] --
+ * still possibly containing a symlink (e.g. /usr/local/bin/hack-touchid
+ * itself, per ensure_path_symlink()), so it's run through realpath()
+ * too, which resolves that symlink down to where the real binary (and
+ * VERSION.txt, the mount scripts, etc. alongside it) actually live. */
 static void init_exec_dir(const char *argv0) {
     char resolved[PATH_MAX];
-    if (realpath(argv0, resolved) == NULL) {
-        /* Fall back to argv0 as-is if realpath fails (unusual, but
-         * don't crash the whole menu over a cosmetic path lookup). */
+    bool got_path = false;
+
+    char exe_path[PATH_MAX];
+    uint32_t exe_path_size = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &exe_path_size) == 0 &&
+        realpath(exe_path, resolved) != NULL) {
+        got_path = true;
+    }
+
+    if (!got_path && realpath(argv0, resolved) != NULL) {
+        got_path = true;
+    }
+
+    if (!got_path) {
+        /* Last resort -- don't crash the whole menu over a cosmetic
+         * path lookup, but this won't correctly resolve a bare PATH
+         * invocation; only expected to matter if _NSGetExecutablePath()
+         * itself somehow fails, which the man page notes can happen if
+         * exe_path_size was too small (PATH_MAX should always be
+         * plenty) or on unusual/sandboxed environments. */
         strncpy(resolved, argv0, sizeof(resolved) - 1);
         resolved[sizeof(resolved) - 1] = '\0';
     }
+
     char *dir = dirname(resolved); /* may alias into `resolved` — copy immediately */
     strncpy(g_exec_dir, dir, sizeof(g_exec_dir) - 1);
     g_exec_dir[sizeof(g_exec_dir) - 1] = '\0';
+}
+
+#define PATH_SYMLINK_TARGET "/usr/local/bin/hack-touchid"
+
+/* Ensures /usr/local/bin/hack-touchid symlinks to wherever THIS binary
+ * actually is (g_exec_dir), so "hack-touchid" works from any directory
+ * once it's on PATH, instead of needing "sudo ./hack-touchid" from
+ * inside the project folder every time.
+ *
+ * Called once per launch, right after init_exec_dir() -- cheap to just
+ * always check since it's a no-op the moment nothing needs to change.
+ * Deliberately silent when there's nothing to do, or when it's just
+ * silently refreshing a stale symlink after a rebuild/update-swap moved
+ * the real binary to a new path -- only prints the first time it
+ * actually creates the symlink, so the user knows it happened without
+ * a confirmation prompt getting in the way of every single launch.
+ * "sudo ./hack-touchid" from the project folder keeps working exactly
+ * the same regardless of any of this.
+ *
+ * Never touches /usr/local/bin/hack-touchid if it already exists as
+ * something OTHER than a symlink (a real file some other tool/install
+ * put there) -- that's not this client's to overwrite. Also never
+ * fails boot over this -- if /usr/local/bin doesn't exist or isn't
+ * writable for some unusual reason, this just silently does nothing. */
+static void ensure_path_symlink(void) {
+    char self_path[PATH_MAX];
+    snprintf(self_path, sizeof(self_path), "%s/hack-touchid", g_exec_dir);
+
+    struct stat lst;
+    bool target_exists = (lstat(PATH_SYMLINK_TARGET, &lst) == 0);
+
+    if (target_exists && !S_ISLNK(lst.st_mode)) {
+        return; /* something else lives there -- leave it alone */
+    }
+
+    if (target_exists) {
+        char existing[PATH_MAX];
+        ssize_t len = readlink(PATH_SYMLINK_TARGET, existing, sizeof(existing) - 1);
+        if (len >= 0) {
+            existing[len] = '\0';
+            if (strcmp(existing, self_path) == 0) return; /* already correct */
+        }
+        unlink(PATH_SYMLINK_TARGET); /* stale -- was pointing at an old build path */
+    }
+
+    if (symlink(self_path, PATH_SYMLINK_TARGET) == 0) {
+        vfsc_ok("Linked hack-touchid into your PATH (%s) -- you can now just run "
+                "\"hack-touchid\" from anywhere.\n", PATH_SYMLINK_TARGET);
+    }
 }
 
 #define VERSION_FILE_NAME "VERSION.txt"
@@ -2988,6 +3078,7 @@ int main(int argc, char **argv) {
      * find hack-touchid-volume-mount.sh / _unmount.sh by absolute path,
      * regardless of what directory this was launched from. */
     init_exec_dir(argv[0]);
+    ensure_path_symlink();
     init_color_support();
     g_match_threshold = load_match_threshold();
 
