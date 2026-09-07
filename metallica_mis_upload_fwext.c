@@ -62,9 +62,11 @@ static int read_whole_file(const char *path, unsigned char **out_buf, size_t *ou
     return 0;
 }
 
-int metallica_mis_upload_fwext(metallica_mis_tls_t *tls) {
+int metallica_mis_upload_fwext(metallica_mis_tls_t *tls, bool *out_rebooted) {
     bool fw_present = false;
     metallica_mis_fw_info_t fwi;
+
+    if (out_rebooted) *out_rebooted = false;
 
     /* Step 1: get_fw_info(2) -- early return if already loaded. */
     if (metallica_mis_get_fw_info(tls, 2, &fw_present, &fwi) != 0) {
@@ -191,6 +193,7 @@ int metallica_mis_upload_fwext(metallica_mis_tls_t *tls) {
         return -1;
     }
 
+    if (out_rebooted) *out_rebooted = true;
     mmuf_info("Reboot command sent. Device should be re-enumerating now.\n");
     return 0;
 }

@@ -76,7 +76,18 @@
  * an already-open secure session (i.e. AFTER metallica_mis_tls_open()
  * succeeded) -- unlike the plaintext-capable flash.c primitives this
  * calls, every command in this specific sequence is upstream-documented
- * as running post-handshake only. */
-int metallica_mis_upload_fwext(metallica_mis_tls_t *tls);
+ * as running post-handshake only.
+ *
+ * out_rebooted (may be NULL if the caller doesn't care): set to false
+ * on the "already loaded" no-op path (session stays alive, still
+ * usable for further tls_cmd() calls), or true right before the real
+ * reboot command is sent on the fresh-upload path (session is dead
+ * from that point on, same as metallica_mis_reboot()'s own doc note).
+ * Both paths still return 0 on success -- this is the only way for a
+ * caller to tell which one actually happened, which matters for
+ * anything (e.g. metallica_mis_do_calibrate()) that wants to keep
+ * using the session afterward instead of just treating "0" as
+ * "pairing/firmware is in some good state, done". */
+int metallica_mis_upload_fwext(metallica_mis_tls_t *tls, bool *out_rebooted);
 
 #endif /* __METALLICA_MIS_UPLOAD_FWEXT_H */
