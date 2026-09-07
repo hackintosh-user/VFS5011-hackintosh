@@ -83,6 +83,10 @@
 #include "mmis_rom_info.h"
 #include "metallica_mis_blobs_9a.h"
 #include "metallica_mis_upload_fwext.h"
+#include "mmis_timeslot.h"
+#include "mmis_calibrate.h"
+#include "mmis_factory_bits.h"
+#include "metallica_type0199_tables.h"
 /* #include "hack-touchid-matcher.h"        -- reused unmodified once capture works */
 /* #include "hack-touchid-menubar-ipc.h"    -- reused unmodified once capture works */
 
@@ -246,6 +250,48 @@ static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpo
         r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
     }
     return r;
+}
+
+/*
+ * metallica_mis_read_bulk_data() -- port of python-validity's
+ * Usb.read_82(): a single raw bulk read from the sensor's image data
+ * endpoint (EP 0x82 / METALLICA_MIS_IN_ENDPOINT_DATA), used after a
+ * CALIBRATE/ENROLL/IDENTIFY cmd_02 has been sent to pull the resulting
+ * frame(s) of raw sensor data.
+ *
+ * Python:
+ *   def read_82(self):
+ *       try:
+ *           resp = self.dev.read(130, 1024 * 1024, timeout=10000)
+ *           return bytes(resp)
+ *       except Exception as e:
+ *           return None
+ *
+ * (130 = endpoint 0x82.) This port keeps the same 10-second timeout but,
+ * unlike upstream, does NOT swallow the failure into a None return --
+ * every other transport call in this project (cmd(), tls_cmd()) treats a
+ * transport failure as fatal via a negative return, so this matches that
+ * convention instead: returns the number of bytes actually read (may
+ * legitimately be less than out_buf_size if the device sends a short
+ * final packet), or -1 if the device isn't open or the transfer itself
+ * fails (including a timeout).
+ */
+int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size) {
+    if (!g_handle) {
+        fprintf(stderr, "metallica_mis_read_bulk_data: device not open\n");
+        return -1;
+    }
+
+    int transferred = 0;
+    int r = bulk_transfer_with_pipe_retry(g_handle, METALLICA_MIS_IN_ENDPOINT_DATA,
+                                           out_buf, (int)out_buf_size, &transferred, 10000);
+    if (r != 0) {
+        fprintf(stderr, "metallica_mis_read_bulk_data: bulk read failed (libusb error %d: %s)\n",
+                r, libusb_error_name(r));
+        return -1;
+    }
+
+    return transferred;
 }
 
 /*
@@ -620,6 +666,227 @@ int metallica_mis_send_init(void) {
     }
 
     fprintf(stderr, "metallica_mis: plaintext bootstrap stage completed OK\n");
+    return 0;
+}
+
+/*
+ * metallica_mis_do_calibrate() -- port of Sensor.calibrate()'s
+ * calibration loop + clean-slate construction, for the type-0x199
+ * Metallica MIS backend. Requires an already-open, already-secure TLS
+ * session (metallica_mis_tls_open() must have succeeded already --
+ * pairing, not just plaintext bootstrap).
+ *
+ * NOT ported: Python's file-cache short-circuit at the top of
+ * calibrate() (loading self.calib_data from calib_data_path and
+ * skipping the whole loop if check_clean_slate() already passes).
+ * Caller is expected to call mmis_check_clean_slate() first and only
+ * invoke this function if that returns false -- this function always
+ * runs the full 3-iteration capture loop plus the blank-image capture.
+ *
+ * Python (sensor.py):
+ *   for i in range(0, self.calibration_iterations):
+ *       rsp = tls.cmd(self.build_cmd_02(CaptureMode.CALIBRATE))
+ *       assert_status(rsp)
+ *       self.process_calibration_results(self.average(usb.read_82()))
+ *
+ *   rsp = tls.cmd(self.build_cmd_02(CaptureMode.CALIBRATE))
+ *   assert_status(rsp)
+ *   clean_slate = self.average(usb.read_82())
+ *   clean_slate = pack('<H', len(clean_slate)) + clean_slate
+ *   clean_slate = clean_slate + pack('<H', 0)
+ *   clean_slate = pack('<H', len(clean_slate)) + sha256(clean_slate).digest() \
+ *                 + b'\0' * 0x20 + clean_slate
+ *   clean_slate = pack('<H', 0x5002) + clean_slate
+ *   self.persist_clean_slate(clean_slate)
+ *   self.save()   # writes self.calib_data to a local cache file -- NOT ported,
+ *                 # no on-disk calib_data cache exists in this client yet
+ *
+ * Type 0x199 is currently the only supported device (all constants below
+ * come from metallica_type0199_tables.h) -- same scope limit as the rest
+ * of this backend so far.
+ *
+ * Returns 0 on success, -1 on any failure (transport, malformed reply,
+ * or flash persist failure -- diagnostics are printed as they occur).
+ */
+int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
+    /* ---- one-time setup: hardcoded capture program + factory bits ---- */
+    uint8_t prog[METALLICA_TYPE0199_PROG_MAX_LEN];
+    size_t prog_len = 0;
+    metallica_type0199_build_prog(prog, &prog_len);
+
+    size_t lines_per_frame = 0;
+    if (!mmis_get_lines_per_frame(prog, prog_len, METALLICA_TYPE0199_REPEAT_MULTIPLIER,
+                                   &lines_per_frame)) {
+        fprintf(stderr, "metallica_mis_do_calibrate: mmis_get_lines_per_frame() failed\n");
+        return -1;
+    }
+
+    uint8_t factory_calibration_values[4096];
+    size_t factory_len = 0;
+    if (!metallica_mis_get_factory_calibration_values(tls, factory_calibration_values,
+                                                        sizeof(factory_calibration_values),
+                                                        &factory_len)) {
+        fprintf(stderr, "metallica_mis_do_calibrate: get_factory_calibration_values() failed\n");
+        return -1;
+    }
+
+    /* ---- scratch space for the per-iteration capture round trip ---- */
+    static uint8_t cmd_buf[4096];
+    static uint8_t scratch[8192];
+    static uint8_t reply[256];
+    static uint8_t raw_buf[262144];   /* generous vs. the ~80KB a real
+                                        * 3-frame/224-line/120-byte capture
+                                        * actually produces; upstream's
+                                        * read_82() ceiling is 1MB, this is
+                                        * a deliberately smaller but still
+                                        * comfortable margin. */
+    static uint8_t cooked_buf[16384]; /* >= lines_per_calibration_data(112) *
+                                        * bytes_per_line(0x78) = 13440 */
+
+    /* ---- running calib_data accumulator, ping-ponged between two
+     * fixed buffers since mmis_process_calibration_results() cannot
+     * alias its prev/out buffers. ---- */
+    static uint8_t calib_a[16384];
+    static uint8_t calib_b[16384];
+    uint8_t *calib_cur = calib_a, *calib_next = calib_b;
+    size_t calib_cur_len = 0; /* empty == "no prior calibration data", matches self.calib_data = b'' */
+
+    for (int i = 0; i < METALLICA_TYPE0199_CALIBRATION_ITERATIONS; i++) {
+        fprintf(stderr, "metallica_mis: calibration iteration %d...\n", i);
+
+        size_t cmd_len = mmis_build_cmd_02(
+            MMIS_CAPTURE_CALIBRATE, prog, prog_len,
+            METALLICA_TYPE0199_BYTES_PER_LINE, METALLICA_TYPE0199_CALIBRATION_FRAMES, lines_per_frame,
+            METALLICA_TYPE0199_REPEAT_MULTIPLIER, METALLICA_TYPE0199_KEY_CALIBRATION_LINE,
+            factory_calibration_values, factory_len,
+            calib_cur, calib_cur_len,
+            METALLICA_TYPE0199_LINES_PER_CALIBRATION_DATA, METALLICA_TYPE0199_LINE_WIDTH,
+            METALLICA_TYPE0199_CALIB_BLOB, sizeof(METALLICA_TYPE0199_CALIB_BLOB),
+            cmd_buf, sizeof(cmd_buf), scratch, sizeof(scratch));
+        if (cmd_len == 0) {
+            fprintf(stderr, "metallica_mis_do_calibrate: build_cmd_02() failed on iteration %d\n", i);
+            return -1;
+        }
+
+        int n = metallica_mis_tls_cmd(tls, cmd_buf, cmd_len, reply, sizeof(reply));
+        if (n < 0 || assert_status(reply, n) != 0) {
+            fprintf(stderr, "metallica_mis_do_calibrate: cmd_02 send failed on iteration %d\n", i);
+            return -1;
+        }
+
+        int raw_len = metallica_mis_read_bulk_data(raw_buf, sizeof(raw_buf));
+        if (raw_len < 0) {
+            fprintf(stderr, "metallica_mis_do_calibrate: read_bulk_data() failed on iteration %d\n", i);
+            return -1;
+        }
+
+        size_t cooked_len = 0;
+        if (!mmis_average(raw_buf, (size_t)raw_len, lines_per_frame,
+                           METALLICA_TYPE0199_BYTES_PER_LINE,
+                           METALLICA_TYPE0199_LINES_PER_CALIBRATION_DATA,
+                           cooked_buf, sizeof(cooked_buf), &cooked_len)) {
+            fprintf(stderr, "metallica_mis_do_calibrate: average() failed on iteration %d\n", i);
+            return -1;
+        }
+
+        size_t written_len = 0;
+        if (!mmis_process_calibration_results(cooked_buf, cooked_len,
+                                               METALLICA_TYPE0199_BYTES_PER_LINE,
+                                               calib_cur, calib_cur_len,
+                                               calib_next, sizeof(calib_b), &written_len)) {
+            fprintf(stderr, "metallica_mis_do_calibrate: process_calibration_results() failed "
+                             "on iteration %d\n", i);
+            return -1;
+        }
+
+        /* swap roles: the buffer we just wrote becomes "cur" for the next
+         * iteration; the old "cur" becomes free scratch for "next". */
+        uint8_t *tmp = calib_cur;
+        calib_cur = calib_next;
+        calib_next = tmp;
+        calib_cur_len = written_len;
+    }
+
+    /* ---- blank-image capture for the clean-slate blob ---- */
+    fprintf(stderr, "metallica_mis: requesting a blank image...\n");
+
+    size_t cmd_len = mmis_build_cmd_02(
+        MMIS_CAPTURE_CALIBRATE, prog, prog_len,
+        METALLICA_TYPE0199_BYTES_PER_LINE, METALLICA_TYPE0199_CALIBRATION_FRAMES, lines_per_frame,
+        METALLICA_TYPE0199_REPEAT_MULTIPLIER, METALLICA_TYPE0199_KEY_CALIBRATION_LINE,
+        factory_calibration_values, factory_len,
+        calib_cur, calib_cur_len,
+        METALLICA_TYPE0199_LINES_PER_CALIBRATION_DATA, METALLICA_TYPE0199_LINE_WIDTH,
+        METALLICA_TYPE0199_CALIB_BLOB, sizeof(METALLICA_TYPE0199_CALIB_BLOB),
+        cmd_buf, sizeof(cmd_buf), scratch, sizeof(scratch));
+    if (cmd_len == 0) {
+        fprintf(stderr, "metallica_mis_do_calibrate: build_cmd_02() failed for blank image\n");
+        return -1;
+    }
+
+    int n = metallica_mis_tls_cmd(tls, cmd_buf, cmd_len, reply, sizeof(reply));
+    if (n < 0 || assert_status(reply, n) != 0) {
+        fprintf(stderr, "metallica_mis_do_calibrate: cmd_02 send failed for blank image\n");
+        return -1;
+    }
+
+    int raw_len = metallica_mis_read_bulk_data(raw_buf, sizeof(raw_buf));
+    if (raw_len < 0) {
+        fprintf(stderr, "metallica_mis_do_calibrate: read_bulk_data() failed for blank image\n");
+        return -1;
+    }
+
+    size_t cooked_len = 0;
+    if (!mmis_average(raw_buf, (size_t)raw_len, lines_per_frame,
+                       METALLICA_TYPE0199_BYTES_PER_LINE,
+                       METALLICA_TYPE0199_LINES_PER_CALIBRATION_DATA,
+                       cooked_buf, sizeof(cooked_buf), &cooked_len)) {
+        fprintf(stderr, "metallica_mis_do_calibrate: average() failed for blank image\n");
+        return -1;
+    }
+
+    /* ---- build the clean-slate blob ----
+     * stageB = u16le(cooked_len) + cooked_buf + u16le(0)
+     * final  = u16le(0x5002) + u16le(len(stageB)) + sha256(stageB) + 32x00 + stageB
+     */
+    static uint8_t stage_b[4 + sizeof(cooked_buf)];
+    size_t pos = 0;
+    stage_b[pos++] = (uint8_t)(cooked_len & 0xff);
+    stage_b[pos++] = (uint8_t)((cooked_len >> 8) & 0xff);
+    memcpy(stage_b + pos, cooked_buf, cooked_len);
+    pos += cooked_len;
+    stage_b[pos++] = 0x00;
+    stage_b[pos++] = 0x00;
+    size_t stage_b_len = pos;
+
+    unsigned char digest[32];
+    SHA256(stage_b, stage_b_len, digest);
+
+    static uint8_t final_blob[0x44 + 4 + sizeof(cooked_buf)];
+    pos = 0;
+    final_blob[pos++] = 0x02; /* magic 0x5002, LE */
+    final_blob[pos++] = 0x50;
+    final_blob[pos++] = (uint8_t)(stage_b_len & 0xff);
+    final_blob[pos++] = (uint8_t)((stage_b_len >> 8) & 0xff);
+    memcpy(final_blob + pos, digest, sizeof(digest));
+    pos += sizeof(digest);
+    memset(final_blob + pos, 0, 0x20);
+    pos += 0x20;
+    memcpy(final_blob + pos, stage_b, stage_b_len);
+    pos += stage_b_len;
+
+    if (!mmis_persist_clean_slate(final_blob, pos)) {
+        fprintf(stderr, "metallica_mis_do_calibrate: persist_clean_slate() failed\n");
+        return -1;
+    }
+
+    /* Python's self.save() (writes self.calib_data to a local cache file
+     * at calib_data_path) is NOT ported -- no on-disk calib_data cache
+     * exists in this client yet. Not needed for correctness here since
+     * mmis_check_clean_slate() reads the persisted flash copy, not a
+     * local file, on the next run. */
+
+    fprintf(stderr, "metallica_mis: calibration complete, clean-slate blob persisted to flash.\n");
     return 0;
 }
 

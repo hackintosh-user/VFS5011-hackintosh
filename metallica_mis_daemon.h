@@ -22,6 +22,9 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
+
+#include "metallica_mis_tls.h"
 
 #ifndef __METALLICA_MIS_DAEMON_H
 #define __METALLICA_MIS_DAEMON_H
@@ -60,5 +63,23 @@ int metallica_mis_send_init(void);
  * Returns 0 on success (including "already paired and firmware
  * already loaded"), -1 on any failure. */
 int metallica_mis_do_pairing(void);
+
+/* Raw bulk-data read from the sensor's image endpoint (0x82) -- used by
+ * calibrate()/capture() to pull one frame's worth of raw sensor data
+ * after a CALIBRATE/ENROLL/IDENTIFY capture command has been issued.
+ * Blocks up to 10s (matches upstream python-validity's read_82()
+ * timeout). Returns the number of bytes actually read, or -1 on
+ * failure (device not open, libusb error, or timeout). */
+int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size);
+
+/* Runs the full type-0x199 calibration sequence (3 capture iterations +
+ * one blank-image capture) and persists the resulting clean-slate blob
+ * to flash partition 6. Requires an already-open, already-secure TLS
+ * session (post metallica_mis_do_pairing() or a prior successful
+ * pairing). Caller should check mmis_check_clean_slate() first and only
+ * call this if it returns false -- this always runs the full sequence,
+ * it does not skip on its own if valid calibration data already exists.
+ * Returns 0 on success, -1 on any failure. */
+int metallica_mis_do_calibrate(metallica_mis_tls_t *tls);
 
 #endif /* __METALLICA_MIS_DAEMON_H */
