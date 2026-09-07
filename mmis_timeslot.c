@@ -1,4 +1,4 @@
-#include "timeslot.h"
+#include "mmis_timeslot.h"
 #include <string.h>
 
 bool mmis_decode_insn(const uint8_t *b, size_t len, mmis_insn_t *out) {
