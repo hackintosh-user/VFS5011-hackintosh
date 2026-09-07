@@ -49,6 +49,7 @@
 #include "supported_sensors.h"
 #include "metallica_mis_firmware.h"
 #include "metallica_mis_daemon.h"
+#include "mmis_calibrate.h"
 #include "upek_proto.h"
 #include "upek_daemon.h"
 
@@ -1438,6 +1439,7 @@ static void print_menu(void) {
     printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
     if (is_metallica_mis_sensor(g_detected_sensor)) {
         printf("%s[P]%s Pair Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+        printf("%s[B]%s Calibrate Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
     }
     if (is_upek_sensor(g_detected_sensor)) {
         printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
@@ -1591,6 +1593,111 @@ static void do_pair_metallica_mis(void) {
             "reboot command as the last step and should be re-enumerating "
             "now -- give it a moment before running Enroll/Verify (once "
             "this sensor's capture backend exists).\n\n");
+    metallica_mis_close_device();
+}
+
+/* Runs the full type-0x199 calibration sequence (3 capture iterations
+ * + one blank-image capture, then persists the clean-slate blob to
+ * flash) against a Metallica MIS sensor, via
+ * metallica_mis_open_calibration_session() +
+ * metallica_mis_do_calibrate() (both metallica_mis_daemon.c, this
+ * session). Requires the sensor to have already been successfully
+ * paired -- run [P] Pair Sensor first if it hasn't been.
+ *
+ * Like [P] Pair Sensor and [U] Test Capture, this is its own menu
+ * action rather than part of Enroll/Verify/Deploy: this sensor
+ * family's capture backend still doesn't exist (backend_available
+ * stays 0 in supported_sensors.h), so there's no Enroll/Verify flow
+ * for it to belong to yet. This is purely about getting real
+ * calibration data onto the sensor's flash so that work has
+ * something real to build capture()/enroll() against next.
+ *
+ * Session-establishment nuance worth surfacing to the tester: this
+ * calls metallica_mis_open_calibration_session(), which re-runs the
+ * same init_flash()+upload_fwext() sequence [P] Pair Sensor uses.
+ * On an already-paired, already-loaded device (the expected case
+ * here) both steps are fast read-only no-ops and there's no reboot --
+ * but if either isn't true yet, this will actually re-pair / re-upload
+ * firmware / reboot the device for real, same as [P] Pair Sensor
+ * itself would. That's why this prints the same category of warning
+ * before proceeding, even though the common-case run is much less
+ * eventful than pairing. */
+static void do_calibrate_metallica_mis(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. Nothing to calibrate.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis will run real calibration against %s {0x%04X:0x%04X}.\n\n"
+        "If this sensor is ALREADY paired with firmware already loaded\n"
+        "(the expected case if you already ran [P] Pair Sensor "
+        "successfully), this is safe and reboot-free: it just runs 3\n"
+        "real capture passes plus one blank-image capture, then "
+        "unconditionally ERASES AND REWRITES flash partition 6 with the\n"
+        "resulting clean-slate calibration data.\n\n"
+        "If this sensor is NOT yet paired, or firmware isn't loaded yet,\n"
+        "this will instead trigger the SAME real pairing + firmware\n"
+        "upload + reboot that [P] Pair Sensor does, and will abort "
+        "without calibrating (the device won't be there to receive "
+        "calibration commands right after a reboot) -- run [P] Pair "
+        "Sensor first in that case, then try this again.\n\n"
+        "This has NOT been run against real hardware yet.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    printf("Type CALIBRATE (all caps) to proceed, anything else to cancel: ");
+    fflush(stdout);
+    char confirm[16];
+    if (!fgets(confirm, sizeof(confirm), stdin)) {
+        printf("\nCalibration cancelled.\n\n");
+        return;
+    }
+    size_t clen = strlen(confirm);
+    while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+    if (strcmp(confirm, "CALIBRATE") != 0) {
+        printf("Calibration cancelled.\n\n");
+        return;
+    }
+
+    if (metallica_mis_open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("\nRunning plaintext bootstrap stage...\n");
+    if (metallica_mis_send_init() != 0) {
+        vfsc_err("Plaintext bootstrap stage failed. Check the diagnostic output "
+                  "above for the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Bootstrap OK.\n\n");
+
+    printf("Establishing a secure session (should be quick and reboot-free "
+           "if this sensor is already paired + loaded)...\n");
+    metallica_mis_tls_t tls;
+    if (metallica_mis_open_calibration_session(&tls) != 0) {
+        vfsc_err("Could not establish a live secure session for calibration. "
+                  "Check the diagnostic output above -- if it mentions a real "
+                  "pairing/firmware-upload/reboot just happened, wait a few "
+                  "seconds for the device to re-enumerate and try again; it "
+                  "should be reboot-free on the next attempt.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Session ready.\n\n");
+
+    printf("Running calibration (3 capture passes + 1 blank-image capture, "
+           "then writing to flash)...\n");
+    if (metallica_mis_do_calibrate(&tls) != 0) {
+        vfsc_err("Calibration failed. Check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+
+    vfsc_ok("\nCalibration succeeded. The clean-slate blob has been written "
+            "to flash partition 6.\n\n");
     metallica_mis_close_device();
 }
 
@@ -2965,6 +3072,14 @@ int main(int argc, char **argv) {
             case 'P': case 'p':
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_pair_metallica_mis();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'B': case 'b':
+                if (is_metallica_mis_sensor(g_detected_sensor)) {
+                    do_calibrate_metallica_mis();
                 } else {
                     printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
                     ran_action = false;
