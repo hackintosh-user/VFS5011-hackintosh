@@ -2707,9 +2707,19 @@ static bool download_build_and_swap_update(const char *branch) {
 }
 
 static void check_for_client_update(void) {
-    /* g_local_version_info is loaded once by print_banner() (called
-     * before this in every boot path) -- reuse it instead of reading
-     * VERSION.txt from disk a second time. */
+    /* g_local_version_info is cached the first time it's needed --
+     * either by print_banner() (quiet mode, runs before this) or
+     * right here (verbose mode, where print_banner() is deliberately
+     * deferred to the end of boot -- see its call site's comment --
+     * so it hasn't run yet by the time we get here). Do NOT gate this
+     * on g_local_version_loaded already being true; that was the bug:
+     * in verbose/default mode (g_verbose_boot's default) this function
+     * always ran before print_banner() ever had a chance to set it,
+     * so the update check silently no-op'd on every single launch
+     * that didn't pass --q/--quiet. */
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
     if (!g_local_version_loaded) return;
     const client_version_info_t local = g_local_version_info;
 
