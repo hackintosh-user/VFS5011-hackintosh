@@ -64,6 +64,18 @@ int metallica_mis_send_init(void);
  * already loaded"), -1 on any failure. */
 int metallica_mis_do_pairing(void);
 
+/* Establishes a live, secure TLS session for calibration/capture use,
+ * WITHOUT going through the caller having to know about pairing at
+ * all -- reuses the same init_flash()+upload_fwext() sequence as
+ * metallica_mis_do_pairing(), but only succeeds (returns 0) when both
+ * steps took their no-op paths (already paired, firmware already
+ * loaded) and hands back the open session via *tls_out instead of
+ * discarding it. If real pairing/upload/reboot happens instead
+ * (device wasn't ready yet), returns -1 -- the session doesn't
+ * survive that, so it's not handed back. Call [P] Pair Sensor /
+ * metallica_mis_do_pairing() first if this fails on a fresh device. */
+int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out);
+
 /* Raw bulk-data read from the sensor's image endpoint (0x82) -- used by
  * calibrate()/capture() to pull one frame's worth of raw sensor data
  * after a CALIBRATE/ENROLL/IDENTIFY capture command has been issued.

@@ -589,7 +589,7 @@ int metallica_mis_do_pairing(void) {
         }
     }
 
-    if (metallica_mis_upload_fwext(&tls) != 0) {
+    if (metallica_mis_upload_fwext(&tls, NULL) != 0) {
         fprintf(stderr, "metallica_mis: do_pairing(): upload_fwext() FAILED. Pairing itself "
                          "(partition table + cert material) already succeeded and was "
                          "written to flash -- only the firmware upload step failed. Do NOT "
@@ -875,7 +875,7 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
     memcpy(final_blob + pos, stage_b, stage_b_len);
     pos += stage_b_len;
 
-    if (!mmis_persist_clean_slate(final_blob, pos)) {
+    if (!mmis_persist_clean_slate(tls, final_blob, pos)) {
         fprintf(stderr, "metallica_mis_do_calibrate: persist_clean_slate() failed\n");
         return -1;
     }
@@ -887,6 +887,80 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
      * local file, on the next run. */
 
     fprintf(stderr, "metallica_mis: calibration complete, clean-slate blob persisted to flash.\n");
+    return 0;
+}
+
+/*
+ * metallica_mis_open_calibration_session() -- runs the same
+ * session-establishment sequence as metallica_mis_do_pairing()
+ * (get_host_identity -> tls_init -> init_flash -> upload_fwext), but
+ * hands the live, secure TLS session back to the caller instead of
+ * discarding it, so it can be reused for metallica_mis_do_calibrate()
+ * (or, eventually, capture) without a second handshake.
+ *
+ * This is only meaningful -- and only safe to chain into calibrate()
+ * -- on a device that is ALREADY paired with firmware ALREADY loaded
+ * (the expected case: tester already ran [P] Pair Sensor successfully
+ * on this exact host+device before). In that case init_flash() and
+ * upload_fwext() both take their early-return no-op paths (see their
+ * own doc comments) -- no flash rewrite, no reboot -- and this
+ * returns 0 with *tls_out left open and ready for tls_cmd() calls.
+ *
+ * If the device is NOT yet paired, or firmware isn't loaded yet, this
+ * will actually pair it / upload firmware / REBOOT it -- same
+ * real-write behavior as metallica_mis_do_pairing(), NOT a dry run.
+ * In that case the device is gone by the time upload_fwext() returns,
+ * so this function returns -1 (even though the pairing/upload itself
+ * may have fully succeeded) rather than handing back a dead session --
+ * the caller should tell the user to run [P] Pair Sensor (or retry
+ * this action once, now that pairing succeeded) instead of silently
+ * trying to calibrate over a session that no longer exists.
+ *
+ * Returns 0 with *tls_out populated and open on success, -1 otherwise
+ * (*tls_out's contents are undefined on failure -- do not use it).
+ */
+int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
+    char product_name[256];
+    char serial_number[256];
+    metallica_mis_identity_t identity;
+
+    if (get_host_identity(product_name, sizeof(product_name),
+                           serial_number, sizeof(serial_number)) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): failed to get host identity\n");
+        return -1;
+    }
+
+    if (metallica_mis_tls_init(tls_out, mis_transport, NULL, product_name, serial_number) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): tls_init() failed\n");
+        return -1;
+    }
+
+    memset(&identity, 0, sizeof(identity));
+
+    if (metallica_mis_init_flash(tls_out, &identity, product_name, serial_number,
+                                  g_detected_vid, g_detected_pid) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): init_flash() FAILED\n");
+        return -1;
+    }
+
+    bool rebooted = false;
+    if (metallica_mis_upload_fwext(tls_out, &rebooted) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): upload_fwext() FAILED\n");
+        return -1;
+    }
+
+    if (rebooted) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): device was not fully "
+                         "paired/loaded yet -- pairing and/or firmware upload just ran for "
+                         "real and the device has rebooted. The session is no longer usable "
+                         "this run. Wait a few seconds for the device to re-enumerate, then "
+                         "try Calibrate again (it should be a fast no-op reboot-free session "
+                         "open on the next attempt).\n");
+        return -1;
+    }
+
+    fprintf(stderr, "metallica_mis: open_calibration_session(): session ready "
+                     "(already paired, firmware already loaded, no reboot needed).\n");
     return 0;
 }
 
