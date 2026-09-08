@@ -146,16 +146,13 @@ chmod +x prep_and_build.sh
 ./prep_and_build.sh
 ```
 
-This produces two binaries in the project directory:
+This produces the needed binaries for running the client and each sensor's Daemon + other needed files. 
 
-- `vfs_client` — the interactive menu used for enrollment, verification,
-  and deployment
-- `vfs5011_daemon` — the background daemon that watches for
-  authentication prompts and performs the fingerprint check
-
-`ax_probe`, a standalone Accessibility-API diagnostic tool used during
+* `ax_probe`, a standalone Accessibility-API diagnostic tool used during
 development, is not built by `build.sh`. It has no dependency on
-`libusb` or NBIS and can be built on its own if needed:
+`libusb` or NBIS.
+
+ * Can be built on its own if needed:
 
 ```bash
 clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationServices
@@ -172,6 +169,22 @@ Run the client with this command:
 ```bash
 sudo ./hack-touchid
 ```
+
+* Upon running this you will be presented with the Verbose launch, which you can skip via:
+  ```bash
+  sudo ./hack-touchid --q
+  ```
+  Or:
+  
+  ```bash
+  sudo ./hack-touchid --quiet
+  ```
+* After the first launch, the Client will add itself to ```$PATH``` That way you can simply launch a fresh terminal without Cd'ing into the folder where the repo is located and simply run:
+```bash
+sudo hack-touchid
+```
+or with its launch-arguments!
+
 Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
 ```
 [1] Enroll a Finger
@@ -179,6 +192,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 [3] Deploy Authentication Services
 [P] (ONLY FOR METALLICA MIS SENSORS) Pair
 [U] (ONLY FOR UPEK 147e:2016) capture .pgm
+[B] Capture (experimental, Only for Metallica MIS Sensors)
 
 [S] Settings
 [A] About
