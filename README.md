@@ -247,18 +247,11 @@ password automatically.
   specific operations that require it (accessing the USB device). It is
   not installed as a system-wide LaunchDaemon.
 
-## Tested configurations
-
-| macOS Version | Result |
-|---|---|
-| Sequoia| Lock screen and padlock unlock confirmed working |
-| Tahoe  | Lock screen and padlock unlock confirmed working (separate test volume) |
-| Sonoma | lock screen And padlock confirmed working on DV6-7080ee Sandy bridge.   |
-| Ventura| Remains to be TESTED.                                                   |
-
-* Tested on an Intel Ivy Bridge Hackintosh laptop (HP Pavilion DV6/EliteBook class hardware) with the VFS5011 sensor at USB `138A:0018`.
-
 ## Limitations
+
+These are limitations that are either not possible to fix or currently **Planned / Fixes for later**. As before, please keep your expectations in check, this is a hobby project maintained by one person, not a **Dev-Ops Development team**.
+
+List as goes:
 
 - macOS only. This is not a libfprint driver and is not intended to run
   on Linux — if you're on Linux with this sensor, use the existing
@@ -268,11 +261,14 @@ password automatically.
 - No PAM module exists for `sudo` in a terminal. An Accessibility-based
   approach for `sudo` prompts was prototyped during development and
   intentionally removed to keep scope limited to lock screen and System
-  Settings authentication. (there are still plans to attempt codingt this. But unknown if Modern macOS allows this type of access)
+  Settings authentication. (there are still plans to attempt implementing this. But unknown if Modern macOS allows this type of access within the user space-range)
 - Ad hoc code signing is used for the daemon binary and its
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
-- a Cold boot sign in is not supported. Could take Months or Years to produce something usable.
+- a Cold boot sign in is not supported:
+  ```Mark Down
+  Modern macOS Does not allow this level of access required to implement such thing into the Login window before the user has logged in. as such this is only a For now impossible, Could happen one day but could take months or even *years* of active development towards this feat of macOS engineering.
+  ``` 
 
 ## Acknowledgments
 
