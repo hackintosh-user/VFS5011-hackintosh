@@ -183,7 +183,7 @@ sudo ./hack-touchid
 ```bash
 sudo hack-touchid
 ```
-or with its launch-arguments!
+or with its [launch-arguments!](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
 
 Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
 ```
