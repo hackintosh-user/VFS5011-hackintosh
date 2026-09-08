@@ -266,9 +266,10 @@ List as goes:
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
 - a Cold boot sign in is not supported:
-  ```Mark Down
-  Modern macOS Does not allow this level of access required to implement such thing into the Login window before the user has logged in. as such this is only a For now impossible, Could happen one day but could take months or even *years* of active development towards this feat of macOS engineering.
-  ``` 
+  
+ Explanation: 
+ * Modern macOS Does not allow this level of access required to implement such thing into the Login window before the user has logged in. As such this
+  is only a For now impossible, could happen one day but could take months or even *years* of active development towards this feat of macOS engineering.
 
 ## Acknowledgments
 
