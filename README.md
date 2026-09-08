@@ -218,6 +218,14 @@ lock screen, or when a System Settings authentication sheet appears, it
 prompts for a fingerprint swipe and, on a match, types the stored
 password automatically.
 
+## Launch Arguments
+
+**NOTICE** This list is set to change accordingly, there will be new launch-arguments which I will Mention in the Changelog!! Always keep up to date about these launch-args as they could heavily benefit your use-case.
+
+* ```--q```: launches the Client without presenting the Verbose boot / launch
+* ```--quiet```: same like the one before, launches the client without presenting the Verbose logs.
+* **[IN DEVELOPMENT | NOT READY for USAGE]** ```--deploy-agent```: Runs the [3] Deploy authentication services without entering the client.
+
 ## How it works
 
 - **Capture**: the raw USB protocol (initialization sequence,
