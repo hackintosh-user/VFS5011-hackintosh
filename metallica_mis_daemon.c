@@ -355,6 +355,26 @@ static int assert_status(const unsigned char *reply, int reply_len) {
 }
 
 /*
+ * mmis_hexdump() -- diagnostic-only raw byte dump, 16 bytes/line with
+ * an offset prefix, used to compare real on-wire cmd_02 traffic
+ * against a reconstructed Python reference when a calibrate/enroll
+ * command is rejected by the device for a reason assert_status()
+ * alone can't explain (e.g. a status code with no known upstream
+ * meaning). Not performance-sensitive -- diagnostic path only.
+ */
+static void mmis_hexdump(const char *label, const uint8_t *buf, size_t len) {
+    fprintf(stderr, "metallica_mis: %s (%zu bytes):\n", label, len);
+    for (size_t i = 0; i < len; i += 16) {
+        fprintf(stderr, "  %04zx: ", i);
+        size_t line_len = (len - i < 16) ? (len - i) : 16;
+        for (size_t j = 0; j < line_len; j++) {
+            fprintf(stderr, "%02x ", buf[i + j]);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
+/*
  * send_init() -- ONLY the plaintext bootstrap stage. This is as far
  * as this daemon can get without metallica_mis_tls.c existing.
  * Mirrors python-validity's Usb.send_init():
@@ -729,6 +749,12 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
         fprintf(stderr, "metallica_mis_do_calibrate: get_factory_calibration_values() failed\n");
         return -1;
     }
+    /* [DIAGNOSTIC, Sep 8 - remove once cmd_02 status=0x0404 is root-caused]
+     * We don't yet know if this device's real factory_calibration_values
+     * are the expected shape -- dump them so we can check the slice
+     * against a reconstructed Python reference. */
+    mmis_hexdump("factory_calibration_values (post [4:] slice)",
+                 factory_calibration_values, factory_len);
 
     /* ---- scratch space for the per-iteration capture round trip ---- */
     static uint8_t cmd_buf[4096];
@@ -768,7 +794,18 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
             return -1;
         }
 
+        /* [DIAGNOSTIC, Sep 8 - remove once cmd_02 status=0x0404 is root-caused]
+         * Dump the exact outgoing command so we can compare against a
+         * reconstructed Python reference for this iteration's inputs
+         * (real prog/factory bits, current calib_data length). */
+        mmis_hexdump("outgoing cmd_02", cmd_buf, cmd_len);
+
         int n = metallica_mis_tls_cmd(tls, cmd_buf, cmd_len, reply, sizeof(reply));
+        if (n >= 0) {
+            mmis_hexdump("cmd_02 reply", reply, (size_t)n);
+        } else {
+            fprintf(stderr, "metallica_mis: cmd_02 transport error, n=%d\n", n);
+        }
         if (n < 0 || assert_status(reply, n) != 0) {
             fprintf(stderr, "metallica_mis_do_calibrate: cmd_02 send failed on iteration %d\n", i);
             return -1;
