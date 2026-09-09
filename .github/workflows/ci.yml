@@ -127,6 +127,6 @@ jobs:
           ./Hackintosh-TouchID-Menubar/build_menubar_app.sh
       - name: Verify app bundle was produced
         run: |
-          test -d "Vfs5011-menubar/build/Hackintosh Touch-ID.app"
-          test -x "Vfs5011-menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
+          test -d "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app"
+          test -x "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
           echo "Menu bar app built successfully."
