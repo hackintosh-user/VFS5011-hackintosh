@@ -123,8 +123,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          chmod +x Vfs5011-menubar/build_menubar_app.sh
-          ./Vfs5011-menubar/build_menubar_app.sh
+          chmod +x Hackintosh-TouchID-Menubar/build_menubar_app.sh
+          ./Hackintosh-TouchID-Menubar/build_menubar_app.sh
       - name: Verify app bundle was produced
         run: |
           test -d "Vfs5011-menubar/build/Hackintosh Touch-ID.app"
