@@ -92,7 +92,7 @@ Completely optional — the daemon works identically with or without it
 running.
 
 ### Installing
-A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/) but if you prefer to compile, here's the commands to run:
+A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/latest) but if you prefer to compile, here's the commands to run:
 
 ```bash
 cd Hackintosh-TouchID-Menubar
