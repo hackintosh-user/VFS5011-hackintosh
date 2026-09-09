@@ -71,9 +71,12 @@ Features with Hackintosh Touch-ID:
 -  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
 -  Growing supported sensor list with testers.
 -  Auto Updating Client that auto extracts, runs chmod, re-launches new update, and deletes the old files.
+
+ 
 ## Menu Bar Companion App (optional)
 
-`vfs5011-menubar/` contains an optional menu bar app that surfaces the
+
+`Hackintosh-TouchID-Menubar/` contains an optional menu bar app that surfaces the
 daemon's auth events as real notifications — useful since the sensor's
 LED can be too dim to notice on its own.
 
@@ -92,7 +95,7 @@ running.
 A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/) but if you prefer to compile, here's the commands to run:
 
 ```bash
-cd vfs5011-menubar
+cd Hackintosh-TouchID-Menubar
 chmod +x build_menubar_app.sh
 ./build_menubar_app.sh
 open "build/Hackintosh Touch-ID.app"
