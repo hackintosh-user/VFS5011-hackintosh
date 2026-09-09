@@ -684,6 +684,15 @@ static int g_color_enabled = 1;
 static bool g_verbose_boot = true;
 static double g_boot_fake_time = 0.000031;
 
+/* Set by argv parsing in main() when "--deploy-agent" is passed.
+ * Routes into run_deploy_agent_mode() (defined further down, right
+ * before main()) instead of the interactive menu -- a headless mode
+ * so the menu bar app's "reinstall the daemon" notification button
+ * can run `sudo hack-touchid --deploy-agent` from Terminal without
+ * ever landing in the interactive prompt. Survives the sudo re-exec
+ * below alongside --q/--quiet (see sudo_argv construction in main()). */
+static bool g_deploy_agent_mode = false;
+
 static void vfsc_boot_line(const char *fmt, ...) {
     if (!g_verbose_boot) return;
 
@@ -2469,7 +2478,7 @@ static void do_settings_menu(void) {
  * on success we print one clean summary line per phase; on failure we
  * dump everything captured so far so the actual error is still
  * visible. */
-static void do_deploy(void) {
+static bool do_deploy(void) {
     /* Hard gate, generalized in v1.1: refuse to install anything at
      * all unless a sensor from supported_sensors.h is actually on the
      * USB bus. Deploy used to happily install/register the LaunchAgent
@@ -2479,13 +2488,19 @@ static void do_deploy(void) {
      * useful. g_detected_sensor is set once at startup by
      * detect_supported_sensor(), the same non-claiming enumeration
      * used for the status line, so this is safe pre-root-check and
-     * won't fight a concurrent enroll/verify. */
+     * won't fight a concurrent enroll/verify.
+     *
+     * Returns true/false (added for --deploy-agent, the headless CLI
+     * mode below, so its caller can report pass/fail and exit
+     * accordingly instead of always exiting 0). The interactive menu
+     * caller (case '3') still just discards the result, same as
+     * before. */
     if (!g_detected_sensor) {
         vfsc_err("No supported sensor detected on the USB bus.\n"
                   "Refusing to deploy -- this installs a background service tied\n"
                   "to a specific sensor, so it's not installed on hardware that\n"
                   "doesn't have one.\n\n");
-        return;
+        return false;
     }
 
     /* Detected, but that sensor's capture backend isn't built yet
@@ -2495,7 +2510,7 @@ static void do_deploy(void) {
         vfsc_err("%s detected, but its capture backend isn't implemented yet.\n"
                   "Deploy isn't available for this sensor until that's built.\n\n",
                   g_detected_sensor->display_name);
-        return;
+        return false;
     }
 
     /* First-run convenience: Deploy needs the template volume to exist
@@ -2506,7 +2521,7 @@ static void do_deploy(void) {
         vfsc_warn("\nTemplate volume isn't set up yet — setting it up now...\n\n");
         if (do_run_volume_setup() != 0) {
             vfsc_err("Cannot continue deployment without the template volume.\n\n");
-            return;
+            return false;
         }
     }
 
@@ -2529,7 +2544,7 @@ static void do_deploy(void) {
     if (status != 0) {
         printf("\n%s\n", captured);
         vfsc_err("Service deployment failed (exit status %d) — see output above.\n\n", status);
-        return;
+        return false;
     }
 
     printf("%sBuilding daemon executable...%s\n", VFSC_DIM, VFSC_RESET);
@@ -2564,6 +2579,7 @@ static void do_deploy(void) {
     }
 
     printf("Lock your screen and swipe an enrolled finger to test it.\n\n");
+    return true;
 }
 
 /* Darwin kernel major version 22 == macOS 13 Ventura, the new stated
@@ -3051,24 +3067,77 @@ static bool check_daemon_version_gate(void) {
     return true;
 }
 
+/* run_deploy_agent_mode() -- headless "hack-touchid --deploy-agent",
+ * for the menu bar app's daemon-missing notification button to run
+ * from a freshly-launched Terminal window without ever entering the
+ * interactive menu. Runs just enough of normal startup to make
+ * do_deploy() safe to call (OpenCore gate, sensor detection) and
+ * deliberately SKIPS check_daemon_version_gate() -- that gate exists
+ * to stop the interactive menu from running against a stale-but-
+ * present daemon, but this mode's entire purpose is fixing a
+ * missing/stale daemon, so requiring a working daemon first would be
+ * circular. Prints a clean pass/fail and waits for Return before
+ * returning, so the Terminal window this was launched into doesn't
+ * vanish before the person can read the result. */
+static void run_deploy_agent_mode(void) {
+    printf("%shack-touchid --deploy-agent%s -- headless daemon (re)install\n\n",
+           VFSC_BOLD, VFSC_RESET);
+
+    if (!check_opencore_version_requirement()) {
+        printf("\nPress Return to close this window...");
+        fflush(stdout);
+        getchar();
+        return;
+    }
+
+    if (!check_sensor_presence_gate()) {
+        printf("\nPress Return to close this window...");
+        fflush(stdout);
+        getchar();
+        return;
+    }
+
+    bool ok = do_deploy();
+    if (ok) {
+        vfsc_ok("Daemon (re)install complete.\n");
+    } else {
+        vfsc_err("Daemon (re)install failed -- see output above.\n");
+    }
+
+    printf("\nPress Return to close this window...");
+    fflush(stdout);
+    getchar();
+}
+
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--deploy-agent") == 0) {
+            g_deploy_agent_mode = true;
         }
     }
     srand((unsigned int)time(NULL));
 
     /* Claiming the USB interface needs root on macOS. Re-exec the whole
      * menu session under sudo up front, same approach as the original
-     * CLI, so options 1/2 don't each need their own privilege prompt. */
+     * CLI, so options 1/2 don't each need their own privilege prompt.
+     *
+     * Counter-based instead of the old fixed 4-slot array -- now that
+     * --q/--quiet and --deploy-agent can both be present at once, the
+     * old hardcoded "sudo_argv[2] = flag or NULL" approach could only
+     * carry one flag through the re-exec. This builds the argv up to
+     * however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[4];
-        sudo_argv[0] = "sudo";
-        sudo_argv[1] = argv[0];
-        sudo_argv[2] = g_verbose_boot ? NULL : "--q";
-        sudo_argv[3] = NULL;
+        char *sudo_argv[5];
+        int ai = 0;
+        sudo_argv[ai++] = "sudo";
+        sudo_argv[ai++] = argv[0];
+        if (!g_verbose_boot) sudo_argv[ai++] = "--q";
+        if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
+        sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
         return 1;
@@ -3081,6 +3150,16 @@ int main(int argc, char **argv) {
     ensure_path_symlink();
     init_color_support();
     g_match_threshold = load_match_threshold();
+
+    /* --deploy-agent short-circuits straight to run_deploy_agent_mode()
+     * here -- deliberately before the verbose boot flood / banner /
+     * update-check / interactive menu below, none of which this
+     * headless mode wants. run_deploy_agent_mode() runs its own
+     * OpenCore + sensor gates internally and returns when done. */
+    if (g_deploy_agent_mode) {
+        run_deploy_agent_mode();
+        return 0;
+    }
 
     /* Quiet mode keeps the banner where it's always been (first thing
      * shown) -- only verbose mode moves it to the end, after the log
