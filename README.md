@@ -145,7 +145,7 @@ Known limitations:
 
 ```bash
 git clone https://github.com/hackintosh-user/VFS5011-hackintosh.git
-cd /path/to/vfs5011-hackintosh-main
+cd /path/to/vfs5011-hackintosh-active-development
 chmod +x prep_and_build.sh
 ./prep_and_build.sh
 ```
