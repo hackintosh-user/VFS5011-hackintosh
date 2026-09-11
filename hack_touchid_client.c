@@ -693,6 +693,16 @@ static double g_boot_fake_time = 0.000031;
  * below alongside --q/--quiet (see sudo_argv construction in main()). */
 static bool g_deploy_agent_mode = false;
 
+/* Set by argv parsing in main() when "--diag-pid" is passed. Routes
+ * into run_diagnose_mode() instead of the interactive menu -- same
+ * headless-dispatch pattern as g_deploy_agent_mode above, just for
+ * generating a diagnostic report non-interactively (e.g. scripted,
+ * or from a support request where "run this exact command and paste
+ * the output" is easier than walking someone through the [D] menu
+ * item). Name's arbitrary -- Mohammad's pick, not short for anything
+ * -- but survives the sudo re-exec the same way the other flags do. */
+static bool g_diag_pid_mode = false;
+
 static void vfsc_boot_line(const char *fmt, ...) {
     if (!g_verbose_boot) return;
 
@@ -1544,6 +1554,7 @@ static void print_menu(void) {
         printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
     }
     printf("\n");
+    printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[Q]%s Quit\n", VFSC_BOLD, VFSC_RESET);
@@ -3067,6 +3078,138 @@ static bool check_daemon_version_gate(void) {
     return true;
 }
 
+/* run_diagnose_mode() -- shared by the interactive [D] Diagnose menu
+ * item and the headless "hack-touchid --diag-pid" launch flag. A
+ * plain-text health report meant to be copy-pasted straight into a
+ * GitHub issue or a debugging chat: client version, macOS/hardware
+ * identification, OpenCore version, detected sensor, daemon install
+ * + running state, template volume, Accessibility grant, and
+ * enrolled finger count.
+ *
+ * Deliberately READ-ONLY and never gates/refuses on a bad answer --
+ * unlike the interactive menu's startup gates, the whole point here
+ * is to surface a broken/missing piece clearly, not stop before
+ * reporting it. Every sub-check below is called for its side effect
+ * of printing what it finds; the diagnose flow itself never inspects
+ * or acts on the return values. */
+static void run_diagnose_mode(void) {
+    printf("%s=== Hackintosh Touch-ID Diagnostic Report ===%s\n\n", VFSC_BOLD, VFSC_RESET);
+
+    /* -------- Client -------- */
+    printf("-- Client --\n");
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (g_local_version_loaded && g_local_version_info.build[0] != '\0') {
+        printf("Version: v%s (%s)\n", VFS5011_PROJECT_VERSION, g_local_version_info.build);
+    } else {
+        printf("Version: v%s (build unknown)\n", VFS5011_PROJECT_VERSION);
+    }
+    printf("\n");
+
+    /* -------- System -------- */
+    printf("-- System --\n");
+    {
+        char line[256];
+        FILE *fp;
+
+        fp = popen("sw_vers -productVersion 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf("macOS: %s", line);
+        } else {
+            printf("macOS: (could not determine)");
+        }
+        if (fp) pclose(fp);
+
+        fp = popen("sw_vers -buildVersion 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf(" (%s)\n", line);
+        } else {
+            printf("\n");
+        }
+        if (fp) pclose(fp);
+
+        fp = popen("sysctl -n hw.model 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf("Reported model (SMBIOS spoof): %s\n", line);
+        }
+        if (fp) pclose(fp);
+    }
+    printf("\n");
+
+    /* -------- OpenCore -------- */
+    printf("-- OpenCore --\n");
+    check_opencore_version_requirement(); /* prints its own pass/fail line */
+    printf("\n");
+
+    /* -------- Sensor -------- */
+    printf("-- Sensor --\n");
+    if (g_detected_sensor) {
+        printf("Detected: %s (%04x:%04x)\n", g_detected_sensor->display_name,
+               g_detected_sensor->vid, g_detected_sensor->pid);
+        printf("Capture backend: %s\n",
+               g_detected_sensor->backend_available ? "available" : "not yet implemented");
+    } else {
+        printf("Detected: none\n");
+    }
+    printf("\n");
+
+    /* -------- Daemon -------- */
+    printf("-- Daemon --\n");
+    if (!g_detected_sensor) {
+        printf("(no sensor detected -- skipping)\n");
+    } else {
+        char daemon_path[PATH_MAX];
+        get_daemon_install_path(daemon_path, sizeof(daemon_path));
+        if (access(daemon_path, F_OK) != 0) {
+            printf("Installed: no\n");
+        } else {
+            char cmd[PATH_MAX + 16];
+            snprintf(cmd, sizeof(cmd), "\"%s\" --version", daemon_path);
+            FILE *fp = popen(cmd, "r");
+            char daemon_version[64] = {0};
+            bool got_line = fp && fgets(daemon_version, sizeof(daemon_version), fp) != NULL;
+            if (fp) pclose(fp);
+            if (got_line) {
+                daemon_version[strcspn(daemon_version, "\r\n")] = '\0';
+                printf("Installed: yes (v%s)\n", daemon_version);
+                if (strcmp(daemon_version, VFS5011_PROJECT_VERSION) != 0) {
+                    printf("  NOTE: daemon version does not match client version (v%s)\n",
+                           VFS5011_PROJECT_VERSION);
+                }
+            } else {
+                printf("Installed: yes (version query failed)\n");
+            }
+        }
+        printf("Running: %s\n", is_auth_service_deployed() ? "yes" : "no");
+    }
+    printf("\n");
+
+    /* -------- Template volume / Accessibility / Fingers -------- */
+    printf("-- Template Volume --\n");
+    printf("Configured: %s\n", is_volume_configured() ? "yes" : "no");
+    printf("\n");
+
+    printf("-- Accessibility Grant --\n");
+    printf("Granted: %s\n", is_accessibility_granted() ? "yes" : "no");
+    printf("\n");
+
+    printf("-- Enrolled Fingers --\n");
+    if (g_finger_count < 0) refresh_finger_cache();
+    if (g_finger_count < 0) {
+        printf("Count: n/a (template volume not set up)\n");
+    } else {
+        printf("Count: %d\n", g_finger_count);
+    }
+    printf("\n");
+
+    printf("%s=== End of report -- copy everything above into your issue/message ===%s\n",
+           VFSC_DIM, VFSC_RESET);
+}
+
 /* run_deploy_agent_mode() -- headless "hack-touchid --deploy-agent",
  * for the menu bar app's daemon-missing notification button to run
  * from a freshly-launched Terminal window without ever entering the
@@ -3117,6 +3260,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--deploy-agent") == 0) {
             g_deploy_agent_mode = true;
         }
+        if (strcmp(argv[i], "--diag-pid") == 0) {
+            g_diag_pid_mode = true;
+        }
     }
     srand((unsigned int)time(NULL));
 
@@ -3125,18 +3271,19 @@ int main(int argc, char **argv) {
      * CLI, so options 1/2 don't each need their own privilege prompt.
      *
      * Counter-based instead of the old fixed 4-slot array -- now that
-     * --q/--quiet and --deploy-agent can both be present at once, the
-     * old hardcoded "sudo_argv[2] = flag or NULL" approach could only
-     * carry one flag through the re-exec. This builds the argv up to
-     * however many flags actually apply. */
+     * --q/--quiet, --deploy-agent, and --diag-pid can all be present
+     * at once, the old hardcoded "sudo_argv[2] = flag or NULL"
+     * approach could only carry one flag through the re-exec. This
+     * builds the argv up to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[5];
+        char *sudo_argv[6];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
         if (!g_verbose_boot) sudo_argv[ai++] = "--q";
         if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
+        if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
@@ -3150,6 +3297,17 @@ int main(int argc, char **argv) {
     ensure_path_symlink();
     init_color_support();
     g_match_threshold = load_match_threshold();
+
+    /* --diag-pid short-circuits straight to run_diagnose_mode(), same
+     * as --deploy-agent below -- before the boot flood/banner/menu.
+     * Unlike --deploy-agent, run_diagnose_mode() has no preconditions
+     * of its own to check first: it's read-only and its whole job is
+     * to report a broken/missing piece, not refuse to run because of
+     * one. */
+    if (g_diag_pid_mode) {
+        run_diagnose_mode();
+        return 0;
+    }
 
     /* --deploy-agent short-circuits straight to run_deploy_agent_mode()
      * here -- deliberately before the verbose boot flood / banner /
@@ -3253,7 +3411,7 @@ int main(int argc, char **argv) {
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_pair_metallica_mis();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -3261,7 +3419,7 @@ int main(int argc, char **argv) {
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_calibrate_metallica_mis();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -3269,17 +3427,18 @@ int main(int argc, char **argv) {
                 if (is_upek_sensor(g_detected_sensor)) {
                     do_test_upek_capture();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
+            case 'D': case 'd': run_diagnose_mode(); break;
             case 'S': case 's': do_settings_menu(); break;
             case 'A': case 'a': print_about(); break;
             case 'Q': case 'q':
                 printf("Exiting Hack-TouchID Client.\n");
                 return 0;
             default:
-                printf("Unrecognized option '%s'. Choose 1, 2, 3, S, A, or Q.\n\n", line);
+                printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
                 ran_action = false;
         }
         if (ran_action) {
