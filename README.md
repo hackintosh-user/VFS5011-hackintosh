@@ -229,6 +229,7 @@ password automatically.
 * ```--q```: launches the Client without presenting the Verbose boot / launch
 * ```--quiet```: same like the one before, launches the client without presenting the Verbose logs.
 * ```--deploy-agent```: Runs the [3] Deploy authentication services without entering the client. This is also used when the Menubar detects the Daemon isn't installed / after a macOS update
+* ```--diag-pid```: Runs the [D] Diagnostic steps but without launching the client.
 
 ## How it works
 
