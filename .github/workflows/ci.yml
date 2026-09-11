@@ -7,7 +7,7 @@ name: CI
 # scripts pass shellcheck, and do the matcher's pure-logic unit tests
 # (serialization + fingers/ directory scanning) still pass.
 #
-# What this deliberately does NOT cover (needs the real DV6):
+# What this deliberately does NOT cover (needs a real sensor VID:PID detcted):
 #   - libusb capture from the actual sensor
 #   - CFNotificationCenter IPC across the root/user boundary
 #   - Passwords.app / Keychain Access AX-prompt integration
