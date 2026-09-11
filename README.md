@@ -198,6 +198,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 [U] (ONLY FOR UPEK 147e:2016) capture .pgm
 [B] Capture (experimental, Only for Metallica MIS Sensors)
 
+[D] Diagnose (generate a report for troubleshooting)
 [S] Settings
 [A] About
 [Q] Quit
