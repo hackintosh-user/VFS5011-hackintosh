@@ -619,7 +619,52 @@ int metallica_mis_do_pairing(void) {
     }
 
     fprintf(stderr, "metallica_mis: upload_fwext() succeeded -- reboot command already "
-                     "sent as its last step. Device should be re-enumerating now.\n");
+                     "sent as its last step. Waiting for the device to actually "
+                     "re-enumerate before declaring pairing done...\n");
+
+    /* Sep 12 fix: this used to just return 0 here, on the assumption
+     * that "should be re-enumerating now" was good enough -- it
+     * wasn't. Confirmed on real hardware (p0cketl1nt): calling
+     * Calibrate immediately after this message printed failed with
+     * "failed to parse paired identity from flash -- device may have
+     * been paired with a different host", even though pairing had
+     * JUST succeeded in this exact same session/host identity. g_handle
+     * is also still the PRE-reboot libusb handle at this point -- the
+     * physical device disconnects/reconnects during a real reboot, so
+     * every command sent afterward needs a handle opened AFTER
+     * re-enumeration, not the stale one. Close it, give the device a
+     * moment to actually start its reboot cycle, then poll for it to
+     * come back with real retries (longer budget than open_device()'s
+     * own internal 5x300ms, which is tuned for "device present but
+     * claim is contended", not "device physically rebooting"). */
+    metallica_mis_close_device();
+    sleep(2);
+
+    int reopened = 0;
+    for (int attempt = 0; attempt < 10 && !reopened; attempt++) {
+        if (metallica_mis_open_device() == 0) {
+            reopened = 1;
+            break;
+        }
+        /* open_device() calls libusb_init() unconditionally on every
+         * call and doesn't clean up after its own failure -- without
+         * this, each failed retry here would leak a libusb context. */
+        metallica_mis_close_device();
+        fprintf(stderr, "metallica_mis: device not back yet, retrying (%d/10)...\n", attempt + 1);
+        sleep(1);
+    }
+
+    if (!reopened) {
+        fprintf(stderr, "metallica_mis: do_pairing(): device did not re-enumerate within "
+                         "~12s after reboot. Pairing itself already succeeded and was "
+                         "written to flash -- this is just the post-reboot reconnect "
+                         "failing. Try again shortly; if it keeps failing, unplug/replug "
+                         "or reboot the host.\n");
+        return -1;
+    }
+
+    fprintf(stderr, "metallica_mis: device re-enumerated successfully. Pairing complete "
+                     "and confirmed ready for use.\n");
     return 0;
 }
 
