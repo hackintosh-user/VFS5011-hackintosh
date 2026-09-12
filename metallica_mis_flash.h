@@ -27,9 +27,9 @@
  * are built here (the last three added when firmware-upload work
  * started, ported against real flash.py source pulled Aug 24 2026,
  * not from memory). read_flash()/read_flash_all()/read_tls_flash()
- * from the real flash.py are still NOT built -- not needed until
- * template DB / calibration work starts -- add them when that work
- * begins rather than speculatively now.
+ * were added Sep 11 2026 (ported against the same source) to unblock
+ * open_calibration_session()'s missing tls_open() call on the
+ * already-paired path -- see metallica_mis_daemon.c.
  *
  * write_hw_reg32()/read_hw_reg32() are also here, even though they're
  * sensor.py's functions in upstream, not flash.py's -- this project
@@ -162,6 +162,56 @@ int metallica_mis_write_flash(metallica_mis_tls_t *tls, uint8_t partition, uint3
  * rollback). */
 int metallica_mis_write_flash_all(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
                                    const unsigned char *buf, size_t buf_len);
+
+/* ==================== read_flash / read_flash_all / read_tls_flash ==================== */
+/* Added to unblock metallica_mis_open_calibration_session()'s missing
+ * tls_open() call on the already-paired fast path (see
+ * metallica_mis_daemon.c's doc comment on that function) and
+ * check_clean_slate()'s stubbed optimization (mmis_calibrate.c/.h) --
+ * both were blocked on this exact primitive not existing yet, per
+ * this file's earlier scope note above. Direct port of flash.py's
+ * read_flash()/read_flash_all()/read_tls_flash(); no python deviation
+ * to preserve here, unlike write_flash()'s write_enable() asymmetry.
+ */
+
+/* metallica_mis_read_flash() -- cmd 0x40 <partition> 01 0000 <addr:u32le>
+ * <size:u32le>, matching python's `pack('<BBBHLL', 0x40, partition, 1,
+ * 0, addr, size)`. Reply is status(2) + u32le payload-size(4, at
+ * offset 2) + 2 reserved bytes (offset 6) + payload (offset 8),
+ * matching python's `unpack('<xxLxx', rsp[:8])`. Writes up to
+ * out_buf_size bytes into out_buf and sets *out_len to the actual
+ * payload size read (which may be less than `size` requested if the
+ * device returns less -- caller should treat *out_len, not `size`, as
+ * authoritative, same as python slicing rsp[8:8+sz]). Returns 0 on
+ * success, -1 on transport/status failure or if the reply doesn't fit
+ * out_buf_size. */
+int metallica_mis_read_flash(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
+                              uint32_t size, unsigned char *out_buf, size_t out_buf_size,
+                              size_t *out_len);
+
+/* metallica_mis_read_flash_all() -- direct port of flash.py's
+ * read_flash_all(): reads [start, start+size) in <= 0x1000-byte
+ * chunks via repeated metallica_mis_read_flash() calls and
+ * concatenates them, truncated to exactly `size` bytes (matches
+ * python's `b''.join(blocks)[:size]` -- the device may pad the last
+ * chunk's reply out to the full request size, so this trims that
+ * padding rather than assuming each read_flash() call returns exactly
+ * what it asked for). out_buf must be at least `size` bytes. Returns
+ * 0 on success, -1 on the first chunk that fails (matches
+ * write_flash_all()'s no-rollback convention: earlier chunks already
+ * landed in out_buf are left as-is on failure, out_buf's remainder is
+ * undefined). */
+int metallica_mis_read_flash_all(metallica_mis_tls_t *tls, uint8_t partition, uint32_t start,
+                                  uint32_t size, unsigned char *out_buf);
+
+/* metallica_mis_read_tls_flash() -- direct port of flash.py's
+ * read_tls_flash(): metallica_mis_read_flash_all(tls, 1, 0, 0x1000,
+ * out_buf). out_buf must be exactly 0x1000 bytes -- pass straight
+ * into metallica_mis_parse_tls_flash() (metallica_mis_tls.h) to
+ * rebuild an already-paired device's identity (priv_key/tls_cert/
+ * device_ecdh_pub) without re-pairing. Returns 0 on success, -1 on
+ * failure (see metallica_mis_read_flash_all()). */
+int metallica_mis_read_tls_flash(metallica_mis_tls_t *tls, unsigned char out_buf[0x1000]);
 
 /* ==================== firmware (fwext) info / upload ==================== */
 
