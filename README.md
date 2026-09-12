@@ -132,7 +132,7 @@ Known limitations:
 
 ## Requirements
 - **macOS 13 Ventura and later** (older versions may work, but I offer **0 support for them**)
-- **macOS 15 Sequoia is the recommended version for Hackintosh TouchID** 
+- **macOS 15 Sequoia is the recommended version for Hackintosh Touch-ID** 
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - `libusb` (`brew install libusb`)
