@@ -35,6 +35,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <stdarg.h>
 #include <ctype.h>
@@ -2700,6 +2701,21 @@ static bool fetch_remote_version_file(const char *branch, client_version_info_t 
     return parse_version_file(buf, out);
 }
 
+/* draw_progress_bar() -- redraws a single-line "label [####    ] NN%"
+ * bar in place via \r. Never prints a trailing \n itself (so repeated
+ * calls overwrite cleanly) -- the caller prints one \n once the
+ * operation this bar tracks has actually finished. */
+static void draw_progress_bar(int percent, const char *label) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    const int width = 30;
+    int filled = (percent * width) / 100;
+    printf("\r%s [", label);
+    for (int i = 0; i < width; i++) putchar(i < filled ? '#' : ' ');
+    printf("] %3d%%", percent);
+    fflush(stdout);
+}
+
 /* Downloads <branch>'s zip from GitHub, extracts it, chmod's its
  * scripts, and builds it via prep_and_build.sh -- and ONLY if that
  * build actually succeeds does it touch the current install at all:
@@ -2731,26 +2747,69 @@ static bool download_build_and_swap_update(const char *branch) {
     char zip_path[PATH_MAX];
     snprintf(zip_path, sizeof(zip_path), "%s/update.zip", tmp_dir);
     snprintf(cmd, sizeof(cmd),
-             "curl -fsSL -o \"%s\" '%s/archive/refs/heads/%s.zip'",
+             "curl -fL --progress-bar -o \"%s\" '%s/archive/refs/heads/%s.zip'",
              zip_path, UPDATE_REPO_URL, branch);
     if (system(cmd) != 0) {
+        printf("\n");
         vfsc_err("Download failed. Staying on the current version.\n\n");
         snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
         system(cmd);
         return false;
     }
 
-    printf("Extracting...\n");
     char extract_dir[PATH_MAX];
     snprintf(extract_dir, sizeof(extract_dir), "%s/extracted", tmp_dir);
-    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" && unzip -q \"%s\" -d \"%s\"",
-             extract_dir, zip_path, extract_dir);
-    if (system(cmd) != 0) {
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", extract_dir);
+    system(cmd);
+
+    /* Count total entries first so the bar has a real denominator.
+     * unzip -l's entry lines map 1:1 to the creating:/inflating:/
+     * extracting: lines a verbose (non -q) extract prints, so this is
+     * an exact count, not an estimate -- format is 3 header lines +
+     * N entries + a "---" separator + 1 totals line. */
+    int total_entries = 1;
+    {
+        snprintf(cmd, sizeof(cmd), "unzip -l \"%s\" 2>/dev/null", zip_path);
+        FILE *lp = popen(cmd, "r");
+        if (lp) {
+            char lline[512];
+            int lineno = 0;
+            while (fgets(lline, sizeof(lline), lp)) lineno++;
+            pclose(lp);
+            if (lineno - 5 > 0) total_entries = lineno - 5;
+        }
+    }
+
+    snprintf(cmd, sizeof(cmd), "unzip -o \"%s\" -d \"%s\" 2>&1", zip_path, extract_dir);
+    FILE *ep = popen(cmd, "r");
+    if (!ep) {
         vfsc_err("Extraction failed. Staying on the current version.\n\n");
         snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
         system(cmd);
         return false;
     }
+
+    int extracted = 0;
+    char eline[512];
+    draw_progress_bar(0, "Extracting");
+    while (fgets(eline, sizeof(eline), ep)) {
+        if (strstr(eline, "inflating:") || strstr(eline, "extracting:") ||
+            strstr(eline, "creating:") || strstr(eline, "linking:")) {
+            extracted++;
+            draw_progress_bar((extracted * 100) / total_entries, "Extracting");
+        }
+    }
+    int extract_wait_status = pclose(ep);
+    printf("\n");
+
+    if (!WIFEXITED(extract_wait_status) || WEXITSTATUS(extract_wait_status) != 0) {
+        vfsc_err("Extraction failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+    draw_progress_bar(100, "Extracting");
+    printf("\n");
 
     /* GitHub's branch zip always contains exactly one top-level
      * folder (named "<repo>-<branch>/", slashes in the branch name
@@ -2776,13 +2835,59 @@ static bool download_build_and_swap_update(const char *branch) {
         return false;
     }
 
-    printf("Building...\n");
     char build_log[PATH_MAX];
     snprintf(build_log, sizeof(build_log), "%s/build.log", tmp_dir);
+    FILE *log_fp = fopen(build_log, "w");
+    if (!log_fp) {
+        vfsc_err("Could not open build log for writing. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
     snprintf(cmd, sizeof(cmd),
-             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh > \"%s\" 2>&1",
-             src_dir, build_log);
-    int build_status = system(cmd);
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh 2>&1",
+             src_dir);
+    FILE *bp = popen(cmd, "r");
+    if (!bp) {
+        fclose(log_fp);
+        vfsc_err("Build failed to start. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    /* build.sh echoes exactly these 3 "==>" lines, one per binary, in
+     * this fixed order -- a real, discrete step count rather than a
+     * guessed percentage, since compiler output has no natural
+     * "% done" signal to parse. */
+    static const char *build_steps[] = {
+        "Building hack-touchid...",
+        "Building vfs5011_daemon...",
+        "Building metallica_mis_daemon"
+    };
+    const int total_steps = 3;
+    int step = 0;
+
+    char bline[1024];
+    printf("Building [0/%d]...", total_steps);
+    fflush(stdout);
+    while (fgets(bline, sizeof(bline), bp)) {
+        fputs(bline, log_fp); /* full output still preserved for debugging */
+        for (int i = step; i < total_steps; i++) {
+            if (strstr(bline, build_steps[i])) {
+                step = i + 1;
+                printf("\rBuilding [%d/%d]...", step, total_steps);
+                fflush(stdout);
+                break;
+            }
+        }
+    }
+    printf("\n");
+
+    int build_wait_status = pclose(bp);
+    fclose(log_fp);
+    int build_status = WIFEXITED(build_wait_status) ? WEXITSTATUS(build_wait_status) : -1;
 
     char new_binary[PATH_MAX];
     snprintf(new_binary, sizeof(new_binary), "%s/hack-touchid", src_dir);
