@@ -996,8 +996,74 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
         return -1;
     }
 
+    /* At this point we're guaranteed to be on the already-paired,
+     * firmware-already-loaded fast path (every other case already
+     * returned -1 above). init_flash()'s early-return path
+     * (partition_count > 0, see its own doc comment) never touches
+     * `identity` and never calls metallica_mis_tls_open() -- that
+     * only happens internally during a FRESH pairing run (step 8).
+     * So tls_out->secure_rx/secure_tx are still false here, and
+     * metallica_mis_tls_cmd() would silently fall back to sending
+     * calibrate()'s cmd_02 in PLAINTEXT -- which the firmware rejects
+     * with status=0x0404. This is the confirmed root cause of the
+     * Sep 8/11 CALIBRATE failures.
+     *
+     * Fix: rebuild identity from the sensor's own cert flash partition
+     * (written by metallica_mis_make_tls_flash() during the original
+     * real pairing) and run the real handshake now, so this session
+     * ends up genuinely secure, the same way the fresh-pairing path
+     * already gets for free via init_flash()'s own step 8.
+     *
+     * identity is heap-allocated here rather than reusing the local
+     * `identity` variable above (which is the FRESH-pairing one this
+     * function passes into init_flash() -- unused on this path, still
+     * all-zero). metallica_mis_tls_open() does `tls->identity =
+     * identity` -- it stores the POINTER, not a copy (see struct
+     * comment in metallica_mis_tls.h) -- and tls_out outlives this
+     * function (the caller reuses it for do_calibrate() afterward), so
+     * a stack-local identity here would leave tls_out->identity
+     * dangling the moment this function returns. Not freed on the
+     * success path -- matches this codebase's existing session model,
+     * where nothing ever tears down a live identity/session (this
+     * daemon runs one action per process invocation; OS reclaims on
+     * exit), same as the fresh-pairing path's identity already isn't
+     * freed anywhere either. */
+    metallica_mis_identity_t *paired_identity = calloc(1, sizeof(*paired_identity));
+    if (!paired_identity) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): out of memory\n");
+        return -1;
+    }
+
+    unsigned char tls_flash_raw[0x1000];
+    if (metallica_mis_read_tls_flash(tls_out, tls_flash_raw) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): failed to read "
+                         "back paired identity from flash (cert partition)\n");
+        free(paired_identity);
+        return -1;
+    }
+
+    if (metallica_mis_parse_tls_flash(paired_identity, tls_out->psk_encryption_key,
+                                       tls_out->psk_validation_key,
+                                       tls_flash_raw, sizeof(tls_flash_raw)) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): failed to parse "
+                         "paired identity from flash -- device may have been paired "
+                         "with a different host\n");
+        free(paired_identity);
+        return -1;
+    }
+
+    /* From here on, tls_open() stores &paired_identity into tls_out
+     * regardless of outcome (see struct comment above) -- do not
+     * free(paired_identity) after this point even on failure. */
+    if (metallica_mis_tls_open(tls_out, paired_identity) != 0) {
+        fprintf(stderr, "metallica_mis: open_calibration_session(): tls_open() failed "
+                         "on the already-paired fast path\n");
+        return -1;
+    }
+
     fprintf(stderr, "metallica_mis: open_calibration_session(): session ready "
-                     "(already paired, firmware already loaded, no reboot needed).\n");
+                     "(already paired, firmware already loaded, secure session "
+                     "established, no reboot needed).\n");
     return 0;
 }
 
