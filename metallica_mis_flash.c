@@ -254,6 +254,91 @@ int metallica_mis_write_flash_all(metallica_mis_tls_t *tls, uint8_t partition, u
     return 0;
 }
 
+/* ==================== read_flash / read_flash_all / read_tls_flash ==================== */
+
+int metallica_mis_read_flash(metallica_mis_tls_t *tls, uint8_t partition, uint32_t addr,
+                              uint32_t size, unsigned char *out_buf, size_t out_buf_size,
+                              size_t *out_len) {
+    /* cmd = pack('<BBBHLL', 0x40, partition, 1, 0, addr, size) */
+    unsigned char cmd[13];
+    cmd[0] = 0x40;
+    cmd[1] = partition;
+    cmd[2] = 0x01;
+    cmd[3] = 0x00; cmd[4] = 0x00; /* <H 0 */
+    cmd[5]  = (unsigned char)(addr & 0xff);
+    cmd[6]  = (unsigned char)((addr >> 8) & 0xff);
+    cmd[7]  = (unsigned char)((addr >> 16) & 0xff);
+    cmd[8]  = (unsigned char)((addr >> 24) & 0xff);
+    cmd[9]  = (unsigned char)(size & 0xff);
+    cmd[10] = (unsigned char)((size >> 8) & 0xff);
+    cmd[11] = (unsigned char)((size >> 16) & 0xff);
+    cmd[12] = (unsigned char)((size >> 24) & 0xff);
+
+    unsigned char rsp[8192];
+    int n = metallica_mis_tls_cmd(tls, cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0) return -1;
+    if (assert_status(rsp, n) != 0) return -1;
+
+    /* sz, = unpack('<xxLxx', rsp[:8]) -- u32le at offset 2, 2 more
+     * reserved bytes after it before the payload starts at offset 8 */
+    if (n < 8) {
+        fprintf(stderr, "metallica_mis_flash: read_flash reply too short for header (%d bytes)\n", n);
+        return -1;
+    }
+    uint32_t sz = (uint32_t)rsp[2] | ((uint32_t)rsp[3] << 8) |
+                  ((uint32_t)rsp[4] << 16) | ((uint32_t)rsp[5] << 24);
+
+    if ((size_t)n < 8 + (size_t)sz) {
+        fprintf(stderr, "metallica_mis_flash: read_flash reply truncated "
+                         "(header says %u bytes, only %d in reply)\n", sz, n - 8);
+        return -1;
+    }
+    if ((size_t)sz > out_buf_size) {
+        fprintf(stderr, "metallica_mis_flash: read_flash reply (%u bytes) "
+                         "doesn't fit out_buf_size (%zu)\n", sz, out_buf_size);
+        return -1;
+    }
+
+    memcpy(out_buf, rsp + 8, sz);
+    if (out_len) *out_len = sz;
+    return 0;
+}
+
+int metallica_mis_read_flash_all(metallica_mis_tls_t *tls, uint8_t partition, uint32_t start,
+                                  uint32_t size, unsigned char *out_buf) {
+    const uint32_t bs = 0x1000;
+    uint32_t addr = start;
+    uint32_t remaining = size;
+    unsigned char *p = out_buf;
+    unsigned char chunk_buf[0x1000];
+
+    while (remaining > 0) {
+        uint32_t chunk_len = (remaining < bs) ? remaining : bs;
+        size_t got = 0;
+
+        if (metallica_mis_read_flash(tls, partition, addr, chunk_len,
+                                      chunk_buf, sizeof(chunk_buf), &got) != 0) {
+            return -1;
+        }
+
+        /* device may pad the reply out to the full request size --
+         * only copy min(got, chunk_len) so we never overrun out_buf
+         * and never copy more than this chunk's share of `size`,
+         * matching python's b''.join(blocks)[:size] truncation. */
+        size_t to_copy = (got < (size_t)chunk_len) ? got : (size_t)chunk_len;
+        memcpy(p, chunk_buf, to_copy);
+
+        addr += chunk_len;
+        p += chunk_len;
+        remaining -= chunk_len;
+    }
+    return 0;
+}
+
+int metallica_mis_read_tls_flash(metallica_mis_tls_t *tls, unsigned char out_buf[0x1000]) {
+    return metallica_mis_read_flash_all(tls, 1, 0, 0x1000, out_buf);
+}
+
 /* ==================== get_fw_info / write_fw_signature ==================== */
 
 int metallica_mis_get_fw_info(metallica_mis_tls_t *tls, uint8_t partition,
