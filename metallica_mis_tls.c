@@ -1224,39 +1224,76 @@ int metallica_mis_parse_tls_flash(metallica_mis_identity_t *identity,
     size_t off = 0;
 
     while (off < reply_len) {
-        if (off + 4 > reply_len) return -1; /* truncated header */
+        if (off + 4 > reply_len) {
+            fprintf(stderr, "metallica_mis: parse_tls_flash(): truncated block header "
+                             "at offset %zu (reply_len=%zu)\n", off, reply_len);
+            return -1;
+        }
         uint16_t id = (uint16_t)reply[off] | ((uint16_t)reply[off + 1] << 8);
         uint16_t sz = (uint16_t)reply[off + 2] | ((uint16_t)reply[off + 3] << 8);
         off += 4;
 
-        if (off + 32 > reply_len) return -1; /* truncated hash */
+        if (off + 32 > reply_len) {
+            fprintf(stderr, "metallica_mis: parse_tls_flash(): truncated hash for "
+                             "block id=%u at offset %zu\n", id, off);
+            return -1;
+        }
         const unsigned char *hs = reply + off;
         off += 32;
 
         if (id == 0xffff) break; /* sentinel -- stop before consuming a body */
 
-        if (off + sz > reply_len) return -1; /* truncated body */
+        if (off + sz > reply_len) {
+            fprintf(stderr, "metallica_mis: parse_tls_flash(): truncated body for "
+                             "block id=%u, sz=%u at offset %zu (reply_len=%zu)\n",
+                             id, sz, off, reply_len);
+            return -1;
+        }
         const unsigned char *body = reply + off;
         off += sz;
 
         unsigned char digest[32];
         SHA256(body, sz, digest);
-        if (memcmp(digest, hs, 32) != 0) return -1; /* "hash mismatch" */
+        if (memcmp(digest, hs, 32) != 0) {
+            fprintf(stderr, "metallica_mis: parse_tls_flash(): SHA256 mismatch for "
+                             "block id=%u, sz=%u -- stored hash doesn't match this "
+                             "block's actual bytes (data corruption on write or read, "
+                             "not a key/identity issue).\n", id, sz);
+            return -1;
+        }
 
         switch (id) {
             case 4:
-                if (metallica_mis_handle_priv(identity, psk_encryption_key, psk_validation_key, body, sz) != 0) return -1;
+                if (metallica_mis_handle_priv(identity, psk_encryption_key, psk_validation_key, body, sz) != 0) {
+                    fprintf(stderr, "metallica_mis: parse_tls_flash(): handle_priv() "
+                                     "rejected block id=4 (sz=%u) -- PSK-derived "
+                                     "decrypt/HMAC check failed. This is the actual "
+                                     "host-identity/PSK-mismatch failure mode.\n", sz);
+                    return -1;
+                }
                 break;
             case 6:
-                if (metallica_mis_handle_ecdh(identity, body, sz) != 0) return -1;
+                if (metallica_mis_handle_ecdh(identity, body, sz) != 0) {
+                    fprintf(stderr, "metallica_mis: parse_tls_flash(): handle_ecdh() "
+                                     "rejected block id=6 (sz=%u)\n", sz);
+                    return -1;
+                }
                 break;
             case 3:
-                if (metallica_mis_handle_cert(identity, body, sz) != 0) return -1;
+                if (metallica_mis_handle_cert(identity, body, sz) != 0) {
+                    fprintf(stderr, "metallica_mis: parse_tls_flash(): handle_cert() "
+                                     "rejected block id=3 (sz=%u)\n", sz);
+                    return -1;
+                }
                 break;
             case 0:
             case 1:
             case 2:
-                if (handle_empty(body, sz) != 0) return -1;
+                if (handle_empty(body, sz) != 0) {
+                    fprintf(stderr, "metallica_mis: parse_tls_flash(): handle_empty() "
+                                     "rejected block id=%u (sz=%u)\n", id, sz);
+                    return -1;
+                }
                 break;
             default:
                 /* unhandled block id -- python just traces and moves on */
