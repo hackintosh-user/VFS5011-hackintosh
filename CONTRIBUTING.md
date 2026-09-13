@@ -38,3 +38,4 @@ This is also heavily welcomed by me as this again would help rapidly expand the 
 * [REDDIT](https://www.reddit.com/user/Sufficient_Bus_8302/)
 * [XDA Forums](https://xdaforums.com/m/hackintosh_user.13447103/)
 * [Mac Rumors Forums](https://forums.macrumors.com/members/hackintosh_user.1420199/)
+* [𝕏 or Twitter]( https://x.com/mohammad_q_124) (X Chat or idk what it's called)
