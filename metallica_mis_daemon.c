@@ -540,6 +540,22 @@ int metallica_mis_do_pairing(void) {
         return -1;
     }
 
+    /* Sep 13 diagnostic: parse_tls_flash() is now confirmed failing
+     * specifically at the PSK/HMAC check (handle_priv() rejected block
+     * id=4), on a same-session, byte-identical (hash-verified) ciphertext
+     * -- meaning the derived PSK genuinely differs between this pairing
+     * run and the later calibrate run, despite identical inputs/code
+     * path on both sides as far as static reading can tell. Printing the
+     * actual derived key bytes here (and the mirrored print in
+     * open_calibration_session()) so the next log directly shows where
+     * the two diverge, instead of guessing further. Remove once root
+     * cause is found. */
+    fprintf(stderr, "metallica_mis: [diag] do_pairing() psk_encryption_key: ");
+    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls.psk_encryption_key[i]);
+    fprintf(stderr, "\nmetallica_mis: [diag] do_pairing() psk_validation_key: ");
+    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls.psk_validation_key[i]);
+    fprintf(stderr, "\n");
+
     memset(&identity, 0, sizeof(identity));
 
     if (metallica_mis_init_flash(&tls, &identity, product_name, serial_number,
@@ -1011,11 +1027,20 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): failed to get host identity\n");
         return -1;
     }
+    fprintf(stderr, "metallica_mis: [diag] open_calibration_session() host identity: product=\"%s\" serial=\"%s\"\n",
+            product_name, serial_number);
 
     if (metallica_mis_tls_init(tls_out, mis_transport, NULL, product_name, serial_number) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): tls_init() failed\n");
         return -1;
     }
+
+    /* Sep 13 diagnostic -- see matching block in do_pairing(). */
+    fprintf(stderr, "metallica_mis: [diag] open_calibration_session() psk_encryption_key: ");
+    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls_out->psk_encryption_key[i]);
+    fprintf(stderr, "\nmetallica_mis: [diag] open_calibration_session() psk_validation_key: ");
+    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls_out->psk_validation_key[i]);
+    fprintf(stderr, "\n");
 
     memset(&identity, 0, sizeof(identity));
 
