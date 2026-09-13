@@ -32,3 +32,9 @@ This is also heavily welcomed by me as this again would help rapidly expand the 
 
 * This project mainly uses C for fingerprint sensors ( based off of libfprint or fprintd) so if you know how to write C then you are welcomed. But anyone is welcomed to try :))
 
+
+## Contacting me
+
+* [REDDIT](https://www.reddit.com/user/Sufficient_Bus_8302/)
+* [XDA Forums](https://xdaforums.com/m/hackintosh_user.13447103/)
+* [Mac Rumors Forums](https://forums.macrumors.com/members/hackintosh_user.1420199/)
