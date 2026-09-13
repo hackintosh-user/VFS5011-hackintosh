@@ -1091,8 +1091,11 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
                                        tls_out->psk_validation_key,
                                        tls_flash_raw, sizeof(tls_flash_raw)) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): failed to parse "
-                         "paired identity from flash -- device may have been paired "
-                         "with a different host\n");
+                         "paired identity from flash -- see the diagnostic trace above "
+                         "from parse_tls_flash() for the specific reason (could be a "
+                         "hash mismatch from write/read corruption, a truncated read, "
+                         "or a genuine PSK/host-identity mismatch -- these are distinct "
+                         "failure modes, not all the same problem).\n");
         free(paired_identity);
         return -1;
     }
