@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <termios.h>
 #include <stdarg.h>
 #include <ctype.h>
@@ -2716,6 +2717,69 @@ static void draw_progress_bar(int percent, const char *label) {
     fflush(stdout);
 }
 
+/* download_with_progress() -- fork+exec curl directly, fully silenced,
+ * polling the growing output file's size against a Content-Length
+ * fetched via a quick HEAD request beforehand, drawing our own
+ * draw_progress_bar() as it goes. Deliberately NOT using curl's own
+ * --progress-bar: that depends on curl detecting a real TTY + usable
+ * width, and in practice it falls back to curl's legacy "-=O=-"
+ * spinner+hashmark meter instead of a clean single-line bar -- not
+ * reliable enough to depend on. This avoids curl's renderer entirely.
+ * Returns true iff curl exited 0. */
+static bool download_with_progress(const char *url, const char *out_path) {
+    long total_size = -1;
+    {
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "curl -fsIL '%s' 2>/dev/null", url);
+        FILE *hp = popen(cmd, "r");
+        if (hp) {
+            char hline[512];
+            while (fgets(hline, sizeof(hline), hp)) {
+                long v;
+                /* keep the LAST Content-Length seen -- GitHub redirects,
+                 * and each hop's headers appear in this dump; the final
+                 * hop's value is the one we actually want. */
+                if (sscanf(hline, "Content-Length: %ld", &v) == 1 ||
+                    sscanf(hline, "content-length: %ld", &v) == 1) {
+                    total_size = v;
+                }
+            }
+            pclose(hp);
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) return false;
+
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+        }
+        execlp("curl", "curl", "-fsL", "-o", out_path, url, (char *)NULL);
+        _exit(127); /* only reached if execlp() itself failed */
+    }
+
+    draw_progress_bar(0, "Downloading");
+    int status = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        struct stat st;
+        long cur = (stat(out_path, &st) == 0) ? (long)st.st_size : 0;
+        if (total_size > 0) {
+            int pct = (int)((cur * 100) / total_size);
+            draw_progress_bar(pct, "Downloading");
+        }
+        if (r == pid) break;
+        usleep(150000);
+    }
+    draw_progress_bar(100, "Downloading");
+    printf("\n");
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 /* Downloads <branch>'s zip from GitHub, extracts it, chmod's its
  * scripts, and builds it via prep_and_build.sh -- and ONLY if that
  * build actually succeeds does it touch the current install at all:
@@ -2746,11 +2810,9 @@ static bool download_build_and_swap_update(const char *branch) {
     printf("\nDownloading %s...\n", branch);
     char zip_path[PATH_MAX];
     snprintf(zip_path, sizeof(zip_path), "%s/update.zip", tmp_dir);
-    snprintf(cmd, sizeof(cmd),
-             "curl -fL --progress-bar -o \"%s\" '%s/archive/refs/heads/%s.zip'",
-             zip_path, UPDATE_REPO_URL, branch);
-    if (system(cmd) != 0) {
-        printf("\n");
+    char dl_url[PATH_MAX];
+    snprintf(dl_url, sizeof(dl_url), "%s/archive/refs/heads/%s.zip", UPDATE_REPO_URL, branch);
+    if (!download_with_progress(dl_url, zip_path)) {
         vfsc_err("Download failed. Staying on the current version.\n\n");
         snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
         system(cmd);
