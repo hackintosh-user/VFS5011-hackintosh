@@ -21,7 +21,7 @@ to apply for testing a fingerprint sensor in development please provide:
 * Your OpenCore Version ( also must meet the minimum version of v1.0.6 and later)
 * your Fingerprint Sensor
 * Your VID:PID **(Without this I cannot use your help)**
-* Your timezone so I don't ping you at 4AM and wake you up (if y'all sleep that is...)
+* Your timezone so I don't ping you at 4AM and wake you up (if y'all sleep that is...) ( for reference mine is UTC +3 KSA Time)
 * If your sensor is even enabled in the USB MAP / UTBMap.kext: **VERY** Important as this defines if the sensor gets powered at all. so check in your UTBMap and head into system information and USB then see your VID:PID for the sensor itself
 
 
