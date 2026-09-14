@@ -805,6 +805,54 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
     if (metallica_mis_make_tls_flash(identity, tls_flash) != 0) goto done;
     if (metallica_mis_write_flash(tls, 1, 0, tls_flash, sizeof(tls_flash)) != 0) goto done;
 
+    /* Sep 14 diagnostic: read partition 1 straight back and re-parse it
+     * with the SAME psk keys we just encrypted with, before firmware
+     * upload/reboot get anywhere near it. If this fails, the write
+     * itself (or the flash IC's commit timing) is the problem, not
+     * anything downstream. If this passes but the later read in
+     * open_calibration_session() still fails, the write landed fine
+     * and something happens to it during firmware upload/reboot
+     * instead. Remove once root cause is found. */
+    {
+        unsigned char readback[0x1000];
+        metallica_mis_identity_t verify_identity;
+        memset(&verify_identity, 0, sizeof(verify_identity));
+        if (metallica_mis_read_tls_flash(tls, readback) != 0) {
+            fprintf(stderr, "metallica_mis: [diag] post-write readback: "
+                             "read_tls_flash() itself failed\n");
+        } else if (memcmp(readback, tls_flash, sizeof(tls_flash)) != 0) {
+            fprintf(stderr, "metallica_mis: [diag] post-write readback: raw bytes "
+                             "DIFFER from what we just wrote -- the write did not "
+                             "land as written (flash commit/timing issue)\n");
+        } else {
+            fprintf(stderr, "metallica_mis: [diag] post-write readback: raw bytes "
+                             "match what we just wrote, byte for byte\n");
+        }
+        if (metallica_mis_parse_tls_flash(&verify_identity, psk_encryption_key,
+                                           psk_validation_key, readback, sizeof(readback)) != 0) {
+            fprintf(stderr, "metallica_mis: [diag] post-write readback: "
+                             "parse_tls_flash() FAILED on our own just-written data, "
+                             "immediately, same process, same keys -- this is NOT a "
+                             "reboot/firmware-upload timing issue, look at the write "
+                             "path itself\n");
+        } else {
+            fprintf(stderr, "metallica_mis: [diag] post-write readback: "
+                             "parse_tls_flash() succeeded on our own just-written data "
+                             "-- the write is genuinely correct at this point in time, "
+                             "so whatever breaks it happens later (firmware upload / "
+                             "reboot / re-enumeration)\n");
+        }
+        /* this is a throwaway diagnostic-only identity, just for the
+         * verification parse -- free its heap fields directly since
+         * there's no metallica_mis_identity_free() helper in this
+         * codebase */
+        free(verify_identity.priv_blob);
+        free(verify_identity.tls_cert);
+        free(verify_identity.ecdh_blob);
+        if (verify_identity.device_ecdh_pub) EC_KEY_free(verify_identity.device_ecdh_pub);
+        if (verify_identity.priv_key) EC_KEY_free(verify_identity.priv_key);
+    }
+
     /* Step 11 (reboot) is the caller's responsibility -- see header
      * doc comment. */
 
