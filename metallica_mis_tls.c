@@ -959,23 +959,60 @@ int metallica_mis_handle_priv(metallica_mis_identity_t *identity,
     unsigned char sig[32];
     hmac_sha256(psk_validation_key, METALLICA_MIS_TLS_KEYLEN, c, payload_len, sig);
     if (memcmp(sig, hs, 32) != 0) {
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED at HMAC check -- "
+                         "computed sig=");
+        for (int i = 0; i < 32; i++) fprintf(stderr, "%02x", sig[i]);
+        fprintf(stderr, " vs stored sig=");
+        for (int i = 0; i < 32; i++) fprintf(stderr, "%02x", hs[i]);
+        fprintf(stderr, " (psk_validation_key=");
+        for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", psk_validation_key[i]);
+        fprintf(stderr, ", c_len=%zu)\n", payload_len);
         return -1; /* "This device was probably paired with another computer." */
     }
+    fprintf(stderr, "metallica_mis: [diag] handle_priv(): HMAC check passed\n");
 
-    if (payload_len < 16) return -1;
-    if (aes256_cbc_raw(0, psk_encryption_key, c, c + 16, payload_len - 16, &pt) != 0) goto done;
+    if (payload_len < 16) {
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED -- payload_len=%zu < 16 "
+                         "(too short to contain an IV)\n", payload_len);
+        return -1;
+    }
+    if (aes256_cbc_raw(0, psk_encryption_key, c, c + 16, payload_len - 16, &pt) != 0) {
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED -- aes256_cbc_raw() "
+                         "decrypt call itself returned an error (OpenSSL-level failure, "
+                         "not a content check)\n");
+        goto done;
+    }
 
     /* standard PKCS7 unpad this time (python: m = m[:-m[-1]]) --
      * matches init_flash.c's encrypt_key() padding scheme, NOT
      * session_unpad()'s off-by-one scheme */
-    if (pt.len == 0) goto done;
+    if (pt.len == 0) {
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED -- decrypted plaintext "
+                         "is 0 bytes\n");
+        goto done;
+    }
     {
         unsigned char last = pt.data[pt.len - 1];
-        if (last > pt.len) goto done;
+        if (last > pt.len) {
+            fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED at pad-byte check -- "
+                             "last byte=0x%02x > pt.len=%zu (decrypted plaintext doesn't look "
+                             "like valid PKCS7 padding -- decrypt produced garbage, which "
+                             "given a passing HMAC almost certainly means a wrong/mismatched "
+                             "IV or encryption key, not a wrong validation key)\n", last, pt.len);
+            goto done;
+        }
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): pad-byte check passed "
+                         "(last=0x%02x, pre-unpad pt.len=%zu)\n", last, pt.len);
         pt.len -= last;
     }
 
-    if (pt.len < 96) goto done;
+    if (pt.len < 96) {
+        fprintf(stderr, "metallica_mis: [diag] handle_priv(): FAILED -- post-unpad pt.len=%zu "
+                         "< 96 (expected exactly 96 for x+y+d)\n", pt.len);
+        goto done;
+    }
+    fprintf(stderr, "metallica_mis: [diag] handle_priv(): all checks passed, post-unpad "
+                     "pt.len=%zu\n", pt.len);
 
     {
         unsigned char d_be[32];
