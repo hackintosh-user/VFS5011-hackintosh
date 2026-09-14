@@ -1,41 +1,38 @@
-## CONTRIBUTING
-Of course, this is very welcomed by me as it will help grow this project further, 
+# Contributing to Hackintosh TouchID
 
-Testers are **Heavily welcomed by me** as they could help test out the code I push for sensors which can fix:
-* Bugs
-* Security matters
-* glitches
-* issues
+Contributions are welcome and genuinely help grow this project. There are three main ways to help: testing, code, and documentation.
 
-As for the project itself, I would also like a person to handle the documentation Documentation 
+See [SECURITY.md](./SECURITY.md) if what you have is a security report rather than a bug or feature contribution — please don't file those as a regular issue or PR.
 
+## Testing
 
-## How to apply for testing
+Testing a fingerprint sensor currently in development is the best way to make sure new code ships properly, with no bugs or security issues. Testers are heavily welcomed.
 
-Since testing a Fingerprint sensor currently in development is the best way to test out code and make sure it's shipped properly with no issues or security flaws.
+To apply for testing a fingerprint sensor in development, send the following (see [Contacting Me](#contacting-me) below):
 
-to apply for testing a fingerprint sensor in development please provide:
-
-* Your laptop Model
-* Your macOS Version ( must meet the minimum for the project)
-* Your OpenCore Version ( also must meet the minimum version of v1.0.6 and later)
-* your Fingerprint Sensor
-* Your VID:PID **(Without this I cannot use your help)**
-* Your timezone so I don't ping you at 4AM and wake you up (if y'all sleep that is...) ( for reference mine is UTC +3 KSA Time)
-* If your sensor is even enabled in the USB MAP / UTBMap.kext: **VERY** Important as this defines if the sensor gets powered at all. so check in your UTBMap and head into system information and USB then see your VID:PID for the sensor itself
-
+* Your laptop model
+* Your macOS version (must meet the project's minimum)
+* Your OpenCore version (must be v1.0.6 or later)
+* Your fingerprint sensor
+* Your VID:PID — **without this I can't use your help**
+* Your timezone, so I don't ping you at 4AM (mine is UTC+3, KSA time)
+* Whether your sensor is even enabled in your USBMap / USBMap.kext — this determines if the sensor gets powered at all. Check your USBMap, then check System Information → USB for your sensor's VID:PID.
 
 ## Helping with Code
 
-This is also heavily welcomed by me as this again would help rapidly expand the project's support sensors thus helping more people. 
+Also heavily welcomed — this is what rapidly expands the project's sensor support and helps more people.
 
+* This project is written in C, and its fingerprint-sensor code is based on libfprint/fprintd conventions. If you know C, you're welcome to contribute. Anyone's welcome to try regardless.
+* Before opening a PR that adds a new sensor backend or touches the build, check the build scripts (`build_*.sh`) and CI config (`ci.yml`) — a new source file needs to be added in all of the places that reference the daemon's source list, or CI will pass green while the actual build is broken.
+* Open an issue first for anything nontrivial (new backend, architecture change) so we can align before you put in the work. Small fixes/typos can just be a PR.
 
-* This project mainly uses C for fingerprint sensors ( based off of libfprint or fprintd) so if you know how to write C then you are welcomed. But anyone is welcomed to try :))
+## Helping with Documentation
 
+Also welcomed — a person to help maintain and improve the project's documentation would genuinely help. If you're interested, reach out (see below) with what part of the docs you'd like to help with (README, per-sensor setup guides, this file, etc.).
 
 ## Contacting me
 
-* [REDDIT](https://www.reddit.com/user/Sufficient_Bus_8302/)
+* [Reddit](https://www.reddit.com/user/Sufficient_Bus_8302/)
 * [XDA Forums](https://xdaforums.com/m/hackintosh_user.13447103/)
 * [Mac Rumors Forums](https://forums.macrumors.com/members/hackintosh_user.1420199/)
 * [𝕏 or Twitter]( https://x.com/mohammad_q_124) (X Chat or idk what it's called)
