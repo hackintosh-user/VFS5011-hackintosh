@@ -1663,6 +1663,18 @@ static void do_pair_metallica_mis(void) {
         "hardware yet.\n\n",
         g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
 
+    if (g_metallica_mis_force_pair) {
+        vfsc_warn(
+            "--force-pair is active: the identity partitions will be WIPED\n"
+            "before pairing runs, even if this device already looks paired.\n"
+            "This is meant for a device that reports itself as already\n"
+            "paired but whose stored identity was never actually written\n"
+            "correctly (or was written under a stale/wrong host identity) --\n"
+            "normal [P] Pair silently no-ops on a device in that state,\n"
+            "which is why this flag exists. There is no way to get the old\n"
+            "identity back after this runs.\n\n");
+    }
+
     printf("Type PAIR (all caps) to proceed, anything else to cancel: ");
     fflush(stdout);
     char confirm[16];
@@ -3430,6 +3442,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--diag-pid") == 0) {
             g_diag_pid_mode = true;
         }
+        if (strcmp(argv[i], "--force-pair") == 0) {
+            g_metallica_mis_force_pair = 1;
+        }
     }
     srand((unsigned int)time(NULL));
 
@@ -3438,19 +3453,20 @@ int main(int argc, char **argv) {
      * CLI, so options 1/2 don't each need their own privilege prompt.
      *
      * Counter-based instead of the old fixed 4-slot array -- now that
-     * --q/--quiet, --deploy-agent, and --diag-pid can all be present
-     * at once, the old hardcoded "sudo_argv[2] = flag or NULL"
-     * approach could only carry one flag through the re-exec. This
-     * builds the argv up to however many flags actually apply. */
+     * --q/--quiet, --deploy-agent, --diag-pid, and --force-pair can all
+     * be present at once, the old hardcoded "sudo_argv[2] = flag or
+     * NULL" approach could only carry one flag through the re-exec.
+     * This builds the argv up to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[6];
+        char *sudo_argv[7];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
         if (!g_verbose_boot) sudo_argv[ai++] = "--q";
         if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
+        if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
