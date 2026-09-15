@@ -18,12 +18,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Defined in hack_touchid_client.c -- set briefly by
- * capture_quality_template() during a quiet (enroll) capture so this
- * per-swipe debug line doesn't clutter the enroll UI's single-line
- * status bar. See that file's g_capture_quiet comment for the full
- * reasoning. */
-extern int g_capture_quiet;
+/* Defined here (not in hack_touchid_client.c) because this file is
+ * linked into BOTH the universal hack-touchid client AND the older
+ * standalone vfs5011_daemon binary (build_daemon.sh), while
+ * hack_touchid_client.c is only part of the former. Defining it in
+ * hack_touchid_client.c instead broke vfs5011_daemon's link step
+ * with an undefined symbol (Sep 15 build log) -- this file is the
+ * one thing both binaries actually share. Set briefly by
+ * capture_quality_template() (hack_touchid_client.c) during a quiet
+ * (enroll) capture so this per-swipe debug line doesn't clutter the
+ * enroll UI's single-line status bar; stays 0 (never silenced) for
+ * vfs5011_daemon, which doesn't set it and doesn't need to. */
+int g_capture_quiet = 0;
 
 #include "fp_types.h"
 #include "lfs.h"

@@ -182,14 +182,20 @@ static struct usb_action vfs5011_initiate_capture[] = {
 /* Set (briefly) by capture_quality_template() when called with
  * quiet=1 (do_enroll()'s case) -- gates the low-level USB retry/stall
  * noise and the "Detected N minutiae"/"Swipe your finger..." prompts
- * below and in hack-touchid-matcher.c, none of which took a quiet
- * param of their own since they're several calls deep from
- * capture_quality_template() and threading a parameter through all of
- * them would touch far more call sites than this is worth. Restored
- * to 0 right after each capture_quality_template() call returns, so
- * it's never left quiet outside of that one call's duration.
- * do_verify() never sets this, so its output is unaffected. */
-int g_capture_quiet = 0;
+ * below, none of which took a quiet param of their own since they're
+ * several calls deep from capture_quality_template() and threading a
+ * parameter through all of them would touch far more call sites than
+ * this is worth. Restored to 0 right after each
+ * capture_quality_template() call returns, so it's never left quiet
+ * outside of that one call's duration. do_verify() never sets this,
+ * so its output is unaffected.
+ *
+ * ACTUALLY DEFINED in hack-touchid-matcher.c, not here -- that file
+ * is linked into both this client AND the older standalone
+ * vfs5011_daemon binary, while this file is client-only. Defining it
+ * here broke vfs5011_daemon's link step (Sep 15 build log, undefined
+ * symbol) since it never links this file in. Don't move it back. */
+extern int g_capture_quiet;
 
 /* Attempts a bulk transfer; on LIBUSB_ERROR_PIPE (stall left over from a
  * previous run, or a transient firmware hiccup), clears the halt on that
