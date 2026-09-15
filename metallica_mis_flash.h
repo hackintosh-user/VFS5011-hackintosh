@@ -328,9 +328,17 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
  * which only works now that metallica_mis_tls_cmd() dual-mode
  * dispatches -- see that function's doc comment):
  *
- *   1. get_flash_info() -- if partitions already exist, this device
- *      is already paired: return 0 immediately, nothing else to do
- *      (matches python's early return, NOT an error).
+ *   1. get_flash_info() -- if partitions already exist AND force is
+ *      false, this device is already paired: return 0 immediately,
+ *      nothing else to do (matches python's early return, NOT an
+ *      error). If force is true, this check is skipped and the real
+ *      fresh-pairing sequence below always runs, even against a
+ *      device that already reports partitions -- see the force-pair
+ *      doc comment in metallica_mis_daemon.c for why this exists and
+ *      why it is safe (steps 2-10 don't actually depend on the flash
+ *      being virgin; step 9's erase_flash() happens AFTER step 8
+ *      opens a real authenticated session using a freshly-generated
+ *      identity, so it's never being asked to erase without auth).
  *   2. Otherwise: send reset_blob (06cb:009a variant, see
  *      metallica_mis_blobs_9a.h) via metallica_mis_tls_cmd() in
  *      plaintext.
@@ -369,10 +377,12 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
  *
  * identity must be zero-initialized by the caller before this call
  * (metallica_mis_handle_ecdh/_priv/_cert all populate it in place).
+ * force: if nonzero, skip step 1's "already paired" early-return and
+ * always run the real fresh-pairing sequence (see step 1 above).
  * Returns 0 on success (including the "already paired, nothing to
- * do" case), -1 on any step's failure. */
+ * do" case when force is false), -1 on any step's failure. */
 int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t *identity,
                               const char *product_name, const char *serial_number,
-                              uint16_t usb_vid, uint16_t usb_pid);
+                              uint16_t usb_vid, uint16_t usb_pid, int force);
 
 #endif /* __METALLICA_MIS_FLASH_H */

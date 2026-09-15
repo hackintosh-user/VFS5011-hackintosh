@@ -664,7 +664,7 @@ done:
 
 int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t *identity,
                               const char *product_name, const char *serial_number,
-                              uint16_t usb_vid, uint16_t usb_pid) {
+                              uint16_t usb_vid, uint16_t usb_pid, int force) {
     metallica_mis_flash_info_t info;
     EC_KEY *client_keypair = NULL;
     unsigned char psk_encryption_key[METALLICA_MIS_PRF_KEYLEN];
@@ -677,17 +677,28 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
     int rc = -1;
     int have_flash_info = 0;
 
-    /* Step 1: get_flash_info() -- if partitions already exist, this
-     * device is already paired. Matches python's early return. */
+    /* Step 1: get_flash_info() -- if partitions already exist AND
+     * force is false, this device is already paired. Matches
+     * python's early return. If force is true (--force-pair), fall
+     * through and run the real fresh-pairing sequence anyway -- see
+     * the doc comment on this prototype in metallica_mis_flash.h for
+     * why this is the correct place to force a re-pair, instead of
+     * erasing flash before any session exists. */
     if (metallica_mis_get_flash_info(tls, &info) != 0) goto done;
     have_flash_info = 1;
 
-    if (info.partition_count > 0) {
+    if (info.partition_count > 0 && !force) {
         fprintf(stderr, "metallica_mis: Flash has %zu partitions.\n", info.partition_count);
         rc = 0;
         goto done;
     }
-    fprintf(stderr, "metallica_mis: Flash was not initialized yet. Formatting...\n");
+    if (info.partition_count > 0 && force) {
+        fprintf(stderr, "metallica_mis: Flash has %zu partitions, but force-pair is set "
+                         "-- proceeding with a genuine fresh-pairing sequence anyway.\n",
+                         info.partition_count);
+    } else {
+        fprintf(stderr, "metallica_mis: Flash was not initialized yet. Formatting...\n");
+    }
 
     /* Step 2: send reset_blob. python uses usb.cmd(reset_blob)
      * directly here (not tls.cmd()) -- but at this point in pairing

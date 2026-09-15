@@ -573,27 +573,35 @@ int metallica_mis_do_pairing(void) {
      * wrote it originally (an early/stale pairing attempt) is what's
      * failing the HMAC check on every later read, and no amount of
      * re-running [P] Pair as-is will ever fix that, since it never gets
-     * the chance to. --force-pair wipes the identity partitions first
-     * so init_flash() has no choice but to take the real path. */
+     * the chance to.
+     *
+     * Sep 15 (2nd fix, same day): the first attempt at --force-pair
+     * tried to erase_flash() the identity partitions HERE, before
+     * calling init_flash() at all -- that's wrong and is exactly what
+     * produced the status=0x0404 failure on erase partition 1. Per
+     * init_flash()'s own real sequence (see metallica_mis_flash.h doc
+     * comment), erase_flash()/write_flash() (steps 9-10) only ever run
+     * AFTER metallica_mis_tls_open() (step 8) has opened a genuinely
+     * authenticated session using a freshly-generated identity built
+     * locally in steps 3-7 -- they are never valid to call against an
+     * unauthenticated session, which is all that exists before
+     * init_flash() runs. There is no legitimate way to erase flash
+     * before that session exists.
+     *
+     * The actual fix: force is now a parameter to init_flash() itself
+     * (see metallica_mis_flash.h). --force-pair simply skips step 1's
+     * "already paired" early-return and lets the function run its real
+     * fresh-pairing sequence in the correct order -- generate identity,
+     * partition_flash(), ECDH, tls_open(), THEN erase+write. No manual
+     * pre-erase needed or wanted. */
     if (g_metallica_mis_force_pair) {
-        fprintf(stderr, "metallica_mis: --force-pair: wiping identity partitions "
-                         "(1,2,5,6,4) before pairing so this isn't a silent no-op "
-                         "against a stale identity...\n");
-        if (metallica_mis_erase_flash(&tls, 1) != 0 ||
-            metallica_mis_erase_flash(&tls, 2) != 0 ||
-            metallica_mis_erase_flash(&tls, 5) != 0 ||
-            metallica_mis_erase_flash(&tls, 6) != 0 ||
-            metallica_mis_erase_flash(&tls, 4) != 0) {
-            fprintf(stderr, "metallica_mis: --force-pair: erase FAILED, aborting "
-                             "before touching anything else\n");
-            return -1;
-        }
-        fprintf(stderr, "metallica_mis: --force-pair: identity partitions wiped, "
-                         "proceeding with a genuinely fresh pairing\n");
+        fprintf(stderr, "metallica_mis: --force-pair: forcing a genuine fresh-pairing "
+                         "sequence even though this device already reports partitions...\n");
     }
 
     if (metallica_mis_init_flash(&tls, &identity, product_name, serial_number,
-                                  g_detected_vid, g_detected_pid) != 0) {
+                                  g_detected_vid, g_detected_pid,
+                                  g_metallica_mis_force_pair) != 0) {
         fprintf(stderr, "metallica_mis: do_pairing(): init_flash() FAILED\n");
         return -1;
     }
@@ -1078,8 +1086,12 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
 
     memset(&identity, 0, sizeof(identity));
 
+    /* force=0 here, always -- calibrate should never force a re-pair
+     * on its own; that's exclusively a [P] Pair + --force-pair action.
+     * See the matching call in do_pairing() and the doc comment on
+     * metallica_mis_init_flash() in metallica_mis_flash.h. */
     if (metallica_mis_init_flash(tls_out, &identity, product_name, serial_number,
-                                  g_detected_vid, g_detected_pid) != 0) {
+                                  g_detected_vid, g_detected_pid, 0) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): init_flash() FAILED\n");
         return -1;
     }
