@@ -29,6 +29,15 @@
 #ifndef __METALLICA_MIS_DAEMON_H
 #define __METALLICA_MIS_DAEMON_H
 
+/* Set to 1 (e.g. from --force-pair) before calling do_pairing() to
+ * wipe the identity partitions first. See the Sep 15 comment at its
+ * usage site in metallica_mis_daemon.c for why this exists: init_flash()
+ * silently no-ops if the device already reports any partitions, even
+ * if what's stored there was written under a stale/wrong PSK and can
+ * never actually be read back. Destructive -- the existing paired
+ * identity is gone for good once this runs. */
+extern int g_metallica_mis_force_pair;
+
 /* Opens the sensor over libusb and claims its interface. Tries each
  * known Metallica MIS identity (06cb:009a, 138a:0097, 138a:009d) in
  * turn. Returns 0 on success, -1 on failure (already prints its own

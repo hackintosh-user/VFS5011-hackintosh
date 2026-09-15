@@ -123,6 +123,11 @@ static libusb_device_handle *g_handle = NULL;
 static unsigned short g_detected_vid = 0;
 static unsigned short g_detected_pid = 0;
 
+/* Set by hack_touchid_client.c's argv parsing when --force-pair is
+ * passed. Not static -- the client sets this directly before calling
+ * metallica_mis_do_pairing(). See metallica_mis_daemon.h. */
+int g_metallica_mis_force_pair = 0;
+
 /*
  * open_device() -- transport open/claim is genuinely reusable in
  * shape from vfs5011_daemon.c's open_device(), same libusb calls,
@@ -557,6 +562,35 @@ int metallica_mis_do_pairing(void) {
     fprintf(stderr, "\n");
 
     memset(&identity, 0, sizeof(identity));
+
+    /* Sep 15: root cause found. init_flash() early-returns as soon as
+     * the device reports ANY partitions already present, WITHOUT ever
+     * re-running the fresh-pairing sequence (generate identity, encrypt,
+     * self-check, write partition 1). Every [P] Pair on this device
+     * across this whole debugging saga has been hitting that early
+     * return and silently no-op'ing -- partition 1 has never actually
+     * been rewritten with the current, verified-correct PSK. Whatever
+     * wrote it originally (an early/stale pairing attempt) is what's
+     * failing the HMAC check on every later read, and no amount of
+     * re-running [P] Pair as-is will ever fix that, since it never gets
+     * the chance to. --force-pair wipes the identity partitions first
+     * so init_flash() has no choice but to take the real path. */
+    if (g_metallica_mis_force_pair) {
+        fprintf(stderr, "metallica_mis: --force-pair: wiping identity partitions "
+                         "(1,2,5,6,4) before pairing so this isn't a silent no-op "
+                         "against a stale identity...\n");
+        if (metallica_mis_erase_flash(&tls, 1) != 0 ||
+            metallica_mis_erase_flash(&tls, 2) != 0 ||
+            metallica_mis_erase_flash(&tls, 5) != 0 ||
+            metallica_mis_erase_flash(&tls, 6) != 0 ||
+            metallica_mis_erase_flash(&tls, 4) != 0) {
+            fprintf(stderr, "metallica_mis: --force-pair: erase FAILED, aborting "
+                             "before touching anything else\n");
+            return -1;
+        }
+        fprintf(stderr, "metallica_mis: --force-pair: identity partitions wiped, "
+                         "proceeding with a genuinely fresh pairing\n");
+    }
 
     if (metallica_mis_init_flash(&tls, &identity, product_name, serial_number,
                                   g_detected_vid, g_detected_pid) != 0) {
