@@ -18,6 +18,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Defined in hack_touchid_client.c -- set briefly by
+ * capture_quality_template() during a quiet (enroll) capture so this
+ * per-swipe debug line doesn't clutter the enroll UI's single-line
+ * status bar. See that file's g_capture_quiet comment for the full
+ * reasoning. */
+extern int g_capture_quiet;
+
 #include "fp_types.h"
 #include "lfs.h"
 #include "bozorth.h"
@@ -74,7 +81,7 @@ int vfs5011_extract_template(unsigned char *image_data, int width, int height,
         return r;
     }
 
-    fprintf(stderr, "Detected %d minutiae\n", minutiae->num);
+    if (!g_capture_quiet) fprintf(stderr, "Detected %d minutiae\n", minutiae->num);
     minutiae_to_xyt(minutiae, width, height, out_template);
 
     free(quality_map);

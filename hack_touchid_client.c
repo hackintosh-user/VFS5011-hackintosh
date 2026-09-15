@@ -179,6 +179,18 @@ static struct usb_action vfs5011_initiate_capture[] = {
     RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 2368, VFS5011_NORMAL_CONTROL_REPLY)
 };
 
+/* Set (briefly) by capture_quality_template() when called with
+ * quiet=1 (do_enroll()'s case) -- gates the low-level USB retry/stall
+ * noise and the "Detected N minutiae"/"Swipe your finger..." prompts
+ * below and in hack-touchid-matcher.c, none of which took a quiet
+ * param of their own since they're several calls deep from
+ * capture_quality_template() and threading a parameter through all of
+ * them would touch far more call sites than this is worth. Restored
+ * to 0 right after each capture_quality_template() call returns, so
+ * it's never left quiet outside of that one call's duration.
+ * do_verify() never sets this, so its output is unaffected. */
+int g_capture_quiet = 0;
+
 /* Attempts a bulk transfer; on LIBUSB_ERROR_PIPE (stall left over from a
  * previous run, or a transient firmware hiccup), clears the halt on that
  * endpoint and retries exactly once before giving up. This is what lets
@@ -188,7 +200,7 @@ static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpo
                                           unsigned int timeout) {
     int r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
     if (r == LIBUSB_ERROR_PIPE) {
-        fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
+        if (!g_capture_quiet) fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
         libusb_clear_halt(handle, endpoint);
         r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
     }
@@ -204,20 +216,20 @@ static int run_sequence(libusb_device_handle *handle, struct usb_action *seq, in
             r = bulk_transfer_with_pipe_retry(handle, a->endpoint, a->data, a->size,
                                                &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
             if (r != 0 || transferred != a->size) {
-                fprintf(stderr, "SEND failed at step %d (%s): %s\n", i + 1, a->name, libusb_error_name(r));
+                if (!g_capture_quiet) fprintf(stderr, "SEND failed at step %d (%s): %s\n", i + 1, a->name, libusb_error_name(r));
                 return -1;
             }
         } else {
             r = bulk_transfer_with_pipe_retry(handle, a->endpoint, recv_buf, a->size,
                                                &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
             if (r != 0) {
-                fprintf(stderr, "RECV failed at step %d: %s\n", i + 1, libusb_error_name(r));
+                if (!g_capture_quiet) fprintf(stderr, "RECV failed at step %d: %s\n", i + 1, libusb_error_name(r));
                 return -1;
             }
             if (a->data != NULL) {
                 if (transferred != a->correct_reply_size ||
                     memcmp(recv_buf, a->data, a->correct_reply_size) != 0) {
-                    fprintf(stderr, "RECV_CHECK mismatch at step %d\n", i + 1);
+                    if (!g_capture_quiet) fprintf(stderr, "RECV_CHECK mismatch at step %d\n", i + 1);
                     return -1;
                 }
             }
@@ -331,15 +343,15 @@ out:
 static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
     if (run_sequence(handle, vfs5011_initialization,
                       sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
-        fprintf(stderr, "Init sequence failed\n");
+        if (!g_capture_quiet) fprintf(stderr, "Init sequence failed\n");
         return NULL;
     }
     if (run_sequence(handle, vfs5011_initiate_capture,
                       sizeof(vfs5011_initiate_capture)/sizeof(vfs5011_initiate_capture[0])) != 0) {
-        fprintf(stderr, "Initiate-capture sequence failed\n");
+        if (!g_capture_quiet) fprintf(stderr, "Initiate-capture sequence failed\n");
         return NULL;
     }
-    printf("Swipe your finger across the sensor now...\n");
+    if (!g_capture_quiet) printf("Swipe your finger across the sensor now...\n");
 
     unsigned char *recorded = malloc((size_t)MAX_LINES_TOTAL * VFS5011_LINE_SIZE);
     int lines_recorded = 0, lines_captured = 0, empty_lines = 0;
@@ -352,7 +364,7 @@ static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *ha
         r = libusb_bulk_transfer(handle, VFS5011_IN_ENDPOINT_DATA, chunk_buf,
                                   CAPTURE_LINES * VFS5011_LINE_SIZE, &transferred, 0);
         if (r != 0 && r != LIBUSB_ERROR_TIMEOUT) {
-            fprintf(stderr, "Capture read failed: %s\n", libusb_error_name(r));
+            if (!g_capture_quiet) fprintf(stderr, "Capture read failed: %s\n", libusb_error_name(r));
             break;
         }
         if (transferred <= 0) continue;
@@ -377,7 +389,7 @@ static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *ha
     free(chunk_buf);
 
     if (lines_recorded < 2) {
-        fprintf(stderr, "Not enough lines captured (%d) — try a slower, fuller swipe.\n", lines_recorded);
+        if (!g_capture_quiet) fprintf(stderr, "Not enough lines captured (%d) — try a slower, fuller swipe.\n", lines_recorded);
         free(recorded);
         return NULL;
     }
@@ -387,7 +399,7 @@ static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *ha
     free(recorded);
 
     if (height <= 0) {
-        fprintf(stderr, "Alignment produced no output rows.\n");
+        if (!g_capture_quiet) fprintf(stderr, "Alignment produced no output rows.\n");
         free(aligned);
         return NULL;
     }
@@ -466,7 +478,7 @@ static int open_device(void) {
         if (g_handle) break;
         usleep(300000); /* 300ms between open attempts */
     }
-    if (!g_handle) { fprintf(stderr, "Device not found\n"); return -1; }
+    if (!g_handle) { if (!g_capture_quiet) fprintf(stderr, "Device not found\n"); return -1; }
 
     /* Tell libusb to forcibly detach whatever kernel driver has grabbed
      * this interface (common on macOS for HID-ish USB devices) BEFORE we
@@ -491,15 +503,15 @@ static int open_device(void) {
 
     /* Still failed after quick retries — now fall back to reset. This
      * should be the rare case, not the common one. */
-    fprintf(stderr, "Claim failed, resetting device and retrying...\n");
+    if (!g_capture_quiet) fprintf(stderr, "Claim failed, resetting device and retrying...\n");
     int reset_r = libusb_reset_device(g_handle);
     if (reset_r != 0) {
-        fprintf(stderr, "Device reset failed: %s\n", libusb_error_name(reset_r));
+        if (!g_capture_quiet) fprintf(stderr, "Device reset failed: %s\n", libusb_error_name(reset_r));
     }
     usleep(500000);
 
     if (libusb_claim_interface(g_handle, 0) != 0) {
-        fprintf(stderr, "Claim failed again after reset\n");
+        if (!g_capture_quiet) fprintf(stderr, "Claim failed again after reset\n");
         return -1;
     }
     return 0;
@@ -598,6 +610,7 @@ static void play_success_sound(void) {
  * original scrolling messages, since a single verify swipe doesn't
  * have the same "5+ retries stacking up" clutter problem enroll does. */
 static int capture_quality_template(struct xyt_struct *out_tmpl, int quiet) {
+    g_capture_quiet = quiet;
     for (int attempt = 1; attempt <= MAX_SWIPE_RETRIES; attempt++) {
         if (open_device() != 0) {
             close_device();
@@ -631,9 +644,11 @@ static int capture_quality_template(struct xyt_struct *out_tmpl, int quiet) {
             usleep(500000);
             continue;
         }
+        g_capture_quiet = 0;
         return 0;
     }
     if (!quiet) fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
+    g_capture_quiet = 0;
     return -1;
 }
 
