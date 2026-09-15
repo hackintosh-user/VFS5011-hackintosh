@@ -590,12 +590,18 @@ static void play_success_sound(void) {
  * with clear_halt. A full close+reopen between swipes is what was
  * actually working in the separate-process-per-swipe testing, so we
  * do that here automatically instead of relying on one long-lived
- * handle across multiple swipes. */
-static int capture_quality_template(struct xyt_struct *out_tmpl) {
+ * handle across multiple swipes.
+ *
+ * quiet: when true, suppresses the per-attempt fprintf noise below --
+ * do_enroll() passes true and renders its own single-line status via
+ * draw_enroll_bar() instead; do_verify() passes false and keeps the
+ * original scrolling messages, since a single verify swipe doesn't
+ * have the same "5+ retries stacking up" clutter problem enroll does. */
+static int capture_quality_template(struct xyt_struct *out_tmpl, int quiet) {
     for (int attempt = 1; attempt <= MAX_SWIPE_RETRIES; attempt++) {
         if (open_device() != 0) {
             close_device();
-            fprintf(stderr, "Could not open device (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            if (!quiet) fprintf(stderr, "Could not open device (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
             usleep(500000);
             continue;
         }
@@ -604,7 +610,7 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
         unsigned char *image = capture_fingerprint_image(g_handle, &height);
         if (!image) {
             close_device();
-            fprintf(stderr, "Capture failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            if (!quiet) fprintf(stderr, "Capture failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
             usleep(500000);
             continue;
         }
@@ -615,19 +621,19 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
         close_device();
 
         if (r != 0) {
-            fprintf(stderr, "Minutiae extraction failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            if (!quiet) fprintf(stderr, "Minutiae extraction failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
             usleep(500000);
             continue;
         }
         if (out_tmpl->nrows < MIN_MINUTIAE) {
-            fprintf(stderr, "Swipe too weak (%d minutiae, need %d) — swipe again, slower and fuller.\n",
+            if (!quiet) fprintf(stderr, "Swipe too weak (%d minutiae, need %d) — swipe again, slower and fuller.\n",
                     out_tmpl->nrows, MIN_MINUTIAE);
             usleep(500000);
             continue;
         }
         return 0;
     }
-    fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
+    if (!quiet) fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
     return -1;
 }
 
@@ -1611,6 +1617,11 @@ static void print_about(void) {
  * first-run auto-setup do_deploy() already does. */
 static int do_run_volume_setup(void);
 
+/* Forward declaration -- defined alongside draw_progress_bar() further
+ * below (Update-checker section), but needed here for do_enroll()'s
+ * minimal single-line swipe status. */
+static void draw_enroll_bar(int good, int total, const char *status, const char *color);
+
 /* True for any of the three Metallica MIS USB identities (same
  * underlying Synaptics chip under different OEM VID:PIDs -- see
  * METALLICA_MIS_IDENTITIES in metallica_mis_daemon.c). Used to gate
@@ -1999,20 +2010,20 @@ static void do_enroll(void) {
 
     struct xyt_struct templates[ENROLL_SWIPES];
     int good = 0;
+    printf("Place your finger on the sensor.\n\n");
+    draw_enroll_bar(good, ENROLL_SWIPES, NULL, NULL);
     for (int i = 0; i < ENROLL_SWIPES; i++) {
-        printf("Enrollment swipe %d of %d:\n", i + 1, ENROLL_SWIPES);
-
         struct xyt_struct candidate;
         int outlier_retries = 0;
         for (;;) {
-            if (capture_quality_template(&candidate) != 0) {
-                vfsc_err("Skipping this swipe slot due to repeated failures.\n");
+            if (capture_quality_template(&candidate, /*quiet=*/1) != 0) {
+                draw_enroll_bar(good, ENROLL_SWIPES, "Retry -- couldn't get a clean read", VFSC_YELLOW);
                 goto slot_done;
             }
 
             if (good == 0) {
-                printf("  -> captured, %d minutiae\n", candidate.nrows);
                 templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Good capture", VFSC_GREEN);
                 break;
             }
 
@@ -2023,27 +2034,24 @@ static void do_enroll(void) {
             }
 
             if (best_self_score >= MIN_SELF_CONSISTENCY) {
-                printf("  -> captured, %d minutiae (self-check: %d)\n",
-                       candidate.nrows, best_self_score);
                 templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Good capture", VFSC_GREEN);
                 break;
             }
 
             outlier_retries++;
-            vfsc_err(
-                    "  Swipe doesn't match your other swipes well (self-check: %d, need %d) "
-                    "— treating as an outlier, swipe again.\n",
-                    best_self_score, MIN_SELF_CONSISTENCY);
             if (outlier_retries >= MAX_SWIPE_RETRIES) {
-                vfsc_err("  Repeated outliers on this slot — keeping it anyway to avoid stalling enrollment.\n");
-                printf("  -> captured, %d minutiae (self-check: %d, kept despite low consistency)\n",
-                       candidate.nrows, best_self_score);
                 templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Captured (kept)", VFSC_YELLOW);
                 break;
             }
+            draw_enroll_bar(good, ENROLL_SWIPES, "Try a slightly different position", VFSC_YELLOW);
         }
-        slot_done: ;
+        slot_done:
+        printf("\n");
+        if (i + 1 < ENROLL_SWIPES) draw_enroll_bar(good, ENROLL_SWIPES, NULL, NULL);
     }
+    printf("\n");
 
     if (good == 0) {
         vfsc_err("Enrollment failed: no usable swipes captured.\n\n");
@@ -2094,7 +2102,7 @@ static int do_verify(void) {
         return 1;
     }
     struct xyt_struct probe;
-    if (capture_quality_template(&probe) != 0) {
+    if (capture_quality_template(&probe, /*quiet=*/0) != 0) {
         vfsc_err("Verify failed: could not get a usable swipe.\n\n");
         return 1;
     }
@@ -2726,6 +2734,28 @@ static void draw_progress_bar(int percent, const char *label) {
     printf("\r%s [", label);
     for (int i = 0; i < width; i++) putchar(i < filled ? '#' : ' ');
     printf("] %3d%%", percent);
+    fflush(stdout);
+}
+
+/* draw_enroll_bar() -- same single-line-redraw-via-\r technique as
+ * draw_progress_bar() above, but for enroll's "N good swipes out of
+ * M" progress instead of a percent, plus a short colored status word
+ * instead of the scrolling per-attempt messages capture_quality_template()
+ * used to print directly. Trailing spaces pad over a longer previous
+ * status line (e.g. "Try again, slower and fuller" -> "Good") so
+ * nothing lingers after a shorter one overwrites it.
+ *
+ * status/color are NULL during the "waiting on a swipe" state (no
+ * status word yet, just the bar). Caller prints one \n once a slot is
+ * fully resolved (or the whole loop ends), same convention as
+ * draw_progress_bar(). */
+static void draw_enroll_bar(int good, int total, const char *status, const char *color) {
+    const int width = 20;
+    int filled = total > 0 ? (good * width) / total : 0;
+    printf("\r  [");
+    for (int i = 0; i < width; i++) putchar(i < filled ? '#' : ' ');
+    printf("] %d/%d  %s%-32s%s", good, total,
+           color ? color : "", status ? status : "", VFSC_RESET);
     fflush(stdout);
 }
 
