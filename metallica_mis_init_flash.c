@@ -601,50 +601,106 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
     /* cmd = unhex('4f 0000 0000') -- opcode 0x4f + 4 reserved bytes */
     {
         unsigned char op[5] = { 0x4f, 0x00, 0x00, 0x00, 0x00 };
-        if (local_bb_append(&cmd, op, sizeof(op)) != 0) goto done;
+        if (local_bb_append(&cmd, op, sizeof(op)) != 0) {
+            fprintf(stderr, "metallica_mis: partition_flash(): bb_append(opcode) "
+                             "failed\n");
+            goto done;
+        }
     }
 
     /* block 0: serialize_flash_params(info.ic) */
     metallica_mis_serialize_flash_params(info->ic->size, info->ic->sector_size,
                                           info->ic->sector_erase_cmd, flash_params);
-    if (with_hdr(&cmd, 0, flash_params, sizeof(flash_params)) != 0) goto done;
+    if (with_hdr(&cmd, 0, flash_params, sizeof(flash_params)) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): with_hdr(block 0, "
+                         "flash_params) failed\n");
+        goto done;
+    }
 
     /* block 1: join(serialize_partition(p) for p in layout) + signature */
     for (size_t i = 0; i < layout_count; i++) {
         unsigned char part_buf[48];
         metallica_mis_serialize_partition(&layout[i], part_buf);
-        if (local_bb_append(&partitions_blob, part_buf, sizeof(part_buf)) != 0) goto done;
+        if (local_bb_append(&partitions_blob, part_buf, sizeof(part_buf)) != 0) {
+            fprintf(stderr, "metallica_mis: partition_flash(): bb_append(partition "
+                             "%zu) failed\n", i);
+            goto done;
+        }
     }
-    if (local_bb_append(&partitions_blob, signature, signature_len) != 0) goto done;
-    if (with_hdr(&cmd, 1, partitions_blob.data, partitions_blob.len) != 0) goto done;
+    if (local_bb_append(&partitions_blob, signature, signature_len) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): bb_append(signature) "
+                         "failed\n");
+        goto done;
+    }
+    if (with_hdr(&cmd, 1, partitions_blob.data, partitions_blob.len) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): with_hdr(block 1, "
+                         "partitions_blob) failed\n");
+        goto done;
+    }
 
     /* block 5: make_cert(client_public) */
-    if (metallica_mis_make_cert(client_keypair, cert) != 0) goto done;
-    if (with_hdr(&cmd, 5, cert, sizeof(cert)) != 0) goto done;
+    if (metallica_mis_make_cert(client_keypair, cert) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): make_cert() failed\n");
+        goto done;
+    }
+    if (with_hdr(&cmd, 5, cert, sizeof(cert)) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): with_hdr(block 5, cert) "
+                         "failed\n");
+        goto done;
+    }
 
     /* block 3: crt_hardcoded (the hardcoded firmware CA cert, defined in metallica_mis_tls.c) */
-    if (with_hdr(&cmd, 3, metallica_mis_crt_hardcoded, metallica_mis_crt_hardcoded_len) != 0) goto done;
+    if (with_hdr(&cmd, 3, metallica_mis_crt_hardcoded, metallica_mis_crt_hardcoded_len) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): with_hdr(block 3, "
+                         "crt_hardcoded) failed\n");
+        goto done;
+    }
 
     rsp = malloc(rsp_cap);
-    if (!rsp) goto done;
+    if (!rsp) {
+        fprintf(stderr, "metallica_mis: partition_flash(): malloc(rsp) failed\n");
+        goto done;
+    }
     n = metallica_mis_tls_cmd(tls, cmd.data, cmd.len, rsp, rsp_cap);
-    if (n < 2) goto done; /* assert_status()-equivalent -- too short to even hold a status word */
+    if (n < 2) {
+        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f device reply "
+                         "too short (n=%d) -- device did not respond as expected to "
+                         "the partition-table write, sent %zu bytes\n", n, cmd.len);
+        goto done; /* assert_status()-equivalent -- too short to even hold a status word */
+    }
 
     {
         unsigned short status = (unsigned short)rsp[0] | ((unsigned short)rsp[1] << 8);
-        if (status != 0) goto done;
+        if (status != 0) {
+            fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f (write "
+                             "partition table + cert) failed, status=0x%04x\n", status);
+            goto done;
+        }
     }
 
     /* rsp = rsp[2:]; crt_len = unpack('<L', rsp[:4]); rsp = rsp[4:] */
-    if ((size_t)n < 2 + 4) goto done;
+    if ((size_t)n < 2 + 4) {
+        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f reply too short "
+                         "for length header (n=%d)\n", n);
+        goto done;
+    }
     const unsigned char *p = rsp + 2;
     size_t remaining = (size_t)n - 2;
     uint32_t crt_len = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
                         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     p += 4; remaining -= 4;
 
-    if (crt_len > remaining) goto done;
-    if (metallica_mis_handle_cert(identity, p, crt_len) != 0) goto done;
+    if (crt_len > remaining) {
+        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f reply cert "
+                         "length mismatch (header says %u, only %zu bytes remain)\n",
+                         crt_len, remaining);
+        goto done;
+    }
+    if (metallica_mis_handle_cert(identity, p, crt_len) != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): handle_cert() failed "
+                         "(crt_len=%u)\n", crt_len);
+        goto done;
+    }
     /* rsp = rsp[crt_len:] -- the remaining bytes are intentionally
      * discarded here, matching python's own `# TODO - figure out
      * what the rest of rsp means` -- python doesn't use them either,
