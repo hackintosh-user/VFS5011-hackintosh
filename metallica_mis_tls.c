@@ -1091,59 +1091,157 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
     tls->identity = identity;
     SHA256_Init(&tls->handshake_hash);
 
+    /* Sep 16: this whole function has never been exercised against
+     * real hardware before -- only the plaintext bootstrap stage has.
+     * Every branch below got a distinct diagnostic for exactly that
+     * reason: if this fails on real hardware, we need to know WHICH
+     * of these ~15 steps it was on the very next run, not just that
+     * "tls_open() failed" (init_flash()'s wrapper message is not
+     * enough resolution on its own). */
+
     /* --- flight 1: ClientHello --- */
-    if (make_client_hello(tls, &hello) != 0) goto done;
-    if (make_handshake(tls, hello.data, hello.len, &frame1) != 0) goto done;
+    if (make_client_hello(tls, &hello) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_client_hello() failed\n");
+        goto done;
+    }
+    if (make_handshake(tls, hello.data, hello.len, &frame1) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_handshake(ClientHello) "
+                         "failed\n");
+        goto done;
+    }
 
     {
         unsigned char wire_hdr[4] = { 0x44, 0x00, 0x00, 0x00 };
         bb_t out; bb_init(&out);
-        if (bb_append(&out, wire_hdr, sizeof(wire_hdr)) != 0) { bb_free(&out); goto done; }
-        if (bb_append(&out, frame1.data, frame1.len) != 0) { bb_free(&out); goto done; }
+        if (bb_append(&out, wire_hdr, sizeof(wire_hdr)) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight1 bb_append(wire_hdr) "
+                             "failed\n");
+            bb_free(&out); goto done;
+        }
+        if (bb_append(&out, frame1.data, frame1.len) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight1 bb_append(frame1) "
+                             "failed\n");
+            bb_free(&out); goto done;
+        }
 
         in_len = tls->transport(tls->transport_ctx, out.data, out.len, in_buf, sizeof(in_buf));
         bb_free(&out);
-        if (in_len < 0) goto done;
+        if (in_len < 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight1 transport() failed "
+                             "(in_len=%d) -- device rejected or did not respond to "
+                             "ClientHello\n", in_len);
+            goto done;
+        }
     }
-    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) goto done;
+    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): parse_tls_response() on the "
+                         "ServerHello/flight1 reply failed (in_len=%d)\n", in_len);
+        goto done;
+    }
 
     /* --- derive session keys from device_ecdh_pub + server_random --- */
-    if (make_keys(tls) != 0) goto done;
+    if (make_keys(tls) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_keys() (session key "
+                         "derivation from device_ecdh_pub + server_random) failed\n");
+        goto done;
+    }
 
     /* --- flight 2: Certificate, ClientKeyExchange, CertVerify, ChangeCipherSpec, Finished --- */
-    if (make_certs(tls, &certs) != 0) goto done;
-    if (make_client_kex(tls, &kex) != 0) goto done;
-    if (make_cert_verify(tls, &verify) != 0) goto done;
+    if (make_certs(tls, &certs) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_certs() failed\n");
+        goto done;
+    }
+    if (make_client_kex(tls, &kex) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_client_kex() failed\n");
+        goto done;
+    }
+    if (make_cert_verify(tls, &verify) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_cert_verify() failed\n");
+        goto done;
+    }
 
-    if (bb_append(&flight2, certs.data, certs.len) != 0) goto done;
-    if (bb_append(&flight2, kex.data, kex.len) != 0) goto done;
-    if (bb_append(&flight2, verify.data, verify.len) != 0) goto done;
+    if (bb_append(&flight2, certs.data, certs.len) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(certs) failed\n");
+        goto done;
+    }
+    if (bb_append(&flight2, kex.data, kex.len) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(kex) failed\n");
+        goto done;
+    }
+    if (bb_append(&flight2, verify.data, verify.len) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(verify) failed\n");
+        goto done;
+    }
 
-    if (make_handshake(tls, flight2.data, flight2.len, &frame2) != 0) goto done;
-    if (make_change_cipher_spec(&ccs) != 0) goto done;
-    if (make_finish(tls, &hs_finish) != 0) goto done;
-    if (make_handshake(tls, hs_finish.data, hs_finish.len, &finish_frame) != 0) goto done;
+    if (make_handshake(tls, flight2.data, flight2.len, &frame2) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_handshake(flight2) failed\n");
+        goto done;
+    }
+    if (make_change_cipher_spec(&ccs) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_change_cipher_spec() "
+                         "failed\n");
+        goto done;
+    }
+    if (make_finish(tls, &hs_finish) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_finish() failed\n");
+        goto done;
+    }
+    if (make_handshake(tls, hs_finish.data, hs_finish.len, &finish_frame) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): make_handshake(Finished) "
+                         "failed\n");
+        goto done;
+    }
 
     {
         unsigned char wire_hdr[4] = { 0x44, 0x00, 0x00, 0x00 };
         bb_t out; bb_init(&out);
-        if (bb_append(&out, wire_hdr, sizeof(wire_hdr)) != 0) { bb_free(&out); goto done; }
-        if (bb_append(&out, frame2.data, frame2.len) != 0) { bb_free(&out); goto done; }
-        if (bb_append(&out, ccs.data, ccs.len) != 0) { bb_free(&out); goto done; }
-        if (bb_append(&out, finish_frame.data, finish_frame.len) != 0) { bb_free(&out); goto done; }
+        if (bb_append(&out, wire_hdr, sizeof(wire_hdr)) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(wire_hdr) "
+                             "failed\n");
+            bb_free(&out); goto done;
+        }
+        if (bb_append(&out, frame2.data, frame2.len) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(frame2) "
+                             "failed\n");
+            bb_free(&out); goto done;
+        }
+        if (bb_append(&out, ccs.data, ccs.len) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append(ccs) "
+                             "failed\n");
+            bb_free(&out); goto done;
+        }
+        if (bb_append(&out, finish_frame.data, finish_frame.len) != 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight2 bb_append"
+                             "(finish_frame) failed\n");
+            bb_free(&out); goto done;
+        }
 
         in_len = tls->transport(tls->transport_ctx, out.data, out.len, in_buf, sizeof(in_buf));
         bb_free(&out);
-        if (in_len < 0) goto done;
+        if (in_len < 0) {
+            fprintf(stderr, "metallica_mis: tls_open(): flight2 transport() failed "
+                             "(in_len=%d) -- device rejected Certificate/KeyExchange/"
+                             "CertVerify/Finished\n", in_len);
+            goto done;
+        }
     }
 
     bb_free(&app_out); bb_init(&app_out);
-    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) goto done;
+    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) {
+        fprintf(stderr, "metallica_mis: tls_open(): parse_tls_response() on the "
+                         "server's Finished/flight2 reply failed (in_len=%d)\n", in_len);
+        goto done;
+    }
 
     /* server's Finished, verified inside handle_finish() during
      * parse_tls_response()->handle_handshake() above; if we got here
      * without error, the handshake is complete. secure_rx should now
      * be true (set when its ChangeCipherSpec was parsed). */
+    if (!tls->secure_rx) {
+        fprintf(stderr, "metallica_mis: tls_open(): handshake ran to completion but "
+                         "secure_rx is still false -- ChangeCipherSpec from the device "
+                         "was never seen/parsed\n");
+    }
     rc = tls->secure_rx ? 0 : -1;
 
 done:

@@ -708,16 +708,28 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
      * deviation from python. */
     n = metallica_mis_tls_cmd(tls, metallica_mis_reset_blob_9a, metallica_mis_reset_blob_9a_len,
                                rsp, sizeof(rsp));
-    if (n < 2) goto done;
+    if (n < 2) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 2 (reset_blob) reply too short "
+                         "(%d bytes)\n", n);
+        goto done;
+    }
     {
         unsigned short status = (unsigned short)rsp[0] | ((unsigned short)rsp[1] << 8);
-        if (status != 0) goto done;
+        if (status != 0) {
+            fprintf(stderr, "metallica_mis: init_flash(): step 2 (reset_blob) failed, "
+                             "status=0x%04x\n", status);
+            goto done;
+        }
     }
 
     /* Step 3: generate a fresh SECP256R1 keypair locally -- the
      * actual pairing secret, not read from the device. */
     client_keypair = metallica_mis_generate_client_keypair();
-    if (!client_keypair) goto done;
+    if (!client_keypair) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 3 (generate_client_keypair) "
+                         "failed\n");
+        goto done;
+    }
 
     /* Step 4: select layout/signature by VID:PID. NOTE (see header
      * doc comment): the 0090 branch selects the right TABLES, but
@@ -743,6 +755,7 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
      * and stores the device's returned cert into identity. */
     if (metallica_mis_partition_flash(tls, identity, &info, layout, layout_count,
                                        signature, signature_len, client_keypair) != 0) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 5 (partition_flash) failed\n");
         goto done;
     }
 
@@ -762,30 +775,57 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
     }
     int cleanup_ok = (metallica_mis_flash_call_cleanups(tls) == 0);
 
-    if (!ecdh_read_ok) goto done;
-    if (!cleanup_ok) goto done;
+    if (!ecdh_read_ok) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 6 (read device ECDH pubkey, "
+                         "cmd 0x50) failed or returned nonzero status (n=%d)\n", n);
+        goto done;
+    }
+    if (!cleanup_ok) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 6 flash_call_cleanups() "
+                         "failed\n");
+        goto done;
+    }
 
     /* rsp = rsp[2:]; l = unpack('<L', rsp[:4]); zeroes, rsp = rsp[4:-400], rsp[-400:] */
-    if ((size_t)n < 2 + 4) goto done;
+    if ((size_t)n < 2 + 4) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 6 ECDH reply too short for "
+                         "length header (%d bytes)\n", n);
+        goto done;
+    }
     {
         const unsigned char *p = rsp + 2;
         size_t remaining = (size_t)n - 2;
         uint32_t l = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-        if (l != remaining) goto done; /* "Length mismatch" */
+        if (l != remaining) {
+            fprintf(stderr, "metallica_mis: init_flash(): step 6 ECDH reply length "
+                             "mismatch (header says %u, got %zu)\n", l, remaining);
+            goto done; /* "Length mismatch" */
+        }
 
         p += 4; remaining -= 4;
-        if (remaining < 400) goto done;
+        if (remaining < 400) {
+            fprintf(stderr, "metallica_mis: init_flash(): step 6 ECDH reply too short "
+                             "for the 400-byte body (%zu bytes after header)\n", remaining);
+            goto done;
+        }
         size_t zeroes_len = remaining - 400;
         const unsigned char *zeroes = p;
         const unsigned char *ecdh_body = p + zeroes_len;
 
         for (size_t i = 0; i < zeroes_len; i++) {
-            if (zeroes[i] != 0) goto done; /* "Expected zeroes" */
+            if (zeroes[i] != 0) {
+                fprintf(stderr, "metallica_mis: init_flash(): step 6 ECDH reply padding "
+                                 "was not all zeroes (byte %zu = 0x%02x)\n", i, zeroes[i]);
+                goto done; /* "Expected zeroes" */
+            }
         }
 
         /* Step 6 cont: handle_ecdh() */
-        if (metallica_mis_handle_ecdh(identity, ecdh_body, 400) != 0) goto done;
+        if (metallica_mis_handle_ecdh(identity, ecdh_body, 400) != 0) {
+            fprintf(stderr, "metallica_mis: init_flash(): step 6 handle_ecdh() failed\n");
+            goto done;
+        }
     }
 
     /* Step 7: derive PSK pair (same derivation tls_init() does, but
@@ -795,15 +835,23 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
 
     if (metallica_mis_encrypt_key(client_keypair, psk_encryption_key, psk_validation_key,
                                    &encrypted_key, &encrypted_key_len) != 0) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 7 (encrypt_key) failed\n");
         goto done;
     }
     if (metallica_mis_handle_priv(identity, psk_encryption_key, psk_validation_key,
                                    encrypted_key, encrypted_key_len) != 0) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 7 (handle_priv) failed\n");
         goto done;
     }
 
-    /* Step 8: the actual first real handshake. */
-    if (metallica_mis_tls_open(tls, identity) != 0) goto done;
+    /* Step 8: the actual first real handshake. Never exercised against
+     * real hardware before Sep 16 -- see tls_open()'s own per-branch
+     * diagnostics in metallica_mis_tls.c for exactly which sub-step
+     * fails, if it does. */
+    if (metallica_mis_tls_open(tls, identity) != 0) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 8 (tls_open) failed\n");
+        goto done;
+    }
 
     /* Step 9: wipe newly created partitions, exact order from python. */
     if (metallica_mis_erase_flash(tls, 1) != 0) goto done;
@@ -813,7 +861,10 @@ int metallica_mis_init_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t 
     if (metallica_mis_erase_flash(tls, 4) != 0) goto done;
 
     /* Step 10: persist paired identity to the cert partition. */
-    if (metallica_mis_make_tls_flash(identity, tls_flash) != 0) goto done;
+    if (metallica_mis_make_tls_flash(identity, tls_flash) != 0) {
+        fprintf(stderr, "metallica_mis: init_flash(): step 10 (make_tls_flash) failed\n");
+        goto done;
+    }
     if (metallica_mis_write_flash(tls, 1, 0, tls_flash, sizeof(tls_flash)) != 0) goto done;
 
     /* Sep 14 diagnostic: read partition 1 straight back and re-parse it
