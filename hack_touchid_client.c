@@ -3537,8 +3537,23 @@ int main(int argc, char **argv) {
      * Unlike --deploy-agent, run_diagnose_mode() has no preconditions
      * of its own to check first: it's read-only and its whole job is
      * to report a broken/missing piece, not refuse to run because of
-     * one. */
+     * one.
+     *
+     * IMPORTANT: g_detected_sensor is otherwise only ever populated by
+     * check_sensor_presence_gate() (called below, after this branch,
+     * for the interactive menu path). --diag-pid returns before that
+     * ever runs, so without probing here it's always NULL in this
+     * mode -- which made the report always print "Sensor: none",
+     * which cascades into "Daemon: (no sensor detected -- skipping)"
+     * AND a false "Accessibility Grant: no" (is_accessibility_granted()
+     * also short-circuits on !g_detected_sensor), regardless of the
+     * real hardware/grant state. Probe directly here -- deliberately
+     * NOT calling check_sensor_presence_gate() itself, since that
+     * prints its own "Launching Failed" refusal message and returns
+     * false on a genuine miss, which is gate/refusal behavior that
+     * doesn't belong in a read-only report. */
     if (g_diag_pid_mode) {
+        g_detected_sensor = detect_supported_sensor();
         run_diagnose_mode();
         return 0;
     }
@@ -3665,7 +3680,12 @@ int main(int argc, char **argv) {
                     ran_action = false;
                 }
                 break;
-            case 'D': case 'd': run_diagnose_mode(); break;
+            case 'D': case 'd':
+                run_diagnose_mode();
+                printf("\nPress Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
             case 'S': case 's': do_settings_menu(); break;
             case 'A': case 'a': print_about(); break;
             case 'Q': case 'q':
