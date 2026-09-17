@@ -2925,9 +2925,9 @@ static bool download_build_and_swap_update(const char *branch) {
         }
     }
     int extract_wait_status = pclose(ep);
-    printf("\n");
 
     if (!WIFEXITED(extract_wait_status) || WEXITSTATUS(extract_wait_status) != 0) {
+        printf("\n");
         vfsc_err("Extraction failed. Staying on the current version.\n\n");
         snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
         system(cmd);
