@@ -732,6 +732,19 @@ static bool g_deploy_agent_mode = false;
  * -- but survives the sudo re-exec the same way the other flags do. */
 static bool g_diag_pid_mode = false;
 
+/* Set by argv parsing in main() when "--check-updates" is passed.
+ * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
+ * above -- routes into run_check_updates_mode() instead of the
+ * interactive menu, before the verbose boot flood. Unlike the normal
+ * boot-time check_for_client_update(), this never prompts: it checks,
+ * and if an update exists downloads+builds+installs it immediately,
+ * then tells the user to relaunch manually rather than auto-execv'ing
+ * into the new binary -- this mode is meant to be run head-down from
+ * a script/menu bar app, not to hand control to an interactive client
+ * session on its own. Survives the sudo re-exec the same way the
+ * other flags do. */
+static bool g_check_updates_mode = false;
+
 static void vfsc_boot_line(const char *fmt, ...) {
     if (!g_verbose_boot) return;
 
@@ -2862,7 +2875,7 @@ static bool download_with_progress(const char *url, const char *out_path) {
  *
  * Only returns on failure -- success means execv() replaced this
  * process image and never came back here. */
-static bool download_build_and_swap_update(const char *branch) {
+static bool download_build_and_swap_update(const char *branch, bool relaunch) {
     char tmp_dir[PATH_MAX];
     snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/hack-touchid-update-%d", (int)getpid());
 
@@ -3035,6 +3048,12 @@ static bool download_build_and_swap_update(const char *branch) {
     snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
     system(cmd);
 
+    if (!relaunch) {
+        printf("Update installed.\n");
+        printf("Update was complete, please run sudo hack-touchid to launch the client.\n\n");
+        return true;
+    }
+
     printf("Update installed. Relaunching...\n\n");
     fflush(stdout);
 
@@ -3115,10 +3134,64 @@ static void check_for_client_update(void) {
         return;
     }
 
-    download_build_and_swap_update(local.branch);
+    download_build_and_swap_update(local.branch, true);
     /* Only reachable if the update attempt failed -- already explained
      * why above. Fall through and let the caller continue booting the
      * current version. */
+}
+
+/* run_check_updates_mode() -- headless "hack-touchid --check-updates".
+ * Same version-fetch/compare logic as check_for_client_update() above,
+ * but never prompts and never lands in the interactive client:
+ *   - no internet / remote version unreachable -> "Unable to check
+ *     for updates."
+ *   - no newer version -> "You are on the current release for this
+ *     branch."
+ *   - newer version -> downloads, builds, and installs it immediately
+ *     (download_build_and_swap_update(..., relaunch=false)), which
+ *     prints its own "Update was complete, please run sudo
+ *     hack-touchid to launch the client." on success rather than
+ *     execv'ing into the new binary itself. */
+static void run_check_updates_mode(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        printf("Unable to check for updates.\n");
+        return;
+    }
+    const client_version_info_t local = g_local_version_info;
+
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) {
+        printf("Unable to check for updates.\n");
+        return;
+    }
+
+    int local_code = parse_version_code(local.version);
+    int remote_code = parse_version_code(remote.version);
+    if (local_code < 0 || remote_code < 0) {
+        printf("Unable to check for updates.\n");
+        return;
+    }
+
+    bool is_newer = remote_code > local_code;
+    if (!is_newer && remote_code == local_code) {
+        long local_build = parse_build_code(local.build);
+        long remote_build = parse_build_code(remote.build);
+        if (local_build >= 0 && remote_build >= 0 && remote_build > local_build) {
+            is_newer = true;
+        }
+    }
+    if (!is_newer) {
+        printf("You are on the current release for this branch.\n");
+        return;
+    }
+
+    download_build_and_swap_update(local.branch, false);
+    /* Only reachable if the update attempt itself failed -- its own
+     * error path already printed why and left the current install
+     * untouched. */
 }
 
 /* ------------------------------------------------------------------ *
@@ -3493,6 +3566,10 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--diag-pid") == 0) {
             g_diag_pid_mode = true;
         }
+        if (strcmp(argv[i], "--check-updates") == 0) {
+            g_check_updates_mode = true;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--force-pair") == 0) {
             g_metallica_mis_force_pair = 1;
         }
@@ -3504,19 +3581,21 @@ int main(int argc, char **argv) {
      * CLI, so options 1/2 don't each need their own privilege prompt.
      *
      * Counter-based instead of the old fixed 4-slot array -- now that
-     * --q/--quiet, --deploy-agent, --diag-pid, and --force-pair can all
-     * be present at once, the old hardcoded "sudo_argv[2] = flag or
-     * NULL" approach could only carry one flag through the re-exec.
-     * This builds the argv up to however many flags actually apply. */
+     * --q/--quiet, --deploy-agent, --diag-pid, --check-updates, and
+     * --force-pair can all be present at once, the old hardcoded
+     * "sudo_argv[2] = flag or NULL" approach could only carry one flag
+     * through the re-exec. This builds the argv up to however many
+     * flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[7];
+        char *sudo_argv[8];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
         if (!g_verbose_boot) sudo_argv[ai++] = "--q";
         if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
+        if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
         if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
@@ -3555,6 +3634,15 @@ int main(int argc, char **argv) {
     if (g_diag_pid_mode) {
         g_detected_sensor = detect_supported_sensor();
         run_diagnose_mode();
+        return 0;
+    }
+
+    /* --check-updates short-circuits straight to run_check_updates_mode(),
+     * same before-the-banner dispatch as --diag-pid/--deploy-agent above.
+     * No sensor probing needed here -- unlike diag/deploy-agent this
+     * never touches g_detected_sensor at all. */
+    if (g_check_updates_mode) {
+        run_check_updates_mode();
         return 0;
     }
 
