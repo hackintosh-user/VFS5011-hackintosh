@@ -579,6 +579,28 @@ static int with_hdr(local_bb_t *out, uint16_t id, const unsigned char *body, siz
     return 0;
 }
 
+/*
+ * mmis_hexdump() -- diagnostic-only raw byte dump, 16 bytes/line with
+ * an offset prefix. Local copy of the same helper in
+ * metallica_mis_daemon.c (that one is static there and not exposed
+ * via a header) -- used here to inspect the exact outgoing cmd 0x4f
+ * bytes and the device's full raw reply when partition_flash() fails
+ * with a status assert_status() alone can't explain (Sep 16 log:
+ * status=0x0404, first real flash-write cmd 0x4f ever sent to real
+ * hardware). Not performance-sensitive -- diagnostic path only.
+ */
+static void mmis_hexdump(const char *label, const unsigned char *buf, size_t len) {
+    fprintf(stderr, "metallica_mis: %s (%zu bytes):\n", label, len);
+    for (size_t i = 0; i < len; i += 16) {
+        fprintf(stderr, "  %04zx: ", i);
+        size_t line_len = (len - i < 16) ? (len - i) : 16;
+        for (size_t j = 0; j < line_len; j++) {
+            fprintf(stderr, "%02x ", buf[i + j]);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
 /* ==================== partition_flash() ==================== */
 
 int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identity_t *identity,
@@ -661,19 +683,25 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
         fprintf(stderr, "metallica_mis: partition_flash(): malloc(rsp) failed\n");
         goto done;
     }
+    mmis_hexdump("outgoing cmd 0x4f (partition_flash)", cmd.data, cmd.len);
     n = metallica_mis_tls_cmd(tls, cmd.data, cmd.len, rsp, rsp_cap);
     if (n < 2) {
         fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f device reply "
                          "too short (n=%d) -- device did not respond as expected to "
                          "the partition-table write, sent %zu bytes\n", n, cmd.len);
+        if (n > 0) mmis_hexdump("cmd 0x4f reply (short)", rsp, (size_t)n);
         goto done; /* assert_status()-equivalent -- too short to even hold a status word */
     }
+    mmis_hexdump("cmd 0x4f reply (raw)", rsp, (size_t)n);
 
     {
         unsigned short status = (unsigned short)rsp[0] | ((unsigned short)rsp[1] << 8);
         if (status != 0) {
             fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f (write "
-                             "partition table + cert) failed, status=0x%04x\n", status);
+                             "partition table + cert) failed, status=0x%04x -- see raw "
+                             "reply hexdump above for anything beyond the status word "
+                             "(the device sometimes appends detail bytes assert_status() "
+                             "doesn't know how to interpret)\n", status);
             goto done;
         }
     }
