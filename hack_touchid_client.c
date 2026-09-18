@@ -745,6 +745,15 @@ static bool g_diag_pid_mode = false;
  * other flags do. */
 static bool g_check_updates_mode = false;
 
+/* Set by argv parsing in main() when "--post-update" is passed. Only
+ * ever passed by download_build_and_swap_update()'s own relaunch
+ * execv() below -- never something a user types. Triggers a one-time
+ * "update installed" confirmation line right before the normal
+ * "Welcome to HTID Client!" banner, then does nothing further; there's
+ * no persistent state to clear since this flag only exists for the
+ * single relaunched process's lifetime. */
+static bool g_post_update_mode = false;
+
 static void vfsc_boot_line(const char *fmt, ...) {
     if (!g_verbose_boot) return;
 
@@ -3059,10 +3068,12 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
 
     char new_path[PATH_MAX];
     snprintf(new_path, sizeof(new_path), "%s/hack-touchid", g_exec_dir);
-    char *new_argv[3];
-    new_argv[0] = new_path;
-    new_argv[1] = g_verbose_boot ? NULL : (char *)"--q";
-    new_argv[2] = NULL;
+    char *new_argv[4];
+    int nai = 0;
+    new_argv[nai++] = new_path;
+    if (!g_verbose_boot) new_argv[nai++] = (char *)"--q";
+    new_argv[nai++] = (char *)"--post-update";
+    new_argv[nai++] = NULL;
     execv(new_path, new_argv);
 
     /* execv() only returns on failure -- the update itself did
@@ -3570,6 +3581,9 @@ int main(int argc, char **argv) {
             g_check_updates_mode = true;
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--post-update") == 0) {
+            g_post_update_mode = true;
+        }
         if (strcmp(argv[i], "--force-pair") == 0) {
             g_metallica_mis_force_pair = 1;
         }
@@ -3717,6 +3731,10 @@ int main(int argc, char **argv) {
      * avoid a duplicate. */
     if (g_verbose_boot) {
         print_banner();
+    }
+
+    if (g_post_update_mode) {
+        printf("%sUpdate was successfully deployed & installed! :)%s\n\n", VFSC_YELLOW, VFSC_RESET);
     }
 
     printf("%sWelcome to HTID Client!%s\n\n", VFSC_BOLD, VFSC_RESET);
