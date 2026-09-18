@@ -1198,6 +1198,26 @@ static bool read_local_version_file(client_version_info_t *out) {
     return parse_version_file(buf, out);
 }
 
+/* Writes VERSION.txt back out in the same KEY=value format
+ * parse_version_file() reads, next to the binary (g_exec_dir) same as
+ * read_local_version_file() reads from. Used by the Settings [7] beta
+ * toggle below to persist a BRANCH= change -- always writes every
+ * field (not just the one that changed), so the caller is responsible
+ * for filling in the rest of *info from the existing cached copy
+ * first rather than passing a half-empty struct. */
+static bool write_local_version_file(const client_version_info_t *info) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) return false;
+
+    fprintf(fp, "VERSION=%s\nBUILD=%s\nBRANCH=%s\nCRITICAL=%s\n",
+            info->version, info->build, info->branch, info->critical ? "true" : "false");
+    fclose(fp);
+    return true;
+}
+
 /* Loaded once, lazily, on the first call to print_banner() (the
  * earliest point in every boot path where g_exec_dir is already
  * populated) -- both print_banner() itself (build number in the
@@ -2486,6 +2506,46 @@ static void do_settings_adjust_threshold(void) {
             new_threshold);
 }
 
+/* Flips VERSION.txt's BRANCH= between "active-development" (beta/
+ * testing builds) and "main" (stable releases) -- an explicit opt-in/
+ * opt-out beta toggle rather than the branch just being whatever the
+ * currently-installed build happened to ship with. Rewrites
+ * VERSION.txt on disk (preserving VERSION=/BUILD=/CRITICAL=, only
+ * BRANCH= changes) and updates the in-memory cache immediately, so
+ * the update checker later in this same session already sees the new
+ * branch with no relaunch needed. The actual switch (downloading/
+ * building main instead of active-development, or vice versa) still
+ * only happens on the next real update check/install -- this just
+ * changes which branch that next check compares against and pulls
+ * from. */
+static void do_settings_toggle_beta(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        vfsc_err("No local %s found -- can't toggle beta updates on a build from "
+                 "before this feature existed. Update once normally first.\n\n",
+                 VERSION_FILE_NAME);
+        return;
+    }
+
+    bool currently_beta = (strcmp(g_local_version_info.branch, "active-development") == 0);
+    const char *new_branch = currently_beta ? "main" : "active-development";
+    snprintf(g_local_version_info.branch, sizeof(g_local_version_info.branch), "%s", new_branch);
+
+    if (!write_local_version_file(&g_local_version_info)) {
+        vfsc_err("Failed to write %s: %s\n\n", VERSION_FILE_NAME, strerror(errno));
+        return;
+    }
+
+    if (currently_beta) {
+        vfsc_ok("Beta updates OFF. Now tracking \"main\" (stable releases).\n\n");
+    } else {
+        vfsc_ok("Beta updates ON. Now tracking \"active-development\" (newest fixes "
+                "land here first, may be less stable).\n\n");
+    }
+}
+
 static void print_settings_menu(void) {
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
@@ -2496,6 +2556,12 @@ static void print_settings_menu(void) {
     printf("%s[4]%s Set Up / Repair Template Volume\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[5]%s Grant/Verify Accessibility Permission\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[6]%s Adjust Match Threshold (current: %d)\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    printf("%s[7]%s Toggle Beta Updates (current: %s)\n", VFSC_BOLD, VFSC_RESET,
+           g_local_version_loaded && g_local_version_info.branch[0] != '\0'
+               ? g_local_version_info.branch : "unknown");
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -2532,9 +2598,10 @@ static void do_settings_menu(void) {
             case '4': do_settings_setup_volume(); break;
             case '5': do_settings_grant_accessibility(); break;
             case '6': do_settings_adjust_threshold(); break;
+            case '7': do_settings_toggle_beta(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-6 or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-7 or B.\n\n", line);
         }
     }
 }
