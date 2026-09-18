@@ -2501,7 +2501,7 @@ static void do_settings_menu(void) {
     char line[64];
     for (;;) {
         print_settings_menu();
-        printf("%s<VFSC Settings>%s ", VFSC_BOLD, VFSC_RESET);
+        printf("%s<Hack-touchid Settings>%s ", VFSC_BOLD, VFSC_RESET);
         fflush(stdout);
 
         if (!fgets(line, sizeof(line), stdin)) {
