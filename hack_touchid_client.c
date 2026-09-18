@@ -1420,6 +1420,116 @@ static int list_enrolled_fingers(const char *fingers_dir,
     return count;
 }
 
+/* Forward declaration -- defined further below, but needed here so
+ * confirm_shared_store_if_needed() can check it before mounting. */
+static int is_volume_configured(void);
+
+/* Counts distinct macOS installs (System-role volumes) inside the same
+ * APFS container as the HackTouchIDStore volume. A store found by
+ * name (see is_volume_configured()'s comment on universality) may be
+ * sitting in a container that hosts more than one bootable macOS --
+ * a real dual/multi-boot setup, not just "this install's own
+ * volume". Returns 0 if the container/count can't be determined
+ * (treated as "can't tell, don't gate on it"), otherwise the number
+ * of System volumes found (1 for a normal single-OS setup). */
+static int count_macos_installs_sharing_store(void) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "diskutil info \"%s\" 2>/dev/null", VOLUME_NAME);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    char container_id[64] = {0};
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "APFS Container:");
+        if (p) {
+            p += strlen("APFS Container:");
+            while (*p == ' ') p++;
+            sscanf(p, "%63s", container_id);
+            break;
+        }
+    }
+    pclose(fp);
+    if (container_id[0] == '\0') return 0;
+
+    snprintf(cmd, sizeof(cmd), "diskutil apfs list \"%s\" 2>/dev/null", container_id);
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    int system_count = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "Role:") && strstr(line, "System")) system_count++;
+    }
+    pclose(fp);
+    return system_count;
+}
+
+/* Counts every APFS volume named exactly VOLUME_NAME, system-wide
+ * (unlike count_macos_installs_sharing_store(), not scoped to one
+ * container -- a stray duplicate could be in a different container
+ * entirely). Normally 1. 0 or a popen failure both read as "can't
+ * tell" here (mirrors count_macos_installs_sharing_store()'s
+ * convention), so callers should only act on a definite >1. */
+static int count_store_volume_duplicates(void) {
+    FILE *fp = popen("diskutil apfs list 2>/dev/null", "r");
+    if (!fp) return 0;
+    char line[512];
+    int count = 0;
+    size_t name_len = strlen(VOLUME_NAME);
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "Name:");
+        if (!p) continue;
+        p += strlen("Name:");
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, VOLUME_NAME, name_len) == 0) {
+            char next = p[name_len];
+            if (next == '\0' || next == '\n' || next == '\r' || next == ' ') count++;
+        }
+    }
+    pclose(fp);
+    return count;
+}
+
+/* One-time-per-run gate in front of mounting an existing store: if
+ * its container turns out to host more than one macOS install, every
+ * one of them reads/writes the SAME templates and auto-type
+ * password, which is worth an explicit yes rather than silently
+ * sharing fingerprints across OSes. Cached via g_shared_store_prompted
+ * so a session doing several enroll/verify/deploy calls only asks
+ * once. Returns 1 if it's fine to proceed (nothing to share yet, a
+ * single-OS container, or the user allowed it), 0 if declined. */
+static int g_shared_store_prompted = 0;
+static int confirm_shared_store_if_needed(void) {
+    if (g_shared_store_prompted) return 1;
+    g_shared_store_prompted = 1;
+
+    if (!is_volume_configured()) return 1; /* nothing exists to share yet */
+
+    int dupes = count_store_volume_duplicates();
+    if (dupes > 1) {
+        vfsc_warn("%d volumes named \"%s\" found -- the mount script will pick the\n",
+                  dupes, VOLUME_NAME);
+        printf("one that actually has data, but you should clean up the rest\n");
+        printf("(diskutil apfs deleteVolume) once you've confirmed which is stale.\n\n");
+    }
+
+    int os_count = count_macos_installs_sharing_store();
+    if (os_count <= 1) return 1;
+
+    vfsc_warn("%d operating systems detected sharing this container.\n", os_count);
+    printf("Using shared volume \"%s\" -- all fingerprint templates and the\n", VOLUME_NAME);
+    printf("auto-type password are visible to every install that mounts it.\n");
+    printf("Allow this action? [y/N]: ");
+    fflush(stdout);
+    char line[8];
+    if (!fgets(line, sizeof(line), stdin) || (line[0] != 'y' && line[0] != 'Y')) {
+        printf("Cancelled.\n\n");
+        return 0;
+    }
+    printf("\n");
+    return 1;
+}
+
 /* Mounts the encrypted template volume via hack-touchid-volume-mount.sh,
  * capturing the mount point path it prints on success. The script's
  * own diagnostic lines are captured but only surfaced if the mount
@@ -1427,6 +1537,8 @@ static int list_enrolled_fingers(const char *fingers_dir,
  * every enroll/verify/deploy operation. Returns 0 and fills out_path
  * on success. */
 static int mount_template_volume(char *out_path, size_t out_path_size) {
+    if (!confirm_shared_store_if_needed()) return -1;
+
     char cmd[PATH_MAX * 2];
     snprintf(cmd, sizeof(cmd), "\"%s/%s\"", g_exec_dir, MOUNT_SCRIPT_NAME);
 
@@ -3573,6 +3685,14 @@ static void run_diagnose_mode(void) {
     /* -------- Template volume / Accessibility / Fingers -------- */
     printf("-- Template Volume --\n");
     printf("Configured: %s\n", is_volume_configured() ? "yes" : "no");
+    {
+        int dupes = count_store_volume_duplicates();
+        if (dupes > 1) {
+            printf("WARNING: %d volumes named \"%s\" found -- mounting is ambiguous by\n"
+                   "name until you clean up the extras (diskutil apfs deleteVolume).\n",
+                   dupes, VOLUME_NAME);
+        }
+    }
     printf("\n");
 
     printf("-- Accessibility Grant --\n");
