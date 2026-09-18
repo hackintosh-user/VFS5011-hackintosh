@@ -3126,6 +3126,7 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
 
     if (!relaunch) {
         printf("Update installed.\n");
+        printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
         printf("Update was complete, please run sudo hack-touchid to launch the client.\n\n");
         return true;
     }
