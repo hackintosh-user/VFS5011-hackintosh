@@ -87,7 +87,7 @@ LED can be too dim to notice on its own.
   authenticate! 🫆"), then whether it succeeded or failed
 - One-click toggle to pause/resume fingerprint auth without touching Terminal
 - Registers itself as a login item automatically on first launch (macOS
-  13+, via `SMAppService` — no manual LaunchAgent setup needed)
+  14+, via `SMAppService` — no manual LaunchAgent setup needed)
 - "About hackintosh Touch-ID" menu item with a short project summary and a link back
   here
 
@@ -105,7 +105,7 @@ open "build/Hackintosh Touch-ID.app"
 ```
 
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-and `iconutil`. No other dependencies. And it needs **macOS 13 Ventura and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
+and `iconutil`. No other dependencies. And it needs **macOS 14 Sonoma and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
 
 First launch will be blocked by Gatekeeper since this is ad-hoc signed,
 not notarized with a paid Apple Developer account — right-click the app →
@@ -117,7 +117,7 @@ The menu bar app talks to the daemon over macOS distributed
 notifications — the same mechanism the daemon already uses for its own
 `screenIsLocked`/`screenIsUnlocked` handling. **The daemon needs a small
 patch to actually send those events**; see
-[`vfs5011-menubar/daemon-patch/README.md`](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md)
+[it's own README](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md)
 
 for the exact 6-line diff against `vfs5011_daemon.c`. Without the patch,
 the app runs standalone and just never receives anything — harmless, but
@@ -134,7 +134,7 @@ Known limitations:
 
 
 ## Requirements
-- **macOS 13 Ventura and later** (older versions may work, but I offer **0 support for them**)
+- **macOS 14 Sonoma and later** (older versions may work, but I offer **0 support for them**)
 - **macOS 15 Sequoia and later is the recommended version for Hackintosh Touch-ID** 
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
@@ -168,7 +168,7 @@ clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationSer
 
 ## Usage
 
-**WARINING 1**: On macOS 12 Monterey And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 13 Ventura and later** you are on your own for any issues that may arise on this version of macOS.
+**WARINING 1**: On macOS 13 Ventura And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 14 Sonoma and later** you are on your own for any issues that may arise on this version of macOS.
 
 **WARNING 2**: Same goes for the OpenCore Boot loader: the minimum version is OpenCore v1.0.6 or later. v1.0.5 and older are officially not supported. You are on your own if you encounter any issues on v1.0.5 or older.
 
