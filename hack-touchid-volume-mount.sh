@@ -119,16 +119,60 @@ PASSPHRASE=$(security find-generic-password \
     /Library/Keychains/System.keychain 2>/dev/null || true)
 
 adopt_one() {
-    # Interactively adopts the single disk identifier passed in: prompts
-    # for its passphrase, unlocks it at $MOUNT_POINT, and on success
-    # saves the passphrase into the System keychain (overwriting
-    # whatever was there). Echoes the mount point on success.
+    # Interactively adopts the single disk identifier passed in: first
+    # offers to pull the passphrase straight out of ANOTHER macOS
+    # install's own System keychain (if that install is on the same
+    # disk and currently mounted, its System.keychain is just a file
+    # sitting under its own /Library/Keychains -- security's -w flag
+    # can be pointed at any keychain PATH, not just the default one),
+    # then falls back to typing the passphrase directly if that
+    # doesn't pan out. Unlocks it at $MOUNT_POINT, and on success
+    # saves the passphrase into THIS install's System keychain
+    # (overwriting whatever was there). Echoes the mount point on
+    # success.
+    #
+    # CAVEAT: this only works if the other install's System.keychain
+    # is itself already unlocked/readable as a plain file read from
+    # here -- that's the normal case for a keychain on a mounted
+    # volume, but hasn't been confirmed against every macOS version.
+    # If it doesn't work, the manual prompt right below is always the
+    # fallback.
     local diskid="$1"
 
     if [ ! -e /dev/tty ]; then
         echo "No passphrase in this install's System keychain unlocks $diskid, and no" >&2
         echo "terminal is attached to ask for one. Re-run this interactively once." >&2
         return 1
+    fi
+
+    local other_mount other_keychain other_pass
+    read -r -p "If another macOS install on this disk might already have this volume's passphrase, enter its mount point (e.g. /Volumes/Macintosh HD) to try pulling it from there, or press Enter to type the passphrase yourself: " other_mount < /dev/tty > /dev/tty 2>&1
+
+    if [ -n "$other_mount" ]; then
+        other_keychain="${other_mount%/}/Library/Keychains/System.keychain"
+        if [ -f "$other_keychain" ]; then
+            other_pass=$(security find-generic-password \
+                -a "$KEYCHAIN_ACCOUNT" \
+                -s "$KEYCHAIN_SERVICE" \
+                -w \
+                "$other_keychain" 2>/dev/null || true)
+            if [ -n "$other_pass" ] && echo "$other_pass" | diskutil apfs unlockVolume "$diskid" -mountpoint "$MOUNT_POINT" -stdinpassphrase >/dev/null 2>&1; then
+                security add-generic-password -U \
+                    -a "$KEYCHAIN_ACCOUNT" \
+                    -s "$KEYCHAIN_SERVICE" \
+                    -w "$other_pass" \
+                    /Library/Keychains/System.keychain 2>/dev/null
+                echo "Pulled the passphrase from $other_keychain and adopted $diskid --" >&2
+                echo "saved to this install's System keychain." >&2
+                echo "$MOUNT_POINT"
+                return 0
+            fi
+            echo "That keychain either has no matching entry or it doesn't unlock $diskid" >&2
+            echo "-- falling back to typing the passphrase directly." >&2
+        else
+            echo "No System.keychain found at $other_keychain -- falling back to typing" >&2
+            echo "the passphrase directly." >&2
+        fi
     fi
 
     echo "Enter the encryption passphrase for $diskid to adopt it -- it will be" >&2
@@ -153,6 +197,7 @@ adopt_one() {
     done
     return 1
 }
+
 
 finish_mount() {
     # $1 = the path the volume is actually sitting at right now.
