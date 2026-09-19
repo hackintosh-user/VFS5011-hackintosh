@@ -12,17 +12,19 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 echo "==> Compiling Swift source"
-# -target pins the deployment target explicitly to macOS 13.0 (Ventura).
-# Without this, swiftc falls back to whatever the build host's Xcode/SDK
-# defaults to -- on a Sequoia dev machine that's typically much higher
-# than 13.0, and that value gets baked into the binary's LC_BUILD_VERSION
-# load command. THAT load command, not Info.plist's LSMinimumSystemVersion,
-# is what actually blocks launch with "You can't use this version of the
-# application with this version of macOS" on older OSes. Keep this in
-# sync with LSMinimumSystemVersion in Info.plist.
+# -target pins the deployment target explicitly to macOS 14.0 (Sonoma,
+# the project floor as of Sep 2026 -- Homebrew isn't practically usable
+# on Ventura). Without this, swiftc falls back to whatever the build
+# host's Xcode/SDK defaults to -- on a Sequoia dev machine that's
+# typically much higher than 14.0, and that value gets baked into the
+# binary's LC_BUILD_VERSION load command. THAT load command, not
+# Info.plist's LSMinimumSystemVersion, is what actually blocks launch
+# with "You can't use this version of the application with this
+# version of macOS" on older OSes. Keep this in sync with
+# LSMinimumSystemVersion in Info.plist.
 swiftc "$SRC_DIR/AppDelegate.swift" \
     -o "$APP_BUNDLE/Contents/MacOS/HackintoshTouchID" \
-    -target x86_64-apple-macosx13.0 \
+    -target x86_64-apple-macosx14.0 \
     -parse-as-library \
     -framework Cocoa \
     -framework UserNotifications \
