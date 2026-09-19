@@ -1736,6 +1736,9 @@ static void print_menu(void) {
     if (is_upek_sensor(g_detected_sensor)) {
         printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
     }
+    if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+        printf("%s[C]%s View Fingerprint (capture preview, nothing saved)\n", VFSC_BOLD, VFSC_RESET);
+    }
     printf("\n");
     printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
@@ -2092,6 +2095,73 @@ static void do_test_upek_capture(void) {
             "(need >= %d to be usable for Enroll/Verify). Raw capture "
             "also saved to %s.\n\n",
             width, height, tmpl.nrows, MIN_MINUTIAE, debug_path);
+}
+
+/* [C] View Fingerprint -- captures one swipe and saves it as a
+ * viewable .pgm image, purely for visual inspection. Deliberately
+ * lighter-weight than do_enroll()/do_verify(): no minutiae
+ * extraction, no template volume, no enrolled-finger storage touched
+ * at all. Reuses the same capture_fingerprint_image() dispatch and
+ * .pgm-writing shape already proven in do_test_upek_capture() above.
+ *
+ * Only sensors with an actual raw-image capture path support this.
+ * Metallica MIS is match-in-sensor -- enroll/verify both happen on
+ * the chip itself, so there's no raw swipe image to retrieve at all,
+ * not even in principle. Refused with an explanation here rather than
+ * left to fail confusingly deeper in capture_fingerprint_image(),
+ * which has no Metallica MIS branch to begin with. */
+static void do_view_fingerprint(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected.\n\n");
+        return;
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("%s is match-in-sensor -- enrollment and matching happen on "
+                  "the chip itself, so there's no raw swipe image to view.\n\n",
+                  g_detected_sensor->display_name);
+        return;
+    }
+    if (!g_detected_sensor->backend_available) {
+        vfsc_warn("%s's capture backend isn't confirmed working on real "
+                   "hardware yet, but trying anyway -- this is just a "
+                   "preview, nothing gets saved to enrolled-finger storage.\n\n",
+                   g_detected_sensor->display_name);
+    }
+
+    if (open_device() != 0) {
+        vfsc_err("Could not open the sensor.\n\n");
+        return;
+    }
+    printf("Swipe your finger across the sensor now...\n");
+    int height = 0;
+    unsigned char *image = capture_fingerprint_image(g_handle, &height);
+    close_device();
+
+    if (!image) {
+        vfsc_err("Capture failed -- check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        return;
+    }
+
+    int width = current_sensor_image_width();
+    const char *path = "/tmp/hack-touchid-preview.pgm";
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        vfsc_err("Captured a %d x %d image but couldn't save it: %s\n\n",
+                  width, height, strerror(errno));
+        free(image);
+        return;
+    }
+    fprintf(fp, "P5\n%d %d\n255\n", width, height);
+    fwrite(image, 1, (size_t)width * (size_t)height, fp);
+    fclose(fp);
+    free(image);
+
+    vfsc_ok("Captured %d x %d image, saved to %s.\n", width, height, path);
+    printf("Opening it now...\n\n");
+    char open_cmd[PATH_MAX + 16];
+    snprintf(open_cmd, sizeof(open_cmd), "open \"%s\"", path);
+    system(open_cmd);
 }
 
 /* Enrolls ONE named finger. Multiple fingers can be enrolled by
@@ -4077,6 +4147,14 @@ int main(int argc, char **argv) {
             case 'U': case 'u':
                 if (is_upek_sensor(g_detected_sensor)) {
                     do_test_upek_capture();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'C': case 'c':
+                if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+                    do_view_fingerprint();
                 } else {
                     printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
                     ran_action = false;
