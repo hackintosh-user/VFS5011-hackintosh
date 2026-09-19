@@ -19,7 +19,7 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>14.0</string>
 	<!-- Hides the app from the Dock and Cmd+Tab switcher; it only lives
 	     in the menu bar. Belt-and-suspenders with the runtime
 	     NSApp.setActivationPolicy(.accessory) call in AppDelegate. -->
