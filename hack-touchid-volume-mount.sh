@@ -166,6 +166,81 @@ finish_mount() {
     echo "$1"
 }
 
+# --list: pure inspection, no prompts, no state changes beyond briefly
+# unlocking a candidate to peek at its contents (relocked afterward if
+# we're the one who opened it). One line per candidate on stdout:
+#   diskid|mountpoint-or-dash|data-yes-no-or-unknown
+# "unknown" means locked and the stored passphrase didn't open it --
+# that's the case a human (or --link) needs to resolve. Used by the
+# client's [8] Link to a Different Volume / Check for Orphans.
+if [ "${1:-}" = "--list" ]; then
+    for diskid in "${CANDIDATES[@]}"; do
+        mpath=$(candidate_mount_point "$diskid")
+        opened_here=0
+        if [ -z "$mpath" ] && [ -n "$PASSPHRASE" ]; then
+            if echo "$PASSPHRASE" | diskutil apfs unlockVolume "$diskid" -mountpoint "$MOUNT_POINT" -stdinpassphrase >/dev/null 2>&1; then
+                mpath="$MOUNT_POINT"
+                opened_here=1
+            fi
+        fi
+        if [ -n "$mpath" ]; then
+            if candidate_has_data "$mpath"; then data="yes"; else data="no"; fi
+        else
+            data="unknown"
+        fi
+        echo "${diskid}|${mpath:--}|${data}"
+        [ "$opened_here" -eq 1 ] && lock_candidate "$diskid"
+    done
+    exit 0
+fi
+
+# --link <diskid>: explicit, user-directed adopt of ONE specific
+# candidate (as opposed to the automatic adopt/data-detection the
+# no-argument mode does on its own). Meant for the case where more
+# than one candidate has data, or the automatic pass already declined
+# to guess -- the client lists candidates via --list, the person
+# picks one, and this does the actual passphrase prompt + keychain
+# write for that specific disk id. Mounts and immediately unmounts
+# again (a "link" is a one-time keychain-linking action, not a
+# request to leave it mounted).
+if [ "${1:-}" = "--link" ]; then
+    TARGET="${2:-}"
+    if [ -z "$TARGET" ]; then
+        echo "--link requires a disk identifier (see --list)." >&2
+        exit 1
+    fi
+    found=0
+    for diskid in "${CANDIDATES[@]}"; do
+        [ "$diskid" = "$TARGET" ] && found=1 && break
+    done
+    if [ "$found" -ne 1 ]; then
+        echo "$TARGET is not a volume named \"$VOLUME_NAME\" right now (see --list)." >&2
+        exit 1
+    fi
+
+    EXISTING_MOUNT=$(candidate_mount_point "$TARGET")
+    if [ -n "$EXISTING_MOUNT" ]; then
+        # Already mounted (e.g. macOS auto-mounted it) -- nothing to
+        # unlock, but its passphrase still isn't necessarily the one
+        # in the keychain. diskutil has no "what's the passphrase of
+        # an already-unlocked volume" query, so the best this can do
+        # without one is confirm it's readable and leave the keychain
+        # as-is; a future mount that finds it unmounted will still
+        # hit the normal adopt flow if the keychain entry is wrong.
+        echo "$TARGET is already mounted at $EXISTING_MOUNT -- nothing to link," >&2
+        echo "it's already accessible." >&2
+        exit 0
+    fi
+
+    if adopt_one "$TARGET" >/dev/null; then
+        diskutil unmount "$MOUNT_POINT" >/dev/null 2>&1 || true
+        echo "Linked -- $TARGET is now this install's HackTouchIDStore." >&2
+        exit 0
+    fi
+    echo "Could not link $TARGET after $ADOPT_MAX_ATTEMPTS attempts." >&2
+    exit 1
+fi
+
 if [ "${#CANDIDATES[@]}" -eq 1 ]; then
     DISKID="${CANDIDATES[0]}"
 
@@ -181,9 +256,16 @@ if [ "${#CANDIDATES[@]}" -eq 1 ]; then
         exit 1
     fi
 
-    echo "$PASSPHRASE" | diskutil apfs unlockVolume "$DISKID" -mountpoint "$MOUNT_POINT" -stdinpassphrase
-    finish_mount "$MOUNT_POINT"
-    exit 0
+    if echo "$PASSPHRASE" | diskutil apfs unlockVolume "$DISKID" -mountpoint "$MOUNT_POINT" -stdinpassphrase; then
+        finish_mount "$MOUNT_POINT"
+        exit 0
+    fi
+
+    echo "The stored passphrase didn't unlock $DISKID (stale, or this isn't the" >&2
+    echo "volume it belongs to) -- falling back to adopt." >&2
+    adopt_one "$DISKID" && exit 0
+    echo "Could not adopt $DISKID after $ADOPT_MAX_ATTEMPTS attempts." >&2
+    exit 1
 fi
 
 # --- More than one volume named HackTouchIDStore. Figure out which
