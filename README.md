@@ -70,7 +70,10 @@ Features with Hackintosh Touch-ID:
 - Interactive terminal client (`hack-touchid_client`) for enrollment, verification, and one-command deployment of the background daemon
 -  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
 -  Growing supported sensor list with testers.
--  Auto Updating Client that auto extracts, runs chmod, re-launches new update, and deletes the old files.
+-  Auto Updating Client that auto extracts, runs chmod, re-launches new update, and deletes the old files
+- [D] Diagnose option for debugging issues, and opening issues on github
+- Multi operating system (macOS) support on one APFS encrypted volume
+- Multiple Launch-arguments for easier access like --q or --diag-pid, there's more [Read about them here](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
 
  
 ## Menu Bar Companion App (optional)
