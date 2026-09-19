@@ -308,6 +308,6 @@ driver exists.
 
 ## License
 
-Released under the BSD 3-Clause License. See [LICENSE](LICENSE) for
+Released under the BSD 3-Clause License. See [LICENSE](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development?tab=License-1-ov-file) for
 the full text, including third-party attribution for NBIS and the
 VFS5011 capture protocol.
