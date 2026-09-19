@@ -730,9 +730,32 @@ int metallica_mis_send_init(void) {
     unsigned char reply[256];
     int n;
 
-    /* Step 1: RomInfo.get() */
-    n = cmd(metallica_mis_cmd_rominfo, sizeof(metallica_mis_cmd_rominfo), reply, sizeof(reply));
-    if (n < 0) return -1;
+    /* Step 1: RomInfo.get() -- retry on transient busy (0x0104).
+     * Confirmed real quirk on this exact chip family (Synaptics
+     * Metallica MIS / 06cb:009a and siblings): right after the USB
+     * device is opened, the sensor can reply busy to the first
+     * command or two and only give a real answer once it's settled.
+     * python-validity itself has no retry here at all (upstream
+     * hard-fails), so this is intentionally more lenient than a
+     * literal port -- added Sep 19 after a community report
+     * (github.com/uunicorn/python-validity/issues/272) documented
+     * this exact busy-then-settles behavior with a working fix. Up
+     * to 20 tries, half a second apart (~10s worst case), matching
+     * that report's own retry count. */
+    for (int tries = 0; ; tries++) {
+        n = cmd(metallica_mis_cmd_rominfo, sizeof(metallica_mis_cmd_rominfo), reply, sizeof(reply));
+        if (n < 0) return -1;
+        if (n >= 2) {
+            unsigned short stat = (unsigned short)reply[0] | ((unsigned short)reply[1] << 8);
+            if (stat == 0x0104 && tries < 20) {
+                fprintf(stderr, "metallica_mis: RomInfo.get() busy (0x0104), retrying "
+                                 "(%d/20)...\n", tries + 1);
+                usleep(500000);
+                continue;
+            }
+        }
+        break;
+    }
     if (assert_status(reply, n) != 0) {
         fprintf(stderr, "metallica_mis: RomInfo.get() failed\n");
         return -1;
@@ -745,11 +768,26 @@ int metallica_mis_send_init(void) {
     n = cmd(metallica_mis_cmd_19, sizeof(metallica_mis_cmd_19), reply, sizeof(reply));
     if (n < 0) return -1;
 
-    /* Step 3: get_fw_info() -- reply layout per python-validity's
-     * send_init(): 2-byte status word, then a 2-byte little-endian
-     * "err" field. err != 0 means fwext isn't loaded ("Clean slate"). */
-    n = cmd(metallica_mis_cmd_fwinfo, sizeof(metallica_mis_cmd_fwinfo), reply, sizeof(reply));
-    if (n < 0) return -1;
+    /* Step 3: get_fw_info() -- same busy-retry as step 1 (see doc
+     * comment above); this is the other command the #272 report
+     * specifically called out as seeing 0x0104 on a cold sensor.
+     * reply layout per python-validity's send_init(): 2-byte status
+     * word, then a 2-byte little-endian "err" field. err != 0 means
+     * fwext isn't loaded ("Clean slate"). */
+    for (int tries = 0; ; tries++) {
+        n = cmd(metallica_mis_cmd_fwinfo, sizeof(metallica_mis_cmd_fwinfo), reply, sizeof(reply));
+        if (n < 0) return -1;
+        if (n >= 2) {
+            unsigned short stat = (unsigned short)reply[0] | ((unsigned short)reply[1] << 8);
+            if (stat == 0x0104 && tries < 20) {
+                fprintf(stderr, "metallica_mis: get_fw_info() busy (0x0104), retrying "
+                                 "(%d/20)...\n", tries + 1);
+                usleep(500000);
+                continue;
+            }
+        }
+        break;
+    }
     if (n < 4) {
         fprintf(stderr, "metallica_mis: get_fw_info() reply too short (%d bytes)\n", n);
         return -1;

@@ -22,6 +22,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
@@ -684,26 +685,50 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
         goto done;
     }
     mmis_hexdump("outgoing cmd 0x4f (partition_flash)", cmd.data, cmd.len);
-    n = metallica_mis_tls_cmd(tls, cmd.data, cmd.len, rsp, rsp_cap);
-    if (n < 2) {
-        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f device reply "
-                         "too short (n=%d) -- device did not respond as expected to "
-                         "the partition-table write, sent %zu bytes\n", n, cmd.len);
-        if (n > 0) mmis_hexdump("cmd 0x4f reply (short)", rsp, (size_t)n);
-        goto done; /* assert_status()-equivalent -- too short to even hold a status word */
-    }
-    mmis_hexdump("cmd 0x4f reply (raw)", rsp, (size_t)n);
 
-    {
-        unsigned short status = (unsigned short)rsp[0] | ((unsigned short)rsp[1] << 8);
-        if (status != 0) {
-            fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f (write "
-                             "partition table + cert) failed, status=0x%04x -- see raw "
-                             "reply hexdump above for anything beyond the status word "
-                             "(the device sometimes appends detail bytes assert_status() "
-                             "doesn't know how to interpret)\n", status);
-            goto done;
+    /* Retry cmd 0x4f up to 3 times before giving up. Exploratory, not
+     * a confirmed fix: added Sep 19 after a community report
+     * (github.com/uunicorn/python-validity/issues/272) found this
+     * chip family (Synaptics Metallica MIS) can transiently reject a
+     * command that succeeds on a later attempt with the EXACT SAME
+     * bytes -- that report's confirmed case was RomInfo.get()/
+     * get_fw_info() replying busy (0x0104), not this specific
+     * command or status code, so this is a genuine "let's find out"
+     * rather than a known fix for cmd 0x4f. Resends the identical
+     * cmd.data already built above (not a fresh make_cert() call --
+     * no reason to pay for a new ECDSA signature just to retry the
+     * same write). If this turns out to matter, the status value
+     * that stops retrying is exactly the diagnostic signal worth
+     * capturing in the next log. */
+    unsigned short status = 0xffff;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        n = metallica_mis_tls_cmd(tls, cmd.data, cmd.len, rsp, rsp_cap);
+        if (n < 2) {
+            fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f attempt %d/3 "
+                             "device reply too short (n=%d) -- device did not respond "
+                             "as expected to the partition-table write, sent %zu bytes\n",
+                             attempt, n, cmd.len);
+            if (n > 0) mmis_hexdump("cmd 0x4f reply (short)", rsp, (size_t)n);
+            if (attempt < 3) { usleep(500000); continue; }
+            goto done; /* assert_status()-equivalent -- too short to even hold a status word */
         }
+        mmis_hexdump("cmd 0x4f reply (raw)", rsp, (size_t)n);
+
+        status = (unsigned short)rsp[0] | ((unsigned short)rsp[1] << 8);
+        if (status == 0) break; /* success */
+
+        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f attempt %d/3 "
+                         "(write partition table + cert) failed, status=0x%04x%s\n",
+                         attempt, status, attempt < 3 ? " -- retrying" : "");
+        if (attempt < 3) usleep(500000);
+    }
+    if (status != 0) {
+        fprintf(stderr, "metallica_mis: partition_flash(): cmd 0x4f failed all 3 "
+                         "attempts, last status=0x%04x -- see raw reply hexdump above "
+                         "for anything beyond the status word (the device sometimes "
+                         "appends detail bytes assert_status() doesn't know how to "
+                         "interpret)\n", status);
+        goto done;
     }
 
     /* rsp = rsp[2:]; crt_len = unpack('<L', rsp[:4]); rsp = rsp[4:] */
