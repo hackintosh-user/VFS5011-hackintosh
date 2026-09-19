@@ -2505,6 +2505,112 @@ static void do_settings_setup_volume(void) {
     do_run_volume_setup();
 }
 
+/* --- Settings: [8] Link to a Different Volume / Check for Orphans ---
+ * Runs hack-touchid-volume-mount.sh --list to enumerate every volume
+ * currently named HackTouchIDStore (by disk id, not name -- see that
+ * script's header on why), shows the person what each one looks like
+ * (mounted/locked, has data or not), and lets them explicitly pick
+ * one to link this install to via --link <diskid>. Exists for cases
+ * the automatic mount-time logic won't touch on its own: e.g. a
+ * second macOS install (different APFS container -- discovered on
+ * Sequoia, where the store volume turned out NOT to be the same one
+ * Sonoma was using) that has its own real data, so there's more than
+ * one legitimate candidate and the automatic path refuses to guess.
+ * "Orphans" here just means every candidate that ISN'T the one
+ * linked -- this never deletes anything itself, only points out what
+ * a human might want to clean up with diskutil apfs deleteVolume. */
+static void do_settings_link_volume(void) {
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --list 2>&1", g_exec_dir, MOUNT_SCRIPT_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_err("Could not run the volume scanner: %s\n\n", strerror(errno));
+        return;
+    }
+
+    char diskids[16][64];
+    char mounts[16][PATH_MAX];
+    char datas[16][16];
+    int n = 0;
+    char line[PATH_MAX + 64];
+    while (n < 16 && fgets(line, sizeof(line), fp)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *p1 = strchr(line, '|');
+        if (!p1) continue; /* not a data line -- e.g. a stray script error */
+        char *p2 = strchr(p1 + 1, '|');
+        if (!p2) continue;
+        *p1 = '\0';
+        *p2 = '\0';
+        snprintf(diskids[n], sizeof(diskids[n]), "%s", line);
+        snprintf(mounts[n], sizeof(mounts[n]), "%s", p1 + 1);
+        snprintf(datas[n], sizeof(datas[n]), "%s", p2 + 1);
+        n++;
+    }
+    int status = pclose(fp);
+
+    if (n == 0) {
+        if (status != 0) {
+            vfsc_err("Volume scan failed (exit status %d).\n\n", status);
+        } else {
+            printf("No volumes named \"%s\" found anywhere.\n\n", VOLUME_NAME);
+        }
+        return;
+    }
+
+    printf("Found %d volume%s named \"%s\":\n\n", n, n == 1 ? "" : "s", VOLUME_NAME);
+    for (int i = 0; i < n; i++) {
+        printf("  %s[%d]%s %-12s  %-8s  data: %s%s\n",
+               VFSC_BOLD, i + 1, VFSC_RESET,
+               diskids[i],
+               strcmp(mounts[i], "-") == 0 ? "locked" : "mounted",
+               datas[i],
+               strcmp(datas[i], "unknown") == 0
+                   ? "  (stored passphrase doesn't open this one)" : "");
+    }
+    printf("\n");
+    printf("Pick one to link this install to it (its passphrase becomes the one\n");
+    printf("used automatically from now on), or press Enter to just leave this as\n");
+    printf("a report: ");
+    fflush(stdout);
+
+    char choice[8];
+    if (!fgets(choice, sizeof(choice), stdin)) {
+        printf("\n");
+        return;
+    }
+    int idx = atoi(choice);
+    if (idx < 1 || idx > n) {
+        printf("\n");
+        if (n > 1) {
+            printf("No link made. Whichever of the above you don't need is a candidate\n");
+            printf("for cleanup: \"diskutil apfs deleteVolume <diskid>\".\n\n");
+        }
+        return;
+    }
+    printf("\n");
+
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --link \"%s\"",
+             g_exec_dir, MOUNT_SCRIPT_NAME, diskids[idx - 1]);
+    printf("%s", VFSC_DIM);
+    status = system(cmd);
+    printf("%s", VFSC_RESET);
+    if (status != 0) {
+        vfsc_err("Linking failed (exit status %d) -- see output above.\n\n", status);
+        return;
+    }
+    vfsc_ok("Linked to %s.\n", diskids[idx - 1]);
+    if (n > 1) {
+        printf("The other%s listed above %s a candidate for cleanup once you've\n",
+               n > 2 ? "s" : "", n > 2 ? "are" : "is");
+        printf("confirmed you don't need %s: \"diskutil apfs deleteVolume <diskid>\".\n",
+               n > 2 ? "them" : "it");
+    }
+    printf("\n");
+    g_finger_count = -1; /* force a refresh next time it's shown */
+}
+
 /* Runs hack-touchid-grant-accessibility.sh against the daemon's fixed
  * install path. Safe to call even if the daemon hasn't been deployed
  * yet — the script itself checks the binary exists and reports a
@@ -2674,6 +2780,7 @@ static void print_settings_menu(void) {
     printf("%s[7]%s Toggle Beta Updates (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_local_version_loaded && g_local_version_info.branch[0] != '\0'
                ? g_local_version_info.branch : "unknown");
+    printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -2711,9 +2818,10 @@ static void do_settings_menu(void) {
             case '5': do_settings_grant_accessibility(); break;
             case '6': do_settings_adjust_threshold(); break;
             case '7': do_settings_toggle_beta(); break;
+            case '8': do_settings_link_volume(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-7 or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-8 or B.\n\n", line);
         }
     }
 }
