@@ -1275,6 +1275,28 @@ static void clear_screen_and_redraw_banner(void) {
 #define MAX_ENROLLED_FINGERS 10
 #define PASSWORD_FILENAME "password.txt" /* must match hack-touchid-store-password.sh / vfs5011_daemon.c */
 
+/* FPOV (Fingerprint Operating Verification) -- opt-in check for
+ * dual/triple-boot setups sharing one HackTouchIDStore volume across
+ * more than one macOS install. FPOV-base.txt lives ON the shared
+ * store (the version every install must match); one FPOV-OS<N>.txt
+ * per install lives LOCALLY at FPOV_SUPPORT_DIR on that install's own
+ * boot volume, written during setup. A single-boot install never gets
+ * FPOV_SUPPORT_DIR created at all, so the startup check below finds
+ * nothing and silently does nothing -- this is opt-in, not a default
+ * gate on everyone.
+ *
+ * FPOV_SCHEMA_VERSION is deliberately NOT the same thing as
+ * VFS5011_PROJECT_VERSION/VERSION.txt's BUILD -- that changes on
+ * basically every push, which would make FPOV nag on every single
+ * update even when nothing about the store's actual on-disk format
+ * changed. Bump this by hand only when something FPOV genuinely needs
+ * to care about changes (template/password format, directory layout,
+ * etc.) -- same idea as an iBoot version not moving on every OS
+ * update. */
+#define FPOV_SUPPORT_DIR "/Library/Application Support/HTID-Support Backend"
+#define FPOV_BASE_FILENAME "FPOV-base.txt"
+#define FPOV_SCHEMA_VERSION "26B216"
+
 /* Reads one line of input with terminal echo turned off (like a
  * normal sudo password prompt), stripping the trailing newline.
  * Restores the terminal's original echo setting before returning,
@@ -2575,6 +2597,229 @@ static void do_settings_setup_volume(void) {
     do_run_volume_setup();
 }
 
+/* --- FPOV (Fingerprint Operating Verification) helpers --- */
+
+/* Encodes a build-style version string into FPOV's on-disk format:
+ * the first two characters as one token (the "year" pair), then one
+ * token per remaining character, a pipe separator, then 6 reserved
+ * zero bytes for future use. Plain text, not raw binary, so it stays
+ * eyeballable like the rest of the store's files. "26B216" becomes
+ * "{ 26 B 2 1 6 | 0x0 0x0 0x0 0x0 0x0 0x0 }". */
+static void fpov_encode_version(const char *version, char *out, size_t out_size) {
+    size_t len = strlen(version);
+    char body[128] = {0};
+    size_t pos = 0;
+
+    if (len >= 2) {
+        int n = snprintf(body, sizeof(body), "%.2s", version);
+        pos = (n > 0) ? (size_t)n : 0;
+        for (size_t i = 2; i < len && pos < sizeof(body); i++) {
+            n = snprintf(body + pos, sizeof(body) - pos, " %c", version[i]);
+            if (n > 0) pos += (size_t)n;
+        }
+    } else {
+        snprintf(body, sizeof(body), "%s", version);
+    }
+
+    snprintf(out, out_size, "{ %s | 0x0 0x0 0x0 0x0 0x0 0x0 }\n", body);
+}
+
+/* Finds this install's own local FPOV-OS<N>.txt, if FPOV setup was
+ * ever run for it. Only one is ever expected to exist on any single
+ * install's own disk (each install only ever receives its own during
+ * setup) -- the caller doesn't need to know or care whether it's
+ * labeled OS1, OS2, or OS3, just whatever's actually here. Returns
+ * true and fills out_path/out_label on a find; false if FPOV_SUPPORT_DIR
+ * doesn't exist or has nothing matching -- meaning FPOV was never set
+ * up on this install, not an error. */
+static bool find_local_fpov_file(char *out_path, size_t out_path_size,
+                                  char *out_label, size_t out_label_size) {
+    DIR *d = opendir(FPOV_SUPPORT_DIR);
+    if (!d) return false;
+
+    struct dirent *entry;
+    bool found = false;
+    while ((entry = readdir(d)) != NULL) {
+        if (strncmp(entry->d_name, "FPOV-OS", 7) == 0 && strstr(entry->d_name, ".txt")) {
+            snprintf(out_path, out_path_size, "%s/%s", FPOV_SUPPORT_DIR, entry->d_name);
+            snprintf(out_label, out_label_size, "%s", entry->d_name + 5); /* skip "FPOV-" */
+            char *dot = strstr(out_label, ".txt");
+            if (dot) *dot = '\0';
+            found = true;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Reads a whole small text file into a fixed buffer, trimming
+ * trailing whitespace/newlines. Returns false on any read failure. */
+static bool read_small_text_file(const char *path, char *out, size_t out_size) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    size_t n = fread(out, 1, out_size - 1, fp);
+    fclose(fp);
+    out[n] = '\0';
+    while (n > 0 && (out[n-1] == '\n' || out[n-1] == '\r' || out[n-1] == ' ')) out[--n] = '\0';
+    return true;
+}
+
+/* --- Settings: [9] Set Up FPOV (Multi-OS Version Check) ---
+ * Opt-in: only relevant for a genuine dual/triple-boot machine
+ * sharing one HackTouchIDStore volume across more than one macOS
+ * install. Writes the current install's FPOV_SCHEMA_VERSION as the
+ * shared baseline (FPOV-base.txt on the store) and as each named
+ * install's own local marker (FPOV-OS<N>.txt under FPOV_SUPPORT_DIR
+ * on that install's own boot volume) -- all installs start in sync
+ * at setup time by definition, since this is what establishes the
+ * baseline in the first place. */
+static void do_settings_setup_fpov(void) {
+    printf("Does this system have 2 or more macOS installs sharing this\n");
+    printf("HackTouchIDStore volume (dual/triple boot)? [y/N]: ");
+    fflush(stdout);
+    char confirm[8];
+    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("No FPOV setup needed for a single-OS install. Skipping.\n\n");
+        return;
+    }
+
+    printf("\nHow many macOS installs in total share this volume (2 or 3)? ");
+    fflush(stdout);
+    char count_line[8];
+    if (!fgets(count_line, sizeof(count_line), stdin)) { printf("\n"); return; }
+    int os_count = atoi(count_line);
+    if (os_count < 2 || os_count > 3) {
+        vfsc_err("Enter 2 or 3 -- FPOV covers dual/triple boot, not arbitrary counts.\n\n");
+        return;
+    }
+
+    char os_paths[3][PATH_MAX];
+    for (int i = 0; i < os_count; i++) {
+        printf("Volume path for OS%d (e.g. /Volumes/Macintosh HD): ", i + 1);
+        fflush(stdout);
+        if (!fgets(os_paths[i], sizeof(os_paths[i]), stdin)) { printf("\n"); return; }
+        size_t len = strlen(os_paths[i]);
+        while (len > 0 && (os_paths[i][len-1] == '\n' || os_paths[i][len-1] == '\r' ||
+                            os_paths[i][len-1] == '/')) {
+            os_paths[i][--len] = '\0';
+        }
+        struct stat st;
+        if (len == 0 || stat(os_paths[i], &st) != 0 || !S_ISDIR(st.st_mode)) {
+            vfsc_err("\"%s\" doesn't look like a real, currently-mounted path.\n\n", os_paths[i]);
+            return;
+        }
+    }
+
+    char encoded[160];
+    fpov_encode_version(FPOV_SCHEMA_VERSION, encoded, sizeof(encoded));
+
+    printf("\n");
+    for (int i = 0; i < os_count; i++) {
+        char support_dir[PATH_MAX], file_path[PATH_MAX];
+        snprintf(support_dir, sizeof(support_dir), "%s%s", os_paths[i], FPOV_SUPPORT_DIR);
+        mkdir(support_dir, 0755); /* Library/Application Support are standard on any real
+                                      boot volume -- this dir is the only level that's ours
+                                      to create; ignore EEXIST, just needs to exist */
+        snprintf(file_path, sizeof(file_path), "%s/FPOV-OS%d.txt", support_dir, i + 1);
+
+        FILE *fp = fopen(file_path, "w");
+        if (!fp) {
+            vfsc_err("Could not write %s: %s\n\n", file_path, strerror(errno));
+            return;
+        }
+        fputs(encoded, fp);
+        fclose(fp);
+        vfsc_ok("Wrote FPOV-OS%d.txt for \"%s\".\n", i + 1, os_paths[i]);
+    }
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("\nLocal markers written, but couldn't mount the template volume to\n");
+        vfsc_err("write the shared FPOV-base.txt. Run [9] again once it's available.\n\n");
+        return;
+    }
+    char base_path[PATH_MAX];
+    snprintf(base_path, sizeof(base_path), "%s/%s", mount_path, FPOV_BASE_FILENAME);
+    FILE *fp = fopen(base_path, "w");
+    if (fp) {
+        fputs(encoded, fp);
+        fclose(fp);
+        vfsc_ok("Wrote %s to the shared store.\n\n", FPOV_BASE_FILENAME);
+    } else {
+        vfsc_err("Could not write %s: %s\n\n", base_path, strerror(errno));
+    }
+    unmount_template_volume();
+}
+
+/* Startup gate, called once from main() before letting the user into
+ * anything. Silently returns true (nothing to check) when FPOV was
+ * never set up on THIS install -- opt-in, never nags a single-OS
+ * setup. When it WAS set up, any mismatch against the shared
+ * FPOV-base.txt -- not just older-than -- blocks entirely, since
+ * there's no way to reason about forward/backward compatibility of
+ * the store format from here; simplest correct rule is exact match. */
+static bool check_fpov_version(void) {
+    char local_path[PATH_MAX], label[32];
+    if (!find_local_fpov_file(local_path, sizeof(local_path), label, sizeof(label))) {
+        return true; /* FPOV never set up on this install -- nothing to check */
+    }
+
+    char display_path[PATH_MAX] = "/";
+    char diskutil_out[256];
+    FILE *dp = popen("diskutil info / 2>/dev/null", "r");
+    if (dp) {
+        while (fgets(diskutil_out, sizeof(diskutil_out), dp)) {
+            char *p = strstr(diskutil_out, "Volume Name:");
+            if (p) {
+                p += strlen("Volume Name:");
+                while (*p == ' ') p++;
+                char *nl = strchr(p, '\n');
+                if (nl) *nl = '\0';
+                snprintf(display_path, sizeof(display_path), "/Volumes/%s/", p);
+                break;
+            }
+        }
+        pclose(dp);
+    }
+
+    vfsc_status_line("Checking FPOV Version for %s \"%s\"....", label, display_path);
+
+    char local_version[160];
+    if (!read_small_text_file(local_path, local_version, sizeof(local_version))) {
+        vfsc_err("Could not read %s: %s\n\n", local_path, strerror(errno));
+        return false;
+    }
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Cannot verify FPOV: template volume unavailable.\n\n");
+        return false;
+    }
+    char base_path[PATH_MAX];
+    snprintf(base_path, sizeof(base_path), "%s/%s", mount_path, FPOV_BASE_FILENAME);
+    char base_version[160];
+    bool base_ok = read_small_text_file(base_path, base_version, sizeof(base_version));
+    unmount_template_volume();
+
+    if (!base_ok) {
+        vfsc_err("Store has no %s -- this OS has a local FPOV marker but the shared\n",
+                  FPOV_BASE_FILENAME);
+        vfsc_err("store doesn't. Run Settings [9] again to re-establish it.\n\n");
+        return false;
+    }
+
+    if (strcmp(local_version, base_version) != 0) {
+        vfsc_err("FPOV MISMATCH for %s -- this install doesn't match the shared\n", label);
+        vfsc_err("store's version. Update this OS's client to the latest build on\n");
+        vfsc_err("your configured update channel (Settings [7]) before authenticating.\n\n");
+        return false;
+    }
+
+    vfsc_status_line_ok("Matches Store FPOV.");
+    return true;
+}
+
 /* --- Settings: [8] Link to a Different Volume / Check for Orphans ---
  * Runs hack-touchid-volume-mount.sh --list to enumerate every volume
  * currently named HackTouchIDStore (by disk id, not name -- see that
@@ -2851,6 +3096,7 @@ static void print_settings_menu(void) {
            g_local_version_loaded && g_local_version_info.branch[0] != '\0'
                ? g_local_version_info.branch : "unknown");
     printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -2889,9 +3135,10 @@ static void do_settings_menu(void) {
             case '6': do_settings_adjust_threshold(); break;
             case '7': do_settings_toggle_beta(); break;
             case '8': do_settings_link_volume(); break;
+            case '9': do_settings_setup_fpov(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-8 or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-9 or B.\n\n", line);
         }
     }
 }
@@ -4079,6 +4326,10 @@ int main(int argc, char **argv) {
 
     vfsc_boot_line("launchd: querying installed daemon version...");
     if (!check_daemon_version_gate()) {
+        return 1;
+    }
+
+    if (!check_fpov_version()) {
         return 1;
     }
 
