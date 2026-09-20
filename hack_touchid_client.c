@@ -2810,6 +2810,36 @@ static bool check_fpov_version(void) {
     }
 
     if (strcmp(local_version, base_version) != 0) {
+        /* Before treating this as a real version difference, check
+         * whether it's actually just a stale/corrupted local file --
+         * regenerate it from THIS client's own compiled-in
+         * FPOV_SCHEMA_VERSION (never from the store's base; copying
+         * the store's value here would let a genuinely outdated
+         * client silently mark itself compliant without ever being
+         * updated, which defeats the entire point of FPOV) and
+         * compare again. Only a client whose own real version still
+         * doesn't match after this stays blocked. */
+        char regenerated[160];
+        fpov_encode_version(FPOV_SCHEMA_VERSION, regenerated, sizeof(regenerated));
+        char regenerated_trimmed[160];
+        snprintf(regenerated_trimmed, sizeof(regenerated_trimmed), "%s", regenerated);
+        size_t rlen = strlen(regenerated_trimmed);
+        while (rlen > 0 && (regenerated_trimmed[rlen-1] == '\n' || regenerated_trimmed[rlen-1] == '\r')) {
+            regenerated_trimmed[--rlen] = '\0';
+        }
+
+        if (strcmp(regenerated_trimmed, base_version) == 0) {
+            FILE *fp = fopen(local_path, "w");
+            if (fp) {
+                fputs(regenerated, fp);
+                fclose(fp);
+                vfsc_ok("Local FPOV marker was stale, not this client's real version --\n");
+                printf("regenerated from this build's own version and it matches. Continuing.\n\n");
+                return true;
+            }
+            /* Couldn't even repair it -- fall through to the hard block below. */
+        }
+
         vfsc_err("FPOV MISMATCH for %s -- this install doesn't match the shared\n", label);
         vfsc_err("store's version. Update this OS's client to the latest build on\n");
         vfsc_err("your configured update channel (Settings [7]) before authenticating.\n\n");
