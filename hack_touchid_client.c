@@ -36,6 +36,8 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <stdarg.h>
@@ -721,6 +723,15 @@ static double g_boot_fake_time = 0.000031;
  * ever landing in the interactive prompt. Survives the sudo re-exec
  * below alongside --q/--quiet (see sudo_argv construction in main()). */
 static bool g_deploy_agent_mode = false;
+
+/* Set by argv parsing in main() when "--fpbootd-daemon" is passed.
+ * Routes into run_fpbootd_daemon() instead of the interactive menu --
+ * same headless-dispatch pattern as the other mode flags. Meant to be
+ * invoked by a LaunchDaemon plist, always as root from the start, so
+ * unlike the other modes it doesn't strictly need to survive the sudo
+ * re-exec below -- included anyway for consistency and so it can be
+ * tested by hand as a non-root user too. */
+static bool g_fpbootd_daemon_mode = false;
 
 /* Set by argv parsing in main() when "--diag-pid" is passed. Routes
  * into run_diagnose_mode() instead of the interactive menu -- same
@@ -2358,43 +2369,38 @@ static void do_enroll(void) {
  *
  * As with enroll, the volume is only mounted around the load step —
  * the swipe capture itself happens first, fully unmounted. */
-static int do_verify(void) {
-    if (!g_detected_sensor) {
-        vfsc_err("No supported sensor detected. Can't verify without one.\n\n");
-        return 1;
-    }
-    if (!g_detected_sensor->backend_available) {
-        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
-                  g_detected_sensor->display_name);
-        return 1;
-    }
+/* Shared by do_verify() and the Fpbootd daemon loop: captures one
+ * swipe, matches it against every enrolled finger, and reports the
+ * best result. Mounts/unmounts the store itself. Does NOT play
+ * sounds or print the "Success!"/"Incorrect" banner -- callers decide
+ * what a match/no-match means for their context (an interactive
+ * banner vs a socket response). quiet is forwarded straight to
+ * capture_quality_template() (0 = do_verify()'s normal interactive
+ * output, 1 = Fpbootd's silent background captures). Returns 0 on a
+ * genuine match (score >= g_match_threshold), 2 on a clean no-match,
+ * 1 on a hard failure (no sensor, no enrolled fingers, capture
+ * failed, etc). On a 0 or 2 return, out_label and out_score are
+ * always filled in; on 1 they're not meaningful. */
+static int verify_once(char *out_label, size_t out_label_size, int *out_score, int quiet) {
+    if (!g_detected_sensor) return 1;
+    if (!g_detected_sensor->backend_available) return 1;
+
     struct xyt_struct probe;
-    if (capture_quality_template(&probe, /*quiet=*/0) != 0) {
-        vfsc_err("Verify failed: could not get a usable swipe.\n\n");
-        return 1;
-    }
+    if (capture_quality_template(&probe, quiet) != 0) return 1;
 
     char mount_path[PATH_MAX];
-    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
-        vfsc_err("Cannot verify: template volume unavailable.\n\n");
-        return 1;
-    }
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) return 1;
     char fingers_dir[PATH_MAX];
     snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
 
     char labels[MAX_ENROLLED_FINGERS][MAX_FINGER_LABEL + 1];
     int finger_count = list_enrolled_fingers(fingers_dir, labels, MAX_ENROLLED_FINGERS);
     if (finger_count <= 0) {
-        vfsc_err("No enrolled fingers found — run Enroll first.\n\n");
         unmount_template_volume();
         g_finger_count = 0;
         return 1;
     }
 
-    /* Check the swipe against every enrolled finger, taking the best
-     * score within each finger's own swipe set, then the best finger
-     * overall — the same "any enrolled finger unlocks it" behavior as
-     * real Touch ID. */
     int best_score = -1;
     int best_finger = -1;
     for (int f = 0; f < finger_count; f++) {
@@ -2418,24 +2424,181 @@ static int do_verify(void) {
     }
     unmount_template_volume();
 
-    /* Refresh the cache for free since we just listed it anyway. */
     g_finger_count = finger_count;
     memcpy(g_finger_labels, labels, sizeof(labels));
 
-    if (best_finger < 0) {
-        vfsc_err("No enrolled finger could be loaded — check the volume.\n\n");
+    if (best_finger < 0) return 1;
+
+    snprintf(out_label, out_label_size, "%s", labels[best_finger]);
+    *out_score = best_score;
+    return (best_score >= g_match_threshold) ? 0 : 2;
+}
+
+static int do_verify(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected. Can't verify without one.\n\n");
+        return 1;
+    }
+    if (!g_detected_sensor->backend_available) {
+        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
+                  g_detected_sensor->display_name);
         return 1;
     }
 
-    printf("Best match: \"%s\" score %d (threshold: %d)\n", labels[best_finger], best_score, g_match_threshold);
-    if (best_score >= g_match_threshold) {
+    char label[MAX_FINGER_LABEL + 1];
+    int score = -1;
+    int rc = verify_once(label, sizeof(label), &score, /*quiet=*/0);
+
+    if (rc == 1) {
+        vfsc_err("Verify failed: could not get a usable swipe, or no enrolled fingers found.\n\n");
+        return 1;
+    }
+
+    printf("Best match: \"%s\" score %d (threshold: %d)\n", label, score, g_match_threshold);
+    if (rc == 0) {
         play_success_sound();
-        printf("\n  %s\xE2\x9C\x93  Success! (%s)%s\n\n", VFSC_BGREEN, labels[best_finger], VFSC_RESET);
+        printf("\n  %s\xE2\x9C\x93  Success! (%s)%s\n\n", VFSC_BGREEN, label, VFSC_RESET);
         return 0;
     } else {
         play_failure_sound();
         printf("\n  %s\xE2\x9C\x97  Incorrect fingerprint%s\n\n", VFSC_BRED, VFSC_RESET);
         return 2;
+    }
+}
+
+#define MAX_PASSWORD_LEN 256 /* matches vfs5011_daemon.c's own MAX_PASSWORD_LEN */
+
+/* --- Fpbootd: pre-login daemon mode (--fpbootd-daemon) ---
+ *
+ * Meant to run as a LaunchDaemon (RunAtLoad, root, no session
+ * dependency), so it's alive from very early in boot -- well before
+ * loginwindow renders. It does NOT hold the sensor open continuously
+ * between requests; verify_once()/capture_quality_template() already
+ * open and close the USB device fresh on every single capture, same
+ * as every other call site in this file, and there was no reason to
+ * special-case that here. What actually being alive this early buys
+ * is zero cold-start process-launch latency: by the time a login
+ * mechanism asks for a capture, this process and its match pipeline
+ * are already sitting in memory, so a request only ever pays for the
+ * capture itself.
+ *
+ * Socket protocol (deliberately trivial -- one command, one line
+ * back): a client writes "CAPTURE\n", this replies with exactly one
+ * of:
+ *   MATCH:<label>:<password>\n   -- score >= g_match_threshold
+ *   NOMATCH\n                    -- clean capture, no match
+ *   ERROR:<reason>\n             -- capture/mount/enrollment failure
+ * then the connection is closed. One request per connection, no
+ * persistent session -- whatever's on the other end (an Authorization
+ * Plugin mechanism, in the intended design) reconnects for each swipe
+ * attempt.
+ *
+ * SECURITY NOTE -- genuinely unresolved: the socket is created 0600
+ * (root-only) as the conservative default, since handing out a live
+ * fingerprint-to-password oracle to any local process would be
+ * reckless. Whether SecurityAgent's own process can connect to a
+ * root-owned socket at that permission at all is exactly the open
+ * question this whole feature is spiking to answer -- don't loosen
+ * this without understanding why it needed loosening first. */
+#define FPBOOTD_SOCKET_PATH "/var/run/fpbootd.sock"
+
+static void run_fpbootd_daemon(void) {
+    if (!g_detected_sensor || !g_detected_sensor->backend_available) {
+        fprintf(stderr, "fpbootd: no usable sensor detected, refusing to start.\n");
+        exit(1);
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        /* Match-in-sensor verify is architecturally a different path
+         * entirely (on-chip, no local minutiae compare) -- not wired
+         * up here yet. Fail loudly rather than silently doing
+         * nothing useful. */
+        fprintf(stderr, "fpbootd: Metallica MIS verify isn't wired into the daemon loop yet.\n");
+        exit(1);
+    }
+
+    unlink(FPBOOTD_SOCKET_PATH); /* stale socket from a previous run/crash */
+
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) {
+        fprintf(stderr, "fpbootd: socket() failed: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", FPBOOTD_SOCKET_PATH);
+
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "fpbootd: bind() failed: %s\n", strerror(errno));
+        close(srv);
+        exit(1);
+    }
+    chmod(FPBOOTD_SOCKET_PATH, 0600); /* see the SECURITY NOTE above */
+
+    if (listen(srv, 4) != 0) {
+        fprintf(stderr, "fpbootd: listen() failed: %s\n", strerror(errno));
+        close(srv);
+        exit(1);
+    }
+
+    fprintf(stderr, "fpbootd: listening on %s (sensor: %s)\n",
+            FPBOOTD_SOCKET_PATH, g_detected_sensor->display_name);
+
+    for (;;) {
+        int conn = accept(srv, NULL, NULL);
+        if (conn < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "fpbootd: accept() failed: %s\n", strerror(errno));
+            usleep(200000);
+            continue;
+        }
+
+        char cmd[32] = {0};
+        ssize_t n = read(conn, cmd, sizeof(cmd) - 1);
+        if (n > 0) {
+            char *nl = strchr(cmd, '\n');
+            if (nl) *nl = '\0';
+        }
+
+        char response[MAX_FINGER_LABEL + 512];
+        if (n > 0 && strcmp(cmd, "CAPTURE") == 0) {
+            char label[MAX_FINGER_LABEL + 1];
+            int score = -1;
+            int rc = verify_once(label, sizeof(label), &score, /*quiet=*/1);
+
+            if (rc == 0) {
+                play_success_sound();
+                char mount_path[PATH_MAX];
+                char password[MAX_PASSWORD_LEN + 1] = {0};
+                if (mount_template_volume(mount_path, sizeof(mount_path)) == 0) {
+                    char password_path[PATH_MAX];
+                    snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+                    FILE *pf = fopen(password_path, "r");
+                    if (pf) {
+                        size_t pn = fread(password, 1, MAX_PASSWORD_LEN, pf);
+                        password[pn] = '\0';
+                        fclose(pf);
+                    }
+                    unmount_template_volume();
+                }
+                if (password[0] != '\0') {
+                    snprintf(response, sizeof(response), "MATCH:%s:%s\n", label, password);
+                } else {
+                    snprintf(response, sizeof(response), "ERROR:no_stored_password\n");
+                }
+            } else if (rc == 2) {
+                play_failure_sound();
+                snprintf(response, sizeof(response), "NOMATCH\n");
+            } else {
+                snprintf(response, sizeof(response), "ERROR:capture_failed\n");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR:unknown_command\n");
+        }
+
+        write(conn, response, strlen(response));
+        close(conn);
     }
 }
 
@@ -4235,6 +4398,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--force-pair") == 0) {
             g_metallica_mis_force_pair = 1;
         }
+        if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
+            g_fpbootd_daemon_mode = true;
+        }
     }
     srand((unsigned int)time(NULL));
 
@@ -4243,14 +4409,14 @@ int main(int argc, char **argv) {
      * CLI, so options 1/2 don't each need their own privilege prompt.
      *
      * Counter-based instead of the old fixed 4-slot array -- now that
-     * --q/--quiet, --deploy-agent, --diag-pid, --check-updates, and
-     * --force-pair can all be present at once, the old hardcoded
-     * "sudo_argv[2] = flag or NULL" approach could only carry one flag
-     * through the re-exec. This builds the argv up to however many
-     * flags actually apply. */
+     * --q/--quiet, --deploy-agent, --diag-pid, --check-updates,
+     * --force-pair, and --fpbootd-daemon can all be present at once,
+     * the old hardcoded "sudo_argv[2] = flag or NULL" approach could
+     * only carry one flag through the re-exec. This builds the argv up
+     * to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[8];
+        char *sudo_argv[9];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
@@ -4259,6 +4425,7 @@ int main(int argc, char **argv) {
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
         if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
         if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
+        if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
@@ -4296,6 +4463,18 @@ int main(int argc, char **argv) {
     if (g_diag_pid_mode) {
         g_detected_sensor = detect_supported_sensor();
         run_diagnose_mode();
+        return 0;
+    }
+
+    /* --fpbootd-daemon short-circuits into the socket server loop,
+     * same before-the-banner dispatch as --diag-pid above, and for
+     * the same reason needs its own sensor probe here since it never
+     * reaches check_sensor_presence_gate(). run_fpbootd_daemon() never
+     * returns under normal operation (it's an accept() loop) -- the
+     * explicit return 0 below only fires if it somehow does. */
+    if (g_fpbootd_daemon_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_fpbootd_daemon();
         return 0;
     }
 
