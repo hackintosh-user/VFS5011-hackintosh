@@ -58,3 +58,7 @@ echo
 echo "Done. Binaries are built. Nothing has been deployed/installed yet."
 echo "Run the client and use Deploy [3] from the menu when you're ready:"
 echo "  sudo ./hack-touchid"
+echo
+echo "If you're setting up Fpbootd (the pre-login daemon), that's a separate"
+echo "opt-in install, same reasoning as above -- run it yourself when ready:"
+echo "  sudo ./fpbootd-install.sh"
