@@ -173,12 +173,12 @@ static OSStatus FpbootdSpikeMechanismInvoke(AuthorizationMechanismRef inMechanis
      * the next mechanism in the array. This mechanism decides
      * nothing about whether login succeeds; it only observes. */
     OSStatus setResultStatus = mech->plugin->callbacks->SetResult(mech->engine, kAuthorizationResultAllow);
-    if (setResultStatus != errSecSuccess) {
+    if (setResultStatus != noErr) {
         syslog(LOG_NOTICE, "fpbootd-spike: SetResult() itself returned %d", (int)setResultStatus);
     }
 
     closelog();
-    return errSecSuccess;
+    return noErr;
 }
 
 static OSStatus FpbootdSpikeMechanismDeactivate(AuthorizationMechanismRef inMechanism) {
@@ -188,7 +188,7 @@ static OSStatus FpbootdSpikeMechanismDeactivate(AuthorizationMechanismRef inMech
 
 static OSStatus FpbootdSpikeMechanismDestroy(AuthorizationMechanismRef inMechanism) {
     free(inMechanism);
-    return errSecSuccess;
+    return noErr;
 }
 
 static OSStatus FpbootdSpikeMechanismCreate(AuthorizationPluginRef inPlugin,
@@ -197,16 +197,16 @@ static OSStatus FpbootdSpikeMechanismCreate(AuthorizationPluginRef inPlugin,
                                              AuthorizationMechanismRef *outMechanism) {
     (void)mechanismId; /* only one mechanism exported by this bundle -- ID unused */
     FpbootdSpikeMechanism *mech = (FpbootdSpikeMechanism *)calloc(1, sizeof(FpbootdSpikeMechanism));
-    if (!mech) return errSecAllocate;
+    if (!mech) return errAuthorizationInternal;
     mech->plugin = (FpbootdSpikePlugin *)inPlugin;
     mech->engine = inEngine;
     *outMechanism = (AuthorizationMechanismRef)mech;
-    return errSecSuccess;
+    return noErr;
 }
 
 static OSStatus FpbootdSpikePluginDestroy(AuthorizationPluginRef inPlugin) {
     free(inPlugin);
-    return errSecSuccess;
+    return noErr;
 }
 
 /* This interface struct must outlive the plugin -- malloc'd once in
@@ -217,14 +217,14 @@ OSStatus AuthorizationPluginCreate(const AuthorizationCallbacks *callbacks,
                                     AuthorizationPluginRef *outPlugin,
                                     const AuthorizationPluginInterface **outPluginInterface) {
     FpbootdSpikePlugin *plugin = (FpbootdSpikePlugin *)calloc(1, sizeof(FpbootdSpikePlugin));
-    if (!plugin) return errSecAllocate;
+    if (!plugin) return errAuthorizationInternal;
     plugin->callbacks = callbacks;
 
     AuthorizationPluginInterface *interface =
         (AuthorizationPluginInterface *)calloc(1, sizeof(AuthorizationPluginInterface));
     if (!interface) {
         free(plugin);
-        return errSecAllocate;
+        return errAuthorizationInternal;
     }
     interface->version = kAuthorizationPluginInterfaceVersion;
     interface->PluginDestroy = FpbootdSpikePluginDestroy;
@@ -235,5 +235,5 @@ OSStatus AuthorizationPluginCreate(const AuthorizationCallbacks *callbacks,
 
     *outPlugin = (AuthorizationPluginRef)plugin;
     *outPluginInterface = interface;
-    return errSecSuccess;
+    return noErr;
 }
