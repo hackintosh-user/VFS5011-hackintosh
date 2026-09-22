@@ -101,10 +101,9 @@ jobs:
           ./build.sh
       - name: Verify binaries were produced
         run: |
-          test -x ./hack-touchid
+          test -x ./vfs_client
           test -x ./vfs5011_daemon
-          test -x ./metallica_mis_daemon
-          echo "All three binaries built successfully."
+          echo "Both binaries built successfully."
 
   matcher-unit-tests:
     name: Matcher unit tests (macOS)
@@ -127,6 +126,6 @@ jobs:
           ./Vfs5011-menubar/build_menubar_app.sh
       - name: Verify app bundle was produced
         run: |
-          test -d "Vfs5011-menubar/build/Hackintosh Touch-ID.app"
-          test -x "Vfs5011-menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
+          test -d "Vfs5011-menubar/build/VFS5011 Menu Bar.app"
+          test -x "Vfs5011-menubar/build/VFS5011 Menu Bar.app/Contents/MacOS/VFS5011MenuBar"
           echo "Menu bar app built successfully."
