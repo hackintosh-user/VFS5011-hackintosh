@@ -1,8 +1,8 @@
 # Contributing to Hackintosh TouchID
 
-Contributions are welcome and genuinely help grow this project. There are three main ways to help: testing, code, and documentation.
+Contributions are welcome and genuinely help grow this project. There are two main ways to help: testing, and code. 
 
-See [SECURITY.md](./SECURITY.md) if what you have is a security report rather than a bug or feature contribution — please don't file those as a regular issue or PR.
+See [SECURITY.md](./SECURITY.md) if what you have is a security report rather than a bug or feature contribution — please don't file those as a regular issue or PR, As this project is a biometric autnetication and it's a security matter!
 
 ## Testing
 
@@ -33,3 +33,4 @@ Also heavily welcomed — this is what rapidly expands the project's sensor supp
 * [XDA Forums](https://xdaforums.com/m/hackintosh_user.13447103/)
 * [Mac Rumors Forums](https://forums.macrumors.com/members/hackintosh_user.1420199/)
 * [𝕏 or Twitter]( https://x.com/mohammad_q_124) (X Chat or idk what it's called)
+
