@@ -26,9 +26,6 @@ Also heavily welcomed — this is what rapidly expands the project's sensor supp
 * Before opening a PR that adds a new sensor backend or touches the build, check the build scripts (`build_*.sh`) and CI config (`ci.yml`) — a new source file needs to be added in all of the places that reference the daemon's source list, or CI will pass green while the actual build is broken.
 * Open an issue first for anything nontrivial (new backend, architecture change) so we can align before you put in the work. Small fixes/typos can just be a PR.
 
-## Helping with Documentation
-
-Also welcomed — a person to help maintain and improve the project's documentation would genuinely help. If you're interested, reach out (see below) with what part of the docs you'd like to help with (README, per-sensor setup guides, this file, etc.).
 
 ## Contacting me
 
