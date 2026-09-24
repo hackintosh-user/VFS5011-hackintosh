@@ -311,8 +311,8 @@ driver exists.
 
 ## Credits
 
-* Hackintosh-user: Main Lead developer
-* ilikehackintosh: Documentation handler
+* @Hackintosh-user: Main Lead developer
+* @ilikehackintosh: Documentation handler
 * [u/p0cketl1nt](https://www.reddit.com/user/p0cketl1nt/): Main tester for Metallica MIS 006cb:009a & Prometheus 97 138a:0097 (massive thank you!)
 * [u/dCold_Salamander7764](https://www.reddit.com/user/Cold_Salamander7764/): Main tester for UPEK touch-Strip 147e:2016 (massive thank you!)
 
