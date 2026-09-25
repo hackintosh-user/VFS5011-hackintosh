@@ -4752,7 +4752,12 @@ int main(int argc, char **argv) {
                     ran_action = false;
                 }
                 break;
-            case 'F': case 'f': do_fpbootd_stub(); break;
+            case 'F': case 'f':
+                do_fpbootd_stub();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
             case 'D': case 'd':
                 run_diagnose_mode();
                 printf("\nPress Return to go back to the main menu...");
@@ -4761,8 +4766,18 @@ int main(int argc, char **argv) {
                 break;
             case 'S': case 's': do_settings_menu(); break;
             case 'A': case 'a': print_about(); break;
-            case 'H': case 'h': print_usage(); break;
-            case 'X': case 'x': do_uninstall_stub(); break;
+            case 'H': case 'h':
+                print_usage();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'X': case 'x':
+                do_uninstall_stub();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
             case 'Q': case 'q':
                 printf("Exiting Hack-TouchID Client.\n");
                 return 0;
