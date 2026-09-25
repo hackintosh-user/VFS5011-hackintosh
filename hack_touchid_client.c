@@ -1752,6 +1752,60 @@ static int is_accessibility_granted(void) {
  * print_menu() can decide whether to show [P] Pair Sensor. */
 static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s);
 
+/* Forward declaration -- real definition lives with the rest of the
+ * FPOV helpers further below (Settings [9] section), but the status
+ * line below needs it too. */
+static bool find_local_fpov_file(char *out_path, size_t out_path_size,
+                                  char *out_label, size_t out_label_size);
+
+/* Fpbootd (pre-login daemon) install path -- a separate LaunchDaemon
+ * binary from the per-sensor daemon above, installed by the
+ * standalone fpbootd-install.sh (not part of this client's own
+ * Deploy [3] yet -- see the [FP] stub menu item). Its own macro since
+ * it isn't tied to g_detected_sensor->daemon_binary_name the way
+ * get_daemon_install_path() is. */
+#define FPBOOTD_INSTALL_PATH "/usr/local/libexec/hack-touchid/hack-touchid-fpbootd"
+
+/* Best-effort status string for the Fpbootd row in print_menu()'s
+ * status section. Deliberately soft, read-only, never gates startup
+ * the way check_daemon_version_gate() does for the per-sensor daemon
+ * -- Fpbootd isn't wired into this client's version-gate flow yet. */
+static void get_fpbootd_status_line(char *out, size_t out_size) {
+    if (access(FPBOOTD_INSTALL_PATH, F_OK) != 0) {
+        snprintf(out, out_size, "Not Installed");
+        return;
+    }
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", FPBOOTD_INSTALL_PATH);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        char version[64] = {0};
+        bool got = fgets(version, sizeof(version), fp) != NULL;
+        pclose(fp);
+        if (got) {
+            size_t len = strlen(version);
+            while (len > 0 && (version[len-1] == '\n' || version[len-1] == '\r')) version[--len] = '\0';
+            if (len > 0) {
+                snprintf(out, out_size, "Installed (v%s)", version);
+                return;
+            }
+        }
+    }
+    snprintf(out, out_size, "Installed (version unknown)");
+}
+
+/* Same idea for FPOV -- whether this install ever ran Settings [9]
+ * and what schema version it's pinned to. Read-only; the real gate is
+ * check_fpov_version() at boot. */
+static void get_fpov_status_line(char *out, size_t out_size) {
+    char local_path[PATH_MAX], label[32];
+    if (!find_local_fpov_file(local_path, sizeof(local_path), label, sizeof(label))) {
+        snprintf(out, out_size, "Not Set Up (opt-in)");
+        return;
+    }
+    snprintf(out, out_size, "v%s (%s)", FPOV_SCHEMA_VERSION, label);
+}
+
 static void print_menu(void) {
     int sensor_present = (g_detected_sensor != NULL);
     int deployed = is_auth_service_deployed();
@@ -1759,6 +1813,7 @@ static void print_menu(void) {
     int accessibility_ready = is_accessibility_granted();
 
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    printf("%sActions%s\n", VFSC_DIM, VFSC_RESET);
     printf("%s[1]%s Enroll a Finger\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[2]%s Verify Fingerprint Match [Score / %d]\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
     printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
@@ -1772,10 +1827,15 @@ static void print_menu(void) {
     if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
         printf("%s[C]%s View Fingerprint (capture preview, nothing saved)\n", VFSC_BOLD, VFSC_RESET);
     }
+    printf("%s[FP]%s Fpbootd, Pre-Login Auth %s(coming soon)%s\n",
+           VFSC_BOLD, VFSC_RESET, VFSC_DIM, VFSC_RESET);
     printf("\n");
+    printf("%sUtilities%s\n", VFSC_DIM, VFSC_RESET);
     printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[H]%s Help\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[X]%s Uninstall\n", VFSC_BRED, VFSC_RESET);
     printf("%s[Q]%s Quit\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("  * Sensor Status        : %s%s%s\n",
@@ -1810,7 +1870,64 @@ static void print_menu(void) {
     } else {
         printf("  * Sensor Model         : %sNone Detected%s\n", VFSC_YELLOW, VFSC_RESET);
     }
+    {
+        char fpbootd_status[80];
+        get_fpbootd_status_line(fpbootd_status, sizeof(fpbootd_status));
+        printf("  * Fpbootd Version      : %s%s%s\n", VFSC_DIM, fpbootd_status, VFSC_RESET);
+    }
+    {
+        char fpov_status[80];
+        get_fpov_status_line(fpov_status, sizeof(fpov_status));
+        printf("  * FPOV Version         : %s%s%s\n", VFSC_DIM, fpov_status, VFSC_RESET);
+    }
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+}
+
+/* Shared by [H] in the interactive menu and -h/--help on the command
+ * line (checked first thing in main(), before the sudo re-exec, so
+ * seeing this never requires a password prompt). Keep this list in
+ * sync with the flag-parsing loop in main() below. */
+static void print_usage(void) {
+    printf("%sHack-TouchID Client%s -- multi-sensor fingerprint auth for macOS\n\n",
+           VFSC_BOLD, VFSC_RESET);
+    printf("Usage: hack-touchid [flags]\n\n");
+    printf("With no flags, launches the interactive menu.\n\n");
+    printf("Flags:\n");
+    printf("  -h, --help          Show this help and exit\n");
+    printf("  --q, --quiet        Skip the verbose boot log\n");
+    printf("  --deploy-agent      Headless (re)install of the daemon, no menu\n");
+    printf("  --diag-pid          Print a diagnostic report and exit\n");
+    printf("  --check-updates     Check for a client update and exit\n");
+    printf("  --force-pair        Wipe identity partitions before Metallica MIS pairing\n");
+    printf("  --fpbootd-daemon    Run as the Fpbootd pre-login socket server\n\n");
+    printf("From the interactive menu, [H] shows this same help.\n\n");
+}
+
+/* [FP] Fpbootd -- stub for now. The daemon + Authorization Plugin are
+ * real and already tested on hardware (see fpbootd-install.sh), just
+ * not wired into this client's own menu yet -- that's separate
+ * follow-up work. This tells anyone poking at the menu that the
+ * feature exists rather than silently doing nothing. */
+static void do_fpbootd_stub(void) {
+    vfsc_warn("Fpbootd management isn't wired into this client yet.\n"
+              "The daemon + Authorization Plugin exist and are tested on real\n"
+              "hardware (see fpbootd-install.sh), just not from this menu.\n"
+              "Coming in a follow-up update.\n\n");
+}
+
+/* [X] Uninstall -- stub for now, per the pre-merge UI/UX pass. A real
+ * uninstall needs to reverse do_deploy() (tear down the LaunchAgent,
+ * sudoers rule, TCC grant, daemon binary, and optionally the
+ * HackTouchIDStore volume) via a matching per-sensor
+ * <sensor>_agent_uninstall.sh, which doesn't exist yet. Prints a
+ * clear "not implemented" message rather than leaving the key
+ * unbound or silently no-op'ing. */
+static void do_uninstall_stub(void) {
+    vfsc_warn("Uninstall isn't implemented yet.\n"
+              "For now, remove things manually: unload/delete the LaunchAgent\n"
+              "under ~/Library/LaunchAgents, delete the daemon under\n"
+              "/usr/local/libexec/hack-touchid, and remove the HackTouchIDStore\n"
+              "volume via Settings [8]/diskutil if you want it gone too.\n\n");
 }
 
 static void print_about(void) {
@@ -4378,6 +4495,16 @@ static void run_deploy_agent_mode(void) {
 }
 
 int main(int argc, char **argv) {
+    /* Checked in its own pass, before anything else (including the
+     * sudo re-exec below) -- seeing -h/--help should never require a
+     * password prompt. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage();
+            return 0;
+        }
+    }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             g_verbose_boot = false;
@@ -4597,7 +4724,7 @@ int main(int argc, char **argv) {
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_pair_metallica_mis();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -4605,7 +4732,7 @@ int main(int argc, char **argv) {
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_calibrate_metallica_mis();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -4613,7 +4740,7 @@ int main(int argc, char **argv) {
                 if (is_upek_sensor(g_detected_sensor)) {
                     do_test_upek_capture();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -4621,10 +4748,11 @@ int main(int argc, char **argv) {
                 if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
                     do_view_fingerprint();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
+            case 'F': case 'f': do_fpbootd_stub(); break;
             case 'D': case 'd':
                 run_diagnose_mode();
                 printf("\nPress Return to go back to the main menu...");
@@ -4633,11 +4761,13 @@ int main(int argc, char **argv) {
                 break;
             case 'S': case 's': do_settings_menu(); break;
             case 'A': case 'a': print_about(); break;
+            case 'H': case 'h': print_usage(); break;
+            case 'X': case 'x': do_uninstall_stub(); break;
             case 'Q': case 'q':
                 printf("Exiting Hack-TouchID Client.\n");
                 return 0;
             default:
-                printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, or Q.\n\n", line);
+                printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                 ran_action = false;
         }
         if (ran_action) {
