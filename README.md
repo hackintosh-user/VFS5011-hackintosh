@@ -196,16 +196,21 @@ or with its [launch-arguments!](https://github.com/hackintosh-user/VFS5011-hacki
 
 Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
 ```
+Actions
 [1] Enroll a Finger
 [2] Verify Fingerprint Match [Score / 20]
 [3] Deploy Authentication Services
+[C] View Fingerprint (capture preview, nothing saved)
 [P] (ONLY FOR METALLICA MIS SENSORS) Pair
 [U] (ONLY FOR UPEK 147e:2016) capture .pgm
 [B] Capture (experimental, Only for Metallica MIS Sensors)
+[FP] Fpbootd, Pre-Login Auth (coming soon)
 
+Utilities
 [D] Diagnose (generate a report for troubleshooting)
 [S] Settings
 [A] About
+[X] Uninstall
 [Q] Quit
 ```
 
