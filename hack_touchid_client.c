@@ -33,6 +33,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <dirent.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -1915,29 +1916,129 @@ static void do_fpbootd_stub(void) {
               "Coming in a follow-up update.\n\n");
 }
 
-/* [X] Uninstall -- stub for now, per the pre-merge UI/UX pass. A real
- * uninstall needs to reverse do_deploy() (tear down the LaunchAgent,
- * sudoers rule, TCC grant, daemon binary, and optionally the
- * HackTouchIDStore volume) via a matching per-sensor
- * <sensor>_agent_uninstall.sh, which doesn't exist yet. Prints a
- * clear "not implemented" message rather than leaving the key
- * unbound or silently no-op'ing. */
-static void do_uninstall_stub(void) {
-    vfsc_warn("Uninstall isn't implemented yet.\n"
-              "For now, remove things manually: unload/delete the LaunchAgent\n"
-              "under ~/Library/LaunchAgents, delete the daemon under\n"
-              "/usr/local/libexec/hack-touchid, and remove the HackTouchIDStore\n"
-              "volume via Settings [8]/diskutil if you want it gone too.\n\n");
-}
+/* [X] Uninstall -- reverses do_deploy() for whichever sensor daemon(s)
+ * are installed, natively (no per-sensor uninstall script exists).
+ * Removes: the LaunchAgent registration + plist (console user's
+ * ~/Library/LaunchAgents), the installed daemon binary for every
+ * sensor in supported_sensors.h, the daemon's Accessibility (TCC) rows,
+ * and any /etc/sudoers.d rule that references the hack-touchid install
+ * dir. Deliberately KEEPS the HackTouchIDStore volume, enrolled
+ * templates, and match_threshold.conf so a later re-deploy doesn't
+ * lose the user's fingers. Works even if the sensor is currently
+ * unplugged, since it walks the whole sensor table instead of relying
+ * on g_detected_sensor. */
+#define HTID_INSTALL_DIR "/usr/local/libexec/hack-touchid"
 
-static void print_about(void) {
-    printf("\n%sHACK-TOUCHID CLIENT%s\n", VFSC_BCYAN, VFSC_RESET);
-    printf("Multi-sensor fingerprint authentication for macOS Sonoma+.\n");
-    printf("Currently supported: Validity VFS5011 (capture backend live);\n");
-    printf("UPEK/AuthenTec TouchStrip (detection only, capture backend pending).\n");
-    printf("Capture pipelines ported from libfprint; matching via NBIS mindtct/bozorth3.\n");
-    printf("%sMATCH_THRESHOLD=%d, ENROLL_SWIPES=%d, MIN_SELF_CONSISTENCY=%d%s\n\n",
-           VFSC_DIM, g_match_threshold, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
+static void do_uninstall(void) {
+    /* Find which sensor daemons are actually installed. */
+    char installed[HACK_TOUCHID_SENSOR_COUNT][PATH_MAX];
+    size_t n_installed = 0;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const char *bin = HACK_TOUCHID_SENSORS[i].daemon_binary_name;
+        if (!bin || !*bin) continue;
+        bool dup = false;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", HTID_INSTALL_DIR, bin);
+        for (size_t j = 0; j < n_installed; j++) {
+            if (strcmp(installed[j], path) == 0) { dup = true; break; }
+        }
+        if (!dup && access(path, F_OK) == 0) {
+            strncpy(installed[n_installed], path, PATH_MAX - 1);
+            installed[n_installed][PATH_MAX - 1] = '\0';
+            n_installed++;
+        }
+    }
+
+    /* Resolve the console user (client runs as root via sudo). */
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw && getuid() != 0) pw = getpwuid(getuid());
+
+    char plist_path[PATH_MAX] = {0};
+    if (pw) {
+        snprintf(plist_path, sizeof(plist_path),
+                 "%s/Library/LaunchAgents/%s.plist", pw->pw_dir, AGENT_LABEL);
+    }
+    bool plist_present = plist_path[0] && access(plist_path, F_OK) == 0;
+    bool agent_running = is_auth_service_deployed();
+
+    if (n_installed == 0 && !plist_present && !agent_running) {
+        printf("Nothing to uninstall: no sensor daemon installed and no agent registered.\n\n");
+        return;
+    }
+
+    vfsc_warn("\nThis will uninstall the authentication service:\n");
+    printf("  - stop and unregister the LaunchAgent (%s)\n", AGENT_LABEL);
+    for (size_t i = 0; i < n_installed; i++) printf("  - delete daemon: %s\n", installed[i]);
+    printf("  - remove its Accessibility (TCC) grant\n");
+    printf("  - remove hack-touchid sudoers rule(s), if any\n");
+    printf("Your enrolled fingers and the %s volume are NOT touched.\n", VOLUME_NAME);
+    printf("Continue? [y/N]: ");
+    fflush(stdout);
+    char answer[16] = {0};
+    if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+        printf("Uninstall cancelled.\n\n");
+        return;
+    }
+    printf("\n");
+
+    int problems = 0;
+    char cmd[PATH_MAX * 2 + 128];
+
+    /* 1. Stop + unregister the LaunchAgent from the user's gui session. */
+    if (pw) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl bootout \"gui/%d/%s\" >/dev/null 2>&1; "
+                 "launchctl bootout \"gui/%d\" \"%s\" >/dev/null 2>&1; true",
+                 (int)pw->pw_uid, AGENT_LABEL, (int)pw->pw_uid, plist_path);
+        system(cmd);
+        if (plist_present) {
+            if (unlink(plist_path) == 0) vfsc_ok("Removed %s\n", plist_path);
+            else { vfsc_err("Couldn't remove %s: %s\n", plist_path, strerror(errno)); problems++; }
+        }
+        if (is_auth_service_deployed()) {
+            vfsc_err("Agent still reports as running after bootout.\n");
+            problems++;
+        } else {
+            vfsc_ok("LaunchAgent stopped and unregistered.\n");
+        }
+    } else {
+        vfsc_warn("Couldn't determine the console user; skipped LaunchAgent removal.\n");
+        problems++;
+    }
+
+    /* 2. Delete installed daemon binaries + their TCC rows. */
+    for (size_t i = 0; i < n_installed; i++) {
+        if (access(TCC_DB_PATH, F_OK) == 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "sqlite3 \"%s\" \"DELETE FROM access WHERE "
+                     "service='kTCCServiceAccessibility' AND client='%s';\" >/dev/null 2>&1",
+                     TCC_DB_PATH, installed[i]);
+            system(cmd);
+        }
+        if (unlink(installed[i]) == 0) vfsc_ok("Removed %s\n", installed[i]);
+        else { vfsc_err("Couldn't remove %s: %s\n", installed[i], strerror(errno)); problems++; }
+    }
+
+    /* 3. Remove sudoers rules that reference our install dir. */
+    FILE *fp = popen("grep -l '" HTID_INSTALL_DIR "' /etc/sudoers.d/* 2>/dev/null", "r");
+    if (fp) {
+        char line[PATH_MAX];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (!line[0]) continue;
+            if (unlink(line) == 0) vfsc_ok("Removed sudoers rule %s\n", line);
+            else { vfsc_err("Couldn't remove %s: %s\n", line, strerror(errno)); problems++; }
+        }
+        pclose(fp);
+    }
+
+    /* Drop the install dir only if nothing else (config, fpbootd) lives there. */
+    rmdir(HTID_INSTALL_DIR);
+
+    if (problems == 0) vfsc_ok("Uninstall complete. Run [3] Deploy to reinstall.\n\n");
+    else vfsc_warn("Uninstall finished with %d problem(s), see above.\n\n", problems);
 }
 
 /* Forward declaration -- defined later in this file (Settings [4]
@@ -4778,7 +4879,7 @@ int main(int argc, char **argv) {
                 getchar();
                 break;
             case 'X': case 'x':
-                do_uninstall_stub();
+                do_uninstall();
                 printf("Press Return to go back to the main menu...");
                 fflush(stdout);
                 getchar();
