@@ -198,7 +198,7 @@ Then, you should be greeted with this **interactive CLI menu for Hackintosh Touc
 ```
 Actions
 [1] Enroll a Finger
-[2] Verify Fingerprint Match [Score / 20]
+[2] Verify Fingerprint Match [Score / x ]
 [3] Deploy Authentication Services
 [C] View Fingerprint (capture preview, nothing saved)
 [P] (ONLY FOR METALLICA MIS SENSORS) Pair
