@@ -2041,6 +2041,16 @@ static void do_uninstall(void) {
     else vfsc_warn("Uninstall finished with %d problem(s), see above.\n\n", problems);
 }
 
+static void print_about(void) {
+    printf("\n%sHACK-TOUCHID CLIENT%s\n", VFSC_BCYAN, VFSC_RESET);
+    printf("Multi-sensor fingerprint authentication for macOS Sonoma+.\n");
+    printf("Currently supported: Validity VFS5011 (capture backend live);\n");
+    printf("UPEK/AuthenTec TouchStrip (detection only, capture backend pending).\n");
+    printf("Capture pipelines ported from libfprint; matching via NBIS mindtct/bozorth3.\n");
+    printf("%sMATCH_THRESHOLD=%d, ENROLL_SWIPES=%d, MIN_SELF_CONSISTENCY=%d%s\n\n",
+           VFSC_DIM, g_match_threshold, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
+}
+
 /* Forward declaration -- defined later in this file (Settings [4]
  * section), but now also called from do_enroll() below for the same
  * first-run auto-setup do_deploy() already does. */
