@@ -4765,7 +4765,12 @@ int main(int argc, char **argv) {
                 getchar();
                 break;
             case 'S': case 's': do_settings_menu(); break;
-            case 'A': case 'a': print_about(); break;
+            case 'A': case 'a':
+                print_about();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
             case 'H': case 'h':
                 print_usage();
                 printf("Press Return to go back to the main menu...");
