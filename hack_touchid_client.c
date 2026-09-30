@@ -4423,22 +4423,221 @@ static bool check_daemon_version_gate(void) {
     return true;
 }
 
+/* ---- Diagnose helpers (read-only) ------------------------------- */
+
+#define DIAG_AGENT_LOG_PATH "/Library/Logs/vfs5011agent.log"
+#define DIAG_MAX_PROBLEMS 24
+
+static int  g_diag_ok = 0;
+static int  g_diag_problems = 0;
+static char g_diag_problem_list[DIAG_MAX_PROBLEMS][96];
+
+/* Records one pass/fail result for the summary block at the end of
+ * the report. Returns 'ok' unchanged so it can wrap a condition. */
+static bool diag_flag(bool ok, const char *what) {
+    if (ok) {
+        g_diag_ok++;
+    } else {
+        if (g_diag_problems < DIAG_MAX_PROBLEMS) {
+            snprintf(g_diag_problem_list[g_diag_problems],
+                     sizeof(g_diag_problem_list[0]), "%s", what);
+        }
+        g_diag_problems++;
+    }
+    return ok;
+}
+
+/* Runs a shell command and prints each non-empty output line with a
+ * prefix, capped at max_lines. Returns the number of lines printed
+ * (0 means the command failed or produced nothing). */
+static int diag_run_cmd(const char *prefix, const char *cmd, int max_lines) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char line[512];
+    int printed = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '\0') continue;
+        if (max_lines > 0 && printed >= max_lines) continue; /* drain */
+        printf("%s%s\n", prefix, line);
+        printed++;
+    }
+    pclose(fp);
+    return printed;
+}
+
+/* Prints "<label>: <value>" for a one-line command, or
+ * "<label>: (unavailable)" if it printed nothing. */
+static void diag_kv(const char *label, const char *cmd) {
+    FILE *fp = popen(cmd, "r");
+    char line[256] = {0};
+    bool got = fp && fgets(line, sizeof(line), fp) != NULL;
+    if (fp) pclose(fp);
+    if (got) {
+        line[strcspn(line, "\r\n")] = '\0';
+        printf("%s: %s\n", label, line[0] ? line : "(empty)");
+    } else {
+        printf("%s: (unavailable)\n", label);
+    }
+}
+
+/* The user whose launchd GUI session / home directory the agent lives
+ * in: $SUDO_USER when re-exec'd under sudo, else the current user. */
+static struct passwd *diag_target_user(void) {
+    const char *su = getenv("SUDO_USER");
+    if (su && *su && strcmp(su, "root") != 0) {
+        struct passwd *p = getpwnam(su);
+        if (p) return p;
+    }
+    return getpwuid(getuid());
+}
+
+/* stat() a path and print mode/owner/size/mtime. Returns false if the
+ * path does not exist. */
+static bool diag_print_file_info(const char *label, const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("%s: missing (%s)\n", label, path);
+        return false;
+    }
+    char when[32] = "?";
+    struct tm tmv;
+    if (localtime_r(&st.st_mtime, &tmv)) {
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tmv);
+    }
+    struct passwd *pw = getpwuid(st.st_uid);
+    printf("%s: %s\n", label, path);
+    printf("  mode %04o, owner %s, %lld bytes, modified %s\n",
+           (unsigned)(st.st_mode & 07777), pw ? pw->pw_name : "?",
+           (long long)st.st_size, when);
+    return true;
+}
+
+static const char *diag_usb_speed_name(int speed) {
+    switch (speed) {
+        case LIBUSB_SPEED_LOW:   return "low (1.5 Mbps)";
+        case LIBUSB_SPEED_FULL:  return "full (12 Mbps)";
+        case LIBUSB_SPEED_HIGH:  return "high (480 Mbps)";
+        case LIBUSB_SPEED_SUPER: return "super (5 Gbps)";
+        default:                 return "unknown";
+    }
+}
+
+/* Enumerates USB through libusb the same way the sensor detector does.
+ * Supported sensors get full detail (bus/address, speed, bcdDevice,
+ * string descriptors when the device can be opened). Every other
+ * device is listed compactly as VID:PID so a sensor that is present
+ * but missing from the supported table is still visible in the
+ * report. Serial numbers are deliberately NOT printed. */
+static int diag_print_usb_details(void) {
+    libusb_context *ctx = NULL;
+    if (libusb_init(&ctx) < 0) {
+        printf("USB enumeration: libusb init failed\n");
+        return 0;
+    }
+    libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(ctx, &list);
+    if (count < 0) {
+        printf("USB enumeration: libusb_get_device_list failed (%d)\n", (int)count);
+        libusb_exit(ctx);
+        return 0;
+    }
+
+    int supported_found = 0;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        const hack_touchid_sensor_t *known = NULL;
+        for (size_t s = 0; s < HACK_TOUCHID_SENSOR_COUNT; s++) {
+            if (desc.idVendor == HACK_TOUCHID_SENSORS[s].vid &&
+                desc.idProduct == HACK_TOUCHID_SENSORS[s].pid) {
+                known = &HACK_TOUCHID_SENSORS[s];
+                break;
+            }
+        }
+        if (!known) continue;
+        supported_found++;
+        printf("Supported sensor: %s (%04x:%04x)\n", known->display_name,
+               desc.idVendor, desc.idProduct);
+        printf("  bus %u, address %u, speed %s\n",
+               (unsigned)libusb_get_bus_number(list[i]),
+               (unsigned)libusb_get_device_address(list[i]),
+               diag_usb_speed_name(libusb_get_device_speed(list[i])));
+        printf("  bcdDevice %04x, bcdUSB %04x, configurations %u\n",
+               desc.bcdDevice, desc.bcdUSB, (unsigned)desc.bNumConfigurations);
+
+        libusb_device_handle *h = NULL;
+        int orc = libusb_open(list[i], &h);
+        if (orc == 0 && h) {
+            unsigned char sbuf[128];
+            if (desc.iManufacturer &&
+                libusb_get_string_descriptor_ascii(h, desc.iManufacturer, sbuf, sizeof(sbuf)) > 0)
+                printf("  manufacturer: %s\n", (char *)sbuf);
+            if (desc.iProduct &&
+                libusb_get_string_descriptor_ascii(h, desc.iProduct, sbuf, sizeof(sbuf)) > 0)
+                printf("  product: %s\n", (char *)sbuf);
+            libusb_close(h);
+        } else {
+            printf("  open failed: %s (string descriptors skipped)\n",
+                   libusb_error_name(orc));
+        }
+    }
+
+    printf("All USB devices (%d):\n", (int)count);
+    int shown = 0;
+    for (ssize_t i = 0; i < count && shown < 40; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        printf("  %04x:%04x (class %02x)\n", desc.idVendor, desc.idProduct,
+               desc.bDeviceClass);
+        shown++;
+    }
+    if (count > shown) printf("  ... %d more not shown\n", (int)count - shown);
+
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return supported_found;
+}
+
 /* run_diagnose_mode() -- shared by the interactive [D] Diagnose menu
  * item and the headless "hack-touchid --diag-pid" launch flag. A
  * plain-text health report meant to be copy-pasted straight into a
- * GitHub issue or a debugging chat: client version, macOS/hardware
- * identification, OpenCore version, detected sensor, daemon install
- * + running state, template volume, Accessibility grant, and
- * enrolled finger count.
+ * GitHub issue or a debugging chat: report time and run context,
+ * client version and settings, macOS/hardware/SIP/boot-args, OpenCore
+ * version, detailed USB and sensor info, daemon install + launchd
+ * state, LaunchAgent plist, sudoers rule, template volume details,
+ * Accessibility grant, enrolled fingers, agent log tail, recent crash
+ * reports, and a pass/fail summary at the end.
  *
  * Deliberately READ-ONLY and never gates/refuses on a bad answer --
  * unlike the interactive menu's startup gates, the whole point here
  * is to surface a broken/missing piece clearly, not stop before
- * reporting it. Every sub-check below is called for its side effect
- * of printing what it finds; the diagnose flow itself never inspects
- * or acts on the return values. */
+ * reporting it. Each pass/fail result is recorded via diag_flag() for
+ * the summary block; nothing else inspects or acts on them. */
 static void run_diagnose_mode(void) {
+    g_diag_ok = 0;
+    g_diag_problems = 0;
+    struct passwd *target = diag_target_user();
+    char cmd[PATH_MAX + 512];
+
     printf("%s=== Hackintosh Touch-ID Diagnostic Report ===%s\n\n", VFSC_BOLD, VFSC_RESET);
+
+    /* -------- Report -------- */
+    printf("-- Report --\n");
+    {
+        time_t now = time(NULL);
+        struct tm tmv;
+        char stamp[64] = "unknown";
+        if (localtime_r(&now, &tmv)) strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S %Z", &tmv);
+        printf("Generated: %s\n", stamp);
+        printf("Launched via: %s\n", g_diag_pid_mode ? "--diag-pid" : "menu [D]");
+        printf("Running as: uid %d, euid %d, invoking user %s\n",
+               (int)getuid(), (int)geteuid(),
+               target ? target->pw_name : "(unknown)");
+    }
+    printf("\n");
 
     /* -------- Client -------- */
     printf("-- Client --\n");
@@ -4450,6 +4649,9 @@ static void run_diagnose_mode(void) {
     } else {
         printf("Version: v%s (build unknown)\n", VFS5011_PROJECT_VERSION);
     }
+    printf("Install dir: %s\n", g_exec_dir[0] ? g_exec_dir : "(unknown)");
+    printf("Match threshold: %d\n", g_match_threshold);
+    diag_print_file_info("Threshold file", MATCH_THRESHOLD_CONF_PATH);
     printf("\n");
 
     /* -------- System -------- */
@@ -4483,22 +4685,35 @@ static void run_diagnose_mode(void) {
         }
         if (fp) pclose(fp);
     }
+    diag_kv("Kernel", "uname -srm 2>/dev/null");
+    diag_kv("CPU", "sysctl -n machdep.cpu.brand_string 2>/dev/null");
+    diag_kv("RAM", "sysctl -n hw.memsize 2>/dev/null | awk '{printf \"%.0f GB\", $1/1073741824}'");
+    diag_kv("Uptime", "uptime 2>/dev/null | sed 's/^ *//'");
+    diag_kv("SIP", "csrutil status 2>/dev/null | sed 's/^System Integrity Protection status: *//'");
+    diag_kv("Boot args", "nvram boot-args 2>/dev/null | sed 's/^boot-args[[:space:]]*//'");
     printf("\n");
 
     /* -------- OpenCore -------- */
     printf("-- OpenCore --\n");
-    check_opencore_version_requirement(); /* prints its own pass/fail line */
+    diag_flag(check_opencore_version_requirement(), "OpenCore version requirement"); /* prints its own pass/fail line */
     printf("\n");
 
-    /* -------- Sensor -------- */
+    /* -------- USB / Sensor -------- */
+    printf("-- USB --\n");
+    diag_print_usb_details();
+    printf("\n");
+
     printf("-- Sensor --\n");
     if (g_detected_sensor) {
         printf("Detected: %s (%04x:%04x)\n", g_detected_sensor->display_name,
                g_detected_sensor->vid, g_detected_sensor->pid);
         printf("Capture backend: %s\n",
                g_detected_sensor->backend_available ? "available" : "not yet implemented");
+        diag_flag(true, "Sensor detected");
+        diag_flag(g_detected_sensor->backend_available != 0, "Capture backend not implemented for this sensor");
     } else {
         printf("Detected: none\n");
+        diag_flag(false, "No supported sensor detected");
     }
     printf("\n");
 
@@ -4511,51 +4726,141 @@ static void run_diagnose_mode(void) {
         get_daemon_install_path(daemon_path, sizeof(daemon_path));
         if (access(daemon_path, F_OK) != 0) {
             printf("Installed: no\n");
+            diag_flag(false, "Daemon not installed");
         } else {
-            char cmd[PATH_MAX + 16];
-            snprintf(cmd, sizeof(cmd), "\"%s\" --version", daemon_path);
-            FILE *fp = popen(cmd, "r");
+            char vcmd[PATH_MAX + 16];
+            snprintf(vcmd, sizeof(vcmd), "\"%s\" --version", daemon_path);
+            FILE *fp = popen(vcmd, "r");
             char daemon_version[64] = {0};
             bool got_line = fp && fgets(daemon_version, sizeof(daemon_version), fp) != NULL;
             if (fp) pclose(fp);
+            diag_flag(true, "Daemon installed");
             if (got_line) {
                 daemon_version[strcspn(daemon_version, "\r\n")] = '\0';
                 printf("Installed: yes (v%s)\n", daemon_version);
                 if (strcmp(daemon_version, VFS5011_PROJECT_VERSION) != 0) {
                     printf("  NOTE: daemon version does not match client version (v%s)\n",
                            VFS5011_PROJECT_VERSION);
+                    diag_flag(false, "Daemon/client version mismatch");
                 }
             } else {
                 printf("Installed: yes (version query failed)\n");
+                diag_flag(false, "Daemon version query failed");
             }
+            diag_print_file_info("Binary", daemon_path);
         }
-        printf("Running: %s\n", is_auth_service_deployed() ? "yes" : "no");
+        bool running = is_auth_service_deployed() != 0;
+        printf("Running: %s\n", running ? "yes" : "no");
+        diag_flag(running, "Agent not running");
+
+        if (target) {
+            printf("launchd (gui/%d/%s):\n", (int)target->pw_uid, AGENT_LABEL);
+            snprintf(cmd, sizeof(cmd),
+                     "launchctl print \"gui/%d/%s\" 2>&1 | "
+                     "grep -E '^[[:space:]]*(state|pid|runs|last exit code|program|path) ' | "
+                     "sed 's/^[[:space:]]*//'",
+                     (int)target->pw_uid, AGENT_LABEL);
+            if (diag_run_cmd("  ", cmd, 8) == 0) {
+                printf("  (agent not loaded in this user's GUI session)\n");
+            }
+
+            char plist_path[PATH_MAX];
+            snprintf(plist_path, sizeof(plist_path),
+                     "%s/Library/LaunchAgents/%s.plist", target->pw_dir, AGENT_LABEL);
+            diag_flag(diag_print_file_info("LaunchAgent plist", plist_path),
+                      "LaunchAgent plist missing");
+        }
+
+        printf("sudoers rule(s) referencing install dir:\n");
+        if (diag_run_cmd("  ", "grep -l '" HTID_INSTALL_DIR "' /etc/sudoers.d/* 2>/dev/null", 5) == 0) {
+            printf("  (none)\n");
+        }
     }
     printf("\n");
 
-    /* -------- Template volume / Accessibility / Fingers -------- */
+    /* -------- Template volume -------- */
     printf("-- Template Volume --\n");
-    printf("Configured: %s\n", is_volume_configured() ? "yes" : "no");
     {
+        bool configured = is_volume_configured() != 0;
+        printf("Configured: %s\n", configured ? "yes" : "no");
+        diag_flag(configured, "Template volume not configured");
+        if (configured) {
+            snprintf(cmd, sizeof(cmd),
+                     "diskutil info \"%s\" 2>/dev/null | "
+                     "grep -E '(Device Node|Mounted|Mount Point|File System Personality|FileVault|Encrypted|Volume UUID):' | "
+                     "sed 's/^[[:space:]]*//'",
+                     VOLUME_NAME);
+            diag_run_cmd("  ", cmd, 8);
+        }
         int dupes = count_store_volume_duplicates();
         if (dupes > 1) {
             printf("WARNING: %d volumes named \"%s\" found -- mounting is ambiguous by\n"
                    "name until you clean up the extras (diskutil apfs deleteVolume).\n",
                    dupes, VOLUME_NAME);
+            diag_flag(false, "Duplicate template volumes");
         }
     }
     printf("\n");
 
+    /* -------- Accessibility -------- */
     printf("-- Accessibility Grant --\n");
-    printf("Granted: %s\n", is_accessibility_granted() ? "yes" : "no");
+    {
+        bool granted = is_accessibility_granted() != 0;
+        printf("Granted: %s\n", granted ? "yes" : "no");
+        diag_flag(granted, "Accessibility not granted");
+        printf("TCC database: %s\n", access(TCC_DB_PATH, F_OK) == 0 ? "present" : "missing");
+    }
     printf("\n");
 
+    /* -------- Enrolled fingers -------- */
     printf("-- Enrolled Fingers --\n");
     if (g_finger_count < 0) refresh_finger_cache();
     if (g_finger_count < 0) {
         printf("Count: n/a (template volume not set up)\n");
+        diag_flag(false, "Could not read enrolled fingers");
     } else {
         printf("Count: %d\n", g_finger_count);
+        for (int i = 0; i < g_finger_count && i < MAX_ENROLLED_FINGERS; i++) {
+            printf("  - %s\n", g_finger_labels[i]);
+        }
+        diag_flag(g_finger_count > 0, "No fingers enrolled");
+    }
+    printf("\n");
+
+    /* -------- Logs -------- */
+    printf("-- Agent Log --\n");
+    if (diag_print_file_info("Log file", DIAG_AGENT_LOG_PATH)) {
+        printf("Last 25 lines:\n");
+        snprintf(cmd, sizeof(cmd), "tail -n 25 \"%s\" 2>/dev/null", DIAG_AGENT_LOG_PATH);
+        if (diag_run_cmd("  | ", cmd, 25) == 0) printf("  (log is empty)\n");
+    }
+    printf("\n");
+
+    printf("-- Recent Crash Reports --\n");
+    {
+        char home_reports[PATH_MAX] = "";
+        if (target) {
+            snprintf(home_reports, sizeof(home_reports),
+                     "%s/Library/Logs/DiagnosticReports", target->pw_dir);
+        }
+        snprintf(cmd, sizeof(cmd),
+                 "ls -t /Library/Logs/DiagnosticReports \"%s\" 2>/dev/null | "
+                 "grep -i -E 'vfs5011|hack-touchid|metallica|upek|htid' | head -5",
+                 home_reports);
+        if (diag_run_cmd("  ", cmd, 5) == 0) printf("(none found)\n");
+    }
+    printf("\n");
+
+    /* -------- Summary -------- */
+    printf("-- Summary --\n");
+    printf("Checks passed: %d\n", g_diag_ok);
+    printf("Problems found: %d\n", g_diag_problems);
+    if (g_diag_problems == 0) {
+        printf("No problems detected.\n");
+    } else {
+        for (int i = 0; i < g_diag_problems && i < DIAG_MAX_PROBLEMS; i++) {
+            printf("  ! %s\n", g_diag_problem_list[i]);
+        }
     }
     printf("\n");
 
