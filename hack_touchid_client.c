@@ -1921,13 +1921,15 @@ static void do_fpbootd_stub(void) {
  * Removes: the LaunchAgent registration + plist (console user's
  * ~/Library/LaunchAgents), the installed daemon binary for every
  * sensor in supported_sensors.h, the daemon's Accessibility (TCC) rows,
- * and any /etc/sudoers.d rule that references the hack-touchid install
- * dir. Deliberately KEEPS the HackTouchIDStore volume, enrolled
+ * any /etc/sudoers.d rule that references the hack-touchid install
+ * dir, and the agent log (HTID_AGENT_LOG_PATH).
+ * Deliberately KEEPS the HackTouchIDStore volume, enrolled
  * templates, and match_threshold.conf so a later re-deploy doesn't
  * lose the user's fingers. Works even if the sensor is currently
  * unplugged, since it walks the whole sensor table instead of relying
  * on g_detected_sensor. */
 #define HTID_INSTALL_DIR "/usr/local/libexec/hack-touchid"
+#define HTID_AGENT_LOG_PATH "/Library/Logs/vfs5011agent.log"
 
 static void do_uninstall(void) {
     /* Find which sensor daemons are actually installed. */
@@ -1962,8 +1964,9 @@ static void do_uninstall(void) {
     }
     bool plist_present = plist_path[0] && access(plist_path, F_OK) == 0;
     bool agent_running = is_auth_service_deployed();
+    bool log_present = access(HTID_AGENT_LOG_PATH, F_OK) == 0;
 
-    if (n_installed == 0 && !plist_present && !agent_running) {
+    if (n_installed == 0 && !plist_present && !agent_running && !log_present) {
         printf("Nothing to uninstall: no sensor daemon installed and no agent registered.\n\n");
         return;
     }
@@ -1973,6 +1976,7 @@ static void do_uninstall(void) {
     for (size_t i = 0; i < n_installed; i++) printf("  - delete daemon: %s\n", installed[i]);
     printf("  - remove its Accessibility (TCC) grant\n");
     printf("  - remove hack-touchid sudoers rule(s), if any\n");
+    if (log_present) printf("  - delete the agent log (%s)\n", HTID_AGENT_LOG_PATH);
     printf("Your enrolled fingers and the %s volume are NOT touched.\n", VOLUME_NAME);
     printf("Continue? [y/N]: ");
     fflush(stdout);
@@ -2032,6 +2036,12 @@ static void do_uninstall(void) {
             else { vfsc_err("Couldn't remove %s: %s\n", line, strerror(errno)); problems++; }
         }
         pclose(fp);
+    }
+
+    /* 4. Remove the agent log. */
+    if (log_present) {
+        if (unlink(HTID_AGENT_LOG_PATH) == 0) vfsc_ok("Removed %s\n", HTID_AGENT_LOG_PATH);
+        else { vfsc_err("Couldn't remove %s: %s\n", HTID_AGENT_LOG_PATH, strerror(errno)); problems++; }
     }
 
     /* Drop the install dir only if nothing else (config, fpbootd) lives there. */
@@ -4425,7 +4435,6 @@ static bool check_daemon_version_gate(void) {
 
 /* ---- Diagnose helpers (read-only) ------------------------------- */
 
-#define DIAG_AGENT_LOG_PATH "/Library/Logs/vfs5011agent.log"
 #define DIAG_MAX_PROBLEMS 24
 
 static int  g_diag_ok = 0;
@@ -4829,9 +4838,9 @@ static void run_diagnose_mode(void) {
 
     /* -------- Logs -------- */
     printf("-- Agent Log --\n");
-    if (diag_print_file_info("Log file", DIAG_AGENT_LOG_PATH)) {
+    if (diag_print_file_info("Log file", HTID_AGENT_LOG_PATH)) {
         printf("Last 25 lines:\n");
-        snprintf(cmd, sizeof(cmd), "tail -n 25 \"%s\" 2>/dev/null", DIAG_AGENT_LOG_PATH);
+        snprintf(cmd, sizeof(cmd), "tail -n 25 \"%s\" 2>/dev/null", HTID_AGENT_LOG_PATH);
         if (diag_run_cmd("  | ", cmd, 25) == 0) printf("  (log is empty)\n");
     }
     printf("\n");
@@ -4864,8 +4873,100 @@ static void run_diagnose_mode(void) {
     }
     printf("\n");
 
-    printf("%s=== End of report -- copy everything above into your issue/message ===%s\n",
-           VFSC_DIM, VFSC_RESET);
+    printf("%s=== End of report ===%s\n", VFSC_DIM, VFSC_RESET);
+}
+
+/* run_diagnose_and_save() -- what [D] and --diag-pid actually call.
+ * Runs run_diagnose_mode() with stdout redirected into a temp file
+ * (colors and the fake verbose-boot timestamps switched off so the
+ * saved text is clean), then echoes the captured report to the
+ * terminal, saves it as hack-touchid-diag-<date>-<time>.txt in the
+ * invoking user's home directory (owned by that user, not root), and
+ * copies it to that user's clipboard via pbcopy. File save and
+ * clipboard copy are best-effort: a failure of either is reported
+ * but never hides the report itself. */
+static void run_diagnose_and_save(void) {
+    struct passwd *target = diag_target_user();
+    char tmp_path[] = "/tmp/hack-touchid-diag.XXXXXX";
+    int tmp_fd = mkstemp(tmp_path);
+    if (tmp_fd < 0) {
+        run_diagnose_mode(); /* can't capture; still show the report */
+        printf("(could not create a temp file, report was not saved: %s)\n", strerror(errno));
+        return;
+    }
+
+    /* Capture. */
+    fflush(stdout);
+    int saved_stdout = dup(STDOUT_FILENO);
+    int saved_color = g_color_enabled;
+    bool saved_verbose = g_verbose_boot;
+    if (saved_stdout < 0 || dup2(tmp_fd, STDOUT_FILENO) < 0) {
+        if (saved_stdout >= 0) close(saved_stdout);
+        close(tmp_fd);
+        unlink(tmp_path);
+        run_diagnose_mode();
+        printf("(could not capture the report, it was not saved)\n");
+        return;
+    }
+    g_color_enabled = 0;
+    g_verbose_boot = false;
+    run_diagnose_mode();
+    fflush(stdout);
+    g_color_enabled = saved_color;
+    g_verbose_boot = saved_verbose;
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+    close(tmp_fd);
+
+    /* Echo to the terminal, and write the saved copy. */
+    char out_path[PATH_MAX] = "";
+    FILE *in = fopen(tmp_path, "r");
+    FILE *out = NULL;
+    if (target) {
+        time_t now = time(NULL);
+        struct tm tmv;
+        char stamp[32] = "report";
+        if (localtime_r(&now, &tmv)) strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv);
+        snprintf(out_path, sizeof(out_path), "%s/hack-touchid-diag-%s.txt", target->pw_dir, stamp);
+        out = fopen(out_path, "w");
+    }
+    if (in) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+            fwrite(buf, 1, n, stdout);
+            if (out) fwrite(buf, 1, n, out);
+        }
+        fclose(in);
+    }
+    fflush(stdout);
+    bool saved_ok = false;
+    if (out) {
+        saved_ok = (fclose(out) == 0);
+        if (saved_ok) {
+            chmod(out_path, 0644);
+            if (geteuid() == 0) (void)chown(out_path, target->pw_uid, target->pw_gid);
+        }
+    }
+
+    printf("\n");
+    if (saved_ok) vfsc_ok("Report saved to %s\n", out_path);
+    else vfsc_warn("Could not save the report file.\n");
+
+    /* Clipboard: as root, hop into the user's GUI session, otherwise
+     * pbcopy would target root's (nonexistent) pasteboard. */
+    char cmd[PATH_MAX * 2 + 128];
+    if (geteuid() == 0 && target) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl asuser %d sudo -u \"%s\" pbcopy < \"%s\" >/dev/null 2>&1",
+                 (int)target->pw_uid, target->pw_name, tmp_path);
+    } else {
+        snprintf(cmd, sizeof(cmd), "pbcopy < \"%s\" >/dev/null 2>&1", tmp_path);
+    }
+    if (system(cmd) == 0) vfsc_ok("Report copied to the clipboard, paste it into your issue/message.\n");
+    else vfsc_warn("Could not copy to the clipboard, attach the saved file instead.\n");
+
+    unlink(tmp_path);
 }
 
 /* run_deploy_agent_mode() -- headless "hack-touchid --deploy-agent",
@@ -5005,7 +5106,7 @@ int main(int argc, char **argv) {
      * doesn't belong in a read-only report. */
     if (g_diag_pid_mode) {
         g_detected_sensor = detect_supported_sensor();
-        run_diagnose_mode();
+        run_diagnose_and_save();
         return 0;
     }
 
@@ -5175,7 +5276,7 @@ int main(int argc, char **argv) {
                 getchar();
                 break;
             case 'D': case 'd':
-                run_diagnose_mode();
+                run_diagnose_and_save();
                 printf("\nPress Return to go back to the main menu...");
                 fflush(stdout);
                 getchar();
