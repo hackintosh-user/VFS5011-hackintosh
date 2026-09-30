@@ -157,15 +157,6 @@ chmod +x prep_and_build.sh
 
 This produces the needed binaries for running the client and each sensor's Daemon + other needed files. 
 
-* `ax_probe`, a standalone Accessibility-API diagnostic tool used during
-development, is not built by `build.sh`. It has no dependency on
-`libusb` or NBIS.
-
- * Can be built on its own if needed:
-
-```bash
-clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationServices
-```
 
 ## Usage
 
