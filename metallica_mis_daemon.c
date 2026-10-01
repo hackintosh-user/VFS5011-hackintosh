@@ -73,12 +73,15 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <sys/time.h>
 #include <libusb.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 
 #include "metallica_mis_proto.h"
 #include "metallica_mis_tls.h"
+#include "metallica_mis_debug.h"
+#include "metallica_mis_db.h"
 #include "metallica_mis_flash.h"
 #include "mmis_rom_info.h"
 #include "metallica_mis_blobs_9a.h"
@@ -147,9 +150,14 @@ int g_metallica_mis_force_pair = 0;
  */
 int metallica_mis_open_device(void) {
     if (libusb_init(&g_ctx) < 0) return -1;
-    libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+    /* --debug: let libusb itself narrate every control/bulk transfer and
+     * hotplug event too (it logs to stderr), on top of our own hex dumps. */
+    libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL,
+                      g_metallica_mis_debug ? LIBUSB_LOG_LEVEL_DEBUG : LIBUSB_LOG_LEVEL_NONE);
+    mmis_dbg("open_device: libusb initialised, probing %zu known identities", (size_t)METALLICA_MIS_IDENTITIES_COUNT);
 
     for (int i = 0; i < 5 && !g_handle; i++) {
+        mmis_dbg("open_device: attempt %d/5", i + 1);
         for (size_t j = 0; j < METALLICA_MIS_IDENTITIES_COUNT; j++) {
             g_handle = libusb_open_device_with_vid_pid(
                 g_ctx, METALLICA_MIS_IDENTITIES[j].vid, METALLICA_MIS_IDENTITIES[j].pid);
@@ -158,6 +166,7 @@ int metallica_mis_open_device(void) {
                 g_detected_pid = METALLICA_MIS_IDENTITIES[j].pid;
                 fprintf(stderr, "metallica_mis: matched identity %s\n",
                         METALLICA_MIS_IDENTITIES[j].label);
+                mmis_dbg("open_device: opened %04x:%04x", g_detected_vid, g_detected_pid);
                 break;
             }
         }
@@ -168,11 +177,15 @@ int metallica_mis_open_device(void) {
 
     libusb_set_auto_detach_kernel_driver(g_handle, 1);
 
-    if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+    int claim_r = libusb_claim_interface(g_handle, 0);
+    mmis_dbg("open_device: claim_interface(0) -> %s", libusb_error_name(claim_r));
+    if (claim_r == 0) return 0;
 
     for (int i = 0; i < 3; i++) {
         usleep(150000);
-        if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+        claim_r = libusb_claim_interface(g_handle, 0);
+        mmis_dbg("open_device: claim retry %d/3 -> %s", i + 1, libusb_error_name(claim_r));
+        if (claim_r == 0) return 0;
     }
 
     fprintf(stderr, "Claim failed, resetting device and retrying...\n");
@@ -251,6 +264,7 @@ static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpo
     int r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
     if (r == LIBUSB_ERROR_PIPE) {
         fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
+        mmis_dbg("usb: endpoint 0x%02x stalled (LIBUSB_ERROR_PIPE), clear_halt + retry", endpoint);
         libusb_clear_halt(handle, endpoint);
         r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
     }
@@ -293,8 +307,12 @@ int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size) {
     if (r != 0) {
         fprintf(stderr, "metallica_mis_read_bulk_data: bulk read failed (libusb error %d: %s)\n",
                 r, libusb_error_name(r));
+        mmis_dbg("usb: bulk read on 0x%02x (data endpoint) FAILED: %s (asked for %zu bytes, 10s timeout)",
+                 METALLICA_MIS_IN_ENDPOINT_DATA, libusb_error_name(r), out_buf_size);
         return -1;
     }
+    mmis_dbg("usb: bulk read on 0x%02x (data endpoint) got %d bytes", METALLICA_MIS_IN_ENDPOINT_DATA, transferred);
+    mmis_dbg_hex("usb: bulk data", out_buf, (size_t)transferred);
 
     return transferred;
 }
@@ -312,16 +330,25 @@ int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size) {
  * encrypt/decrypt-wrapped cmd(), not this one. Do not call this
  * function anywhere past send_init() succeeding.
  */
+static double mmis_ms_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+}
+
 static int cmd(const unsigned char *out, int out_len,
                 unsigned char *in_buf, int in_buf_size) {
     int transferred = 0;
+    double t_start = mmis_ms_now();
 
     if (out_len > 0) {
+        mmis_dbg_hex("usb: OUT (host -> sensor, endpoint 0x01)", out, (size_t)out_len);
         int r = bulk_transfer_with_pipe_retry(g_handle, METALLICA_MIS_OUT_ENDPOINT,
                                                (unsigned char *)out, out_len, &transferred,
                                                METALLICA_MIS_DEFAULT_WAIT_TIMEOUT);
         if (r != 0 || transferred != out_len) {
             fprintf(stderr, "metallica_mis: cmd() SEND failed: %s\n", libusb_error_name(r));
+            mmis_dbg("usb: OUT FAILED: %s (wrote %d of %d bytes)", libusb_error_name(r), transferred, out_len);
             return (r != 0) ? r : LIBUSB_ERROR_IO;
         }
     }
@@ -332,8 +359,12 @@ static int cmd(const unsigned char *out, int out_len,
                                            METALLICA_MIS_DEFAULT_WAIT_TIMEOUT);
     if (r != 0) {
         fprintf(stderr, "metallica_mis: cmd() RECV failed: %s\n", libusb_error_name(r));
+        mmis_dbg("usb: IN FAILED: %s after %.1f ms (buffer %d bytes)", libusb_error_name(r),
+                 mmis_ms_now() - t_start, in_buf_size);
         return r;
     }
+    mmis_dbg_hex("usb: IN (sensor -> host, control-reply endpoint)", in_buf, (size_t)transferred);
+    mmis_dbg("usb: round trip %.1f ms", mmis_ms_now() - t_start);
 
     return transferred;
 }
@@ -353,7 +384,7 @@ static int assert_status(const unsigned char *reply, int reply_len) {
     }
     unsigned short status = (unsigned short)reply[0] | ((unsigned short)reply[1] << 8);
     if (status != 0x0000) {
-        fprintf(stderr, "metallica_mis: command failed, status=0x%04x\n", status);
+        fprintf(stderr, "metallica_mis: command failed, status=0x%04x (%s)\n", status, mmis_status_name(status));
         return -1;
     }
     return 0;
@@ -539,6 +570,7 @@ int metallica_mis_do_pairing(void) {
     }
     fprintf(stderr, "metallica_mis: host identity: product=\"%s\" serial=\"%s\"\n",
             product_name, serial_number);
+    mmis_dbg("do_pairing: begin (vid:pid %04x:%04x, force_pair=%d)", g_detected_vid, g_detected_pid, g_metallica_mis_force_pair);
 
     if (metallica_mis_tls_init(&tls, mis_transport, NULL, product_name, serial_number) != 0) {
         fprintf(stderr, "metallica_mis: do_pairing(): metallica_mis_tls_init() failed\n");
@@ -606,6 +638,7 @@ int metallica_mis_do_pairing(void) {
         return -1;
     }
 
+    mmis_dbg("do_pairing: init_flash() returned OK, tls secure_tx=%d secure_rx=%d", (int)tls.secure_tx, (int)tls.secure_rx);
     fprintf(stderr, "metallica_mis: init_flash() succeeded (session still open). "
                      "Proceeding to firmware upload before any reboot...\n");
 
@@ -667,7 +700,9 @@ int metallica_mis_do_pairing(void) {
         }
     }
 
+    mmis_dbg("do_pairing: starting upload_fwext()");
     if (metallica_mis_upload_fwext(&tls, NULL) != 0) {
+        mmis_dbg("do_pairing: upload_fwext() FAILED");
         fprintf(stderr, "metallica_mis: do_pairing(): upload_fwext() FAILED. Pairing itself "
                          "(partition table + cert material) already succeeded and was "
                          "written to flash -- only the firmware upload step failed. Do NOT "
@@ -709,6 +744,7 @@ int metallica_mis_do_pairing(void) {
          * this, each failed retry here would leak a libusb context. */
         metallica_mis_close_device();
         fprintf(stderr, "metallica_mis: device not back yet, retrying (%d/10)...\n", attempt + 1);
+        mmis_dbg("do_pairing: re-enumeration poll %d/10 failed, sleeping 1s", attempt + 1);
         sleep(1);
     }
 
@@ -721,6 +757,7 @@ int metallica_mis_do_pairing(void) {
         return -1;
     }
 
+    mmis_dbg("do_pairing: device re-enumerated, pairing flow complete");
     fprintf(stderr, "metallica_mis: device re-enumerated successfully. Pairing complete "
                      "and confirmed ready for use.\n");
     return 0;
@@ -729,6 +766,8 @@ int metallica_mis_do_pairing(void) {
 int metallica_mis_send_init(void) {
     unsigned char reply[256];
     int n;
+
+    mmis_dbg("send_init: begin plaintext bootstrap (RomInfo, cmd_19, get_fw_info, init_hardcoded[, clean slate])");
 
     /* Step 1: RomInfo.get() -- retry on transient busy (0x0104).
      * Confirmed real quirk on this exact chip family (Synaptics
@@ -793,6 +832,7 @@ int metallica_mis_send_init(void) {
         return -1;
     }
     unsigned short fw_err = (unsigned short)reply[2] | ((unsigned short)reply[3] << 8);
+    mmis_dbg("send_init: get_fw_info err field = 0x%04x (%s)", fw_err, fw_err ? "firmware extension NOT loaded, clean-slate path" : "firmware extension already loaded");
 
     /* Step 4: always send the hardcoded init blob. */
     n = cmd(metallica_mis_init_hardcoded, sizeof(metallica_mis_init_hardcoded), reply, sizeof(reply));
@@ -827,6 +867,7 @@ int metallica_mis_send_init(void) {
     }
 
     fprintf(stderr, "metallica_mis: plaintext bootstrap stage completed OK\n");
+    mmis_dbg("send_init: done");
     return 0;
 }
 
@@ -1109,6 +1150,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     }
     fprintf(stderr, "metallica_mis: [diag] open_calibration_session() host identity: product=\"%s\" serial=\"%s\"\n",
             product_name, serial_number);
+    mmis_dbg("open_session: begin (vid:pid %04x:%04x)", g_detected_vid, g_detected_pid);
 
     if (metallica_mis_tls_init(tls_out, mis_transport, NULL, product_name, serial_number) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): tls_init() failed\n");
@@ -1134,6 +1176,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
         return -1;
     }
 
+    mmis_dbg("open_session: init_flash() OK, running upload_fwext() (expected to be a no-op on a loaded sensor)");
     bool rebooted = false;
     if (metallica_mis_upload_fwext(tls_out, &rebooted) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): upload_fwext() FAILED\n");
@@ -1189,6 +1232,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     }
 
     unsigned char tls_flash_raw[0x1000];
+    mmis_dbg("open_session: no reboot needed, reading paired identity back from the cert flash partition");
     if (metallica_mis_read_tls_flash(tls_out, tls_flash_raw) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): failed to read "
                          "back paired identity from flash (cert partition)\n");
@@ -1212,6 +1256,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     /* From here on, tls_open() stores &paired_identity into tls_out
      * regardless of outcome (see struct comment above) -- do not
      * free(paired_identity) after this point even on failure. */
+    mmis_dbg("open_session: paired identity parsed, opening the TLS session");
     if (metallica_mis_tls_open(tls_out, paired_identity) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): tls_open() failed "
                          "on the already-paired fast path\n");
@@ -1222,6 +1267,74 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
                      "(already paired, firmware already loaded, secure session "
                      "established, no reboot needed).\n");
     return 0;
+}
+
+/*
+ * metallica_mis_do_records() -- list (wipe=false) or wipe (wipe=true)
+ * the prints stored on the sensor itself, via metallica_mis_db.c.
+ *
+ * Opens the device, runs the plaintext bootstrap, establishes the
+ * same already-paired secure session Calibrate uses, does the DB
+ * work, closes the device. Needs a sensor that is already paired with
+ * firmware loaded (run [P] Pair Sensor first otherwise -- if a real
+ * pairing/upload/reboot has to happen instead, this returns -1 and
+ * says so, like Calibrate does).
+ *
+ * The wipe exists because of the 0x04c3 enroll failure: a print left
+ * on the sensor from an earlier enroll makes the sensor reject the
+ * new record at the very last step. Wipe deletes every user record
+ * in StgWindsor (and with it every print), then reads the storage
+ * back to verify. Enrolled-finger templates that HTID keeps on the
+ * Mac (HackTouchIDStore volume) are NOT touched.
+ *
+ * Returns 0 on success (for wipe: only if the read-back confirms no
+ * users remain), -1 on any failure.
+ */
+int metallica_mis_do_records(bool wipe) {
+    mmis_dbg("records: begin (%s)", wipe ? "WIPE" : "list");
+
+    if (metallica_mis_open_device() != 0) {
+        fprintf(stderr, "metallica_mis: records: could not open the sensor\n");
+        return -1;
+    }
+    if (metallica_mis_send_init() != 0) {
+        fprintf(stderr, "metallica_mis: records: plaintext bootstrap failed\n");
+        metallica_mis_close_device();
+        return -1;
+    }
+
+    metallica_mis_tls_t tls;
+    if (metallica_mis_open_calibration_session(&tls) != 0) {
+        fprintf(stderr, "metallica_mis: records: could not establish a secure session "
+                         "(sensor not paired/loaded yet? run Pair Sensor first)\n");
+        metallica_mis_close_device();
+        return -1;
+    }
+
+    int rc;
+    if (wipe) {
+        printf("Prints on the sensor before the wipe:\n");
+        if (mmis_db_list(&tls, NULL) != 0) {
+            fprintf(stderr, "metallica_mis: records: could not read the current records, "
+                             "wiping anyway is not safe to attempt blind -- aborting\n");
+            metallica_mis_close_device();
+            return -1;
+        }
+        int deleted = 0;
+        rc = mmis_db_wipe_users(&tls, &deleted);
+        if (rc == 0) {
+            printf("\nRemoved %d user record(s) from the sensor. Read-back confirms none remain.\n", deleted);
+        } else {
+            fprintf(stderr, "\nWipe did not complete cleanly (%d user record(s) deleted before the "
+                             "problem). Re-run with --debug and check the db: lines.\n", deleted);
+        }
+    } else {
+        rc = mmis_db_list(&tls, NULL);
+    }
+
+    mmis_dbg("records: done, rc=%d", rc);
+    metallica_mis_close_device();
+    return rc == 0 ? 0 : -1;
 }
 
 /*
@@ -1251,14 +1364,29 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
 #ifndef HACK_TOUCHID_CLIENT_BUILD
 int main(int argc, char **argv) {
     bool do_pair = false;
+    bool do_list_records = false;
+    bool do_wipe_records = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--pair") == 0) do_pair = true;
+        if (strcmp(argv[i], "--debug") == 0 && g_metallica_mis_debug < 1) g_metallica_mis_debug = 1;
+        if (strcmp(argv[i], "--debug-full") == 0) g_metallica_mis_debug = 2;
+        if (strcmp(argv[i], "--list-records") == 0) do_list_records = true;
+        if (strcmp(argv[i], "--wipe-records") == 0) do_wipe_records = true;
+    }
+    if (g_metallica_mis_debug) {
+        mmis_dbg("debug logging ON (level %d). Every USB transfer, TLS command/reply and DB call "
+                 "will be printed to stderr. Capture with: 2>&1 | tee ~/htid-debug.log",
+                 g_metallica_mis_debug);
     }
 
     fprintf(stderr,
         "metallica_mis_daemon: plaintext bootstrap + pairing + firmware\n"
         "upload stage. Calibration/capture still require work beyond\n"
         "this. See file header for status.\n");
+
+    if (do_list_records || do_wipe_records) {
+        return metallica_mis_do_records(do_wipe_records) == 0 ? 0 : 1;
+    }
 
     if (metallica_mis_open_device() != 0) {
         return 1;
