@@ -55,6 +55,8 @@
 #include "supported_sensors.h"
 #include "metallica_mis_firmware.h"
 #include "metallica_mis_daemon.h"
+#include "metallica_mis_debug.h"
+#include "metallica_mis_db.h"
 #include "mmis_calibrate.h"
 #include "upek_proto.h"
 #include "upek_daemon.h"
@@ -743,6 +745,16 @@ static bool g_fpbootd_daemon_mode = false;
  * item). Name's arbitrary -- Mohammad's pick, not short for anything
  * -- but survives the sudo re-exec the same way the other flags do. */
 static bool g_diag_pid_mode = false;
+
+/* Set by argv parsing in main() when "--list-records" / "--wipe-records"
+ * is passed. Headless, same pattern as --diag-pid: lists (or wipes) the
+ * fingerprint records stored ON a Metallica MIS sensor itself, via
+ * metallica_mis_do_records(). The wipe is the manual fix for the 0x04c3
+ * "record save rejected" enroll failure (a print from an earlier enroll
+ * is still on the sensor). Survives the sudo re-exec like the other
+ * flags. */
+static bool g_records_list_mode = false;
+static bool g_records_wipe_mode = false;
 
 /* Set by argv parsing in main() when "--check-updates" is passed.
  * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
@@ -1900,6 +1912,10 @@ static void print_usage(void) {
     printf("  --diag-pid          Print a diagnostic report and exit\n");
     printf("  --check-updates     Check for a client update and exit\n");
     printf("  --force-pair        Wipe identity partitions before Metallica MIS pairing\n");
+    printf("  --debug             Verbose protocol log (every USB transfer, TLS command, DB call)\n");
+    printf("  --debug-full        Same as --debug, but never truncates large payloads\n");
+    printf("  --list-records      List the prints stored on a Metallica MIS sensor and exit\n");
+    printf("  --wipe-records      Delete ALL prints stored on a Metallica MIS sensor and exit\n");
     printf("  --fpbootd-daemon    Run as the Fpbootd pre-login socket server\n\n");
     printf("From the interactive menu, [H] shows this same help.\n\n");
 }
@@ -2283,6 +2299,54 @@ static void do_calibrate_metallica_mis(void) {
     vfsc_ok("\nCalibration succeeded. The clean-slate blob has been written "
             "to flash partition 6.\n\n");
     metallica_mis_close_device();
+}
+
+/* run_records_mode() -- headless "--list-records" / "--wipe-records" for
+ * Metallica MIS sensors. Lists (or wipes) the fingerprint records stored on
+ * the sensor itself. See metallica_mis_do_records() in
+ * metallica_mis_daemon.c for what it needs (already-paired sensor) and
+ * what the wipe does and does not touch.
+ *
+ * The wipe asks for a typed confirmation, since it deletes every print
+ * stored on the sensor (not just HTID's). Pass --debug alongside either
+ * flag to get the full protocol log. */
+static void run_records_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --list-records/--wipe-records only apply to that sensor family.\n\n");
+        return;
+    }
+
+    if (g_records_wipe_mode) {
+        vfsc_warn(
+            "\nThis will DELETE every fingerprint record stored on the sensor\n"
+            "(%s {0x%04X:0x%04X}), including prints enrolled by other\n"
+            "software on this same sensor. It exists to fix the \"Failed: 04c3\"\n"
+            "enroll error, which happens when an earlier print is still stored\n"
+            "on the sensor.\n\n"
+            "HTID's own saved templates on this Mac are NOT touched.\n\n",
+            g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+        printf("Type WIPE (all caps) to proceed, anything else to cancel: ");
+        fflush(stdout);
+        char confirm[16];
+        if (!fgets(confirm, sizeof(confirm), stdin)) {
+            printf("\nCancelled.\n\n");
+            return;
+        }
+        size_t clen = strlen(confirm);
+        while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+        if (strcmp(confirm, "WIPE") != 0) {
+            printf("Cancelled.\n\n");
+            return;
+        }
+    }
+
+    printf("\n");
+    if (metallica_mis_do_records(g_records_wipe_mode) != 0) {
+        vfsc_err("\nRecord %s failed. Re-run with --debug and send the full output.\n\n",
+                 g_records_wipe_mode ? "wipe" : "listing");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
 }
 
 /* Runs ONE real capture attempt against a UPEK/AuthenTec TouchStrip
@@ -5042,6 +5106,20 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--force-pair") == 0) {
             g_metallica_mis_force_pair = 1;
         }
+        if (strcmp(argv[i], "--debug") == 0 && g_metallica_mis_debug < 1) {
+            g_metallica_mis_debug = 1;
+        }
+        if (strcmp(argv[i], "--debug-full") == 0) {
+            g_metallica_mis_debug = 2;
+        }
+        if (strcmp(argv[i], "--list-records") == 0) {
+            g_records_list_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--wipe-records") == 0) {
+            g_records_wipe_mode = true;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
@@ -5060,7 +5138,7 @@ int main(int argc, char **argv) {
      * to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[9];
+        char *sudo_argv[16];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
@@ -5069,6 +5147,10 @@ int main(int argc, char **argv) {
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
         if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
         if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
+        if (g_metallica_mis_debug >= 2) sudo_argv[ai++] = "--debug-full";
+        else if (g_metallica_mis_debug == 1) sudo_argv[ai++] = "--debug";
+        if (g_records_list_mode) sudo_argv[ai++] = "--list-records";
+        if (g_records_wipe_mode) sudo_argv[ai++] = "--wipe-records";
         if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
@@ -5128,6 +5210,23 @@ int main(int argc, char **argv) {
      * never touches g_detected_sensor at all. */
     if (g_check_updates_mode) {
         run_check_updates_mode();
+        return 0;
+    }
+
+    if (g_metallica_mis_debug) {
+        fprintf(stderr, "[dbg] --debug is ON (level %d): every USB transfer, TLS command/reply and sensor "
+                         "DB call is printed to stderr. Capture everything with:\n"
+                         "[dbg]   sudo hack-touchid --debug ... 2>&1 | tee ~/htid-debug.log\n",
+                g_metallica_mis_debug);
+    }
+
+    /* --list-records / --wipe-records: headless Metallica MIS sensor
+     * database actions, same before-the-banner dispatch as the flags
+     * above. Needs its own sensor probe for the same reason as
+     * --diag-pid (this returns before check_sensor_presence_gate()). */
+    if (g_records_list_mode || g_records_wipe_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_records_mode();
         return 0;
     }
 
