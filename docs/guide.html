@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guide - HTID</title>
+<meta name="description" content="Hackintosh Touch ID: fingerprint authentication for macOS on unsupported Hackintosh hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+<link rel="stylesheet" href="assets/style.css"></head><body>
+<nav><div class="wrap"><a class="brand" href="index.html">HTID</a><a href="index.html">Home</a><a href="docs.html">Documentation</a><a href="guide.html" class=on>Guide</a><a href="security.html">Security</a><a href="contribute.html">Help grow this!</a><a href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></nav>
+<header class="wrap page-head"><h1>Guide</h1><p>Everything you need to build, run and use HTID.</p></header><main class="wrap">
+<div class="toc"><a href="#requirements">Requirements</a><a href="#build">Build</a><a href="#run">Run the client</a><a href="#menu">The menu</a><a href="#args">Launch arguments</a><a href="#menubar">Menu bar app</a><a href="#how">How it works</a><a href="#limits">Limitations</a></div>
+<section id="requirements"><h2>Requirements</h2><ul>
+<li><b>macOS 14 Sonoma or later</b> (macOS 15 Sequoia or later recommended). Older versions get zero support.</li>
+<li><b>OpenCore v1.0.6 or later</b>. v1.0.5 and older are not supported.</li>
+<li>Xcode Command Line Tools: <code>xcode-select --install</code></li>
+<li><a href="https://brew.sh">Homebrew</a>, then <code>brew install libusb openssl@3 innoextract</code></li>
+<li>Accessibility permission for the daemon. The deploy step handles this for you.</li>
+<li>Your sensor must be enabled in your USBMap so it is powered. Check System Information, USB, for your sensor's VID:PID.</li></ul>
+<p class="warn"><b>Heads up:</b> <code>openssl@3</code> is scheduled to be deprecated on November 1st 2026, but it should keep working.</p></section>
+<section id="build"><h2>1. Build</h2>
+<pre><code>git clone https://github.com/hackintosh-user/VFS5011-hackintosh.git
+cd VFS5011-hackintosh
+chmod +x prep_and_build.sh
+./prep_and_build.sh</code></pre>
+<p>This produces the client and each sensor's daemon and support files.</p></section>
+<section id="run"><h2>2. Run the client</h2>
+<pre><code>sudo ./hack-touchid</code></pre>
+<p>The first launch shows verbose output. Skip it with <code>--q</code> or <code>--quiet</code>. After the first launch the client adds itself to your <code>$PATH</code>, so from any new terminal you can just run:</p>
+<pre><code>sudo hack-touchid</code></pre></section>
+<section id="menu"><h2>3. Use the menu</h2>
+<pre><code>Actions
+[1] Enroll a Finger
+[2] Verify Fingerprint Match [Score / x ]
+[3] Deploy Authentication Services
+[C] View Fingerprint (capture preview, nothing saved)
+[P] (Metallica MIS only) Pair
+[U] (UPEK 147e:2016 only) capture .pgm
+[B] Capture (experimental, Metallica MIS only)
+[FP] Fpbootd, Pre-Login Auth (coming soon)
+
+Utilities
+[D] Diagnose (generate a report for troubleshooting)
+[S] Settings
+[A] About
+[X] Uninstall
+[Q] Quit</code></pre>
+<ol class="steps">
+<li><b>Enroll a finger [1].</b> Captures several swipes and stores them as a named template on the encrypted volume. Repeat for as many fingers as you like. Verification uses best match wins.</li>
+<li><b>Verify [2].</b> A standalone test of capture and matching, independent of the daemon. Use it to confirm everything works before deploying.</li>
+<li><b>Deploy [3].</b> Rebuilds the daemon, installs it as a per-user LaunchAgent, re-signs it, regenerates its Accessibility grant, and installs a narrowly scoped sudoers rule so it can reach the USB device. Re-run on every deploy so the daemon is never stale.</li></ol>
+<p>Once deployed, the daemon runs in the background. At the lock screen or a System Settings authentication sheet it asks for a swipe and, on a match, types the stored password.</p></section>
+<section id="args"><h2>Launch arguments</h2><div class="scroll"><table>
+<thead><tr><th>Argument</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>--q</code> / <code>--quiet</code></td><td>Launch without the verbose boot output.</td></tr>
+<tr><td><code>--deploy-agent</code></td><td>Run [3] Deploy without entering the client. The menu bar app also uses it after a macOS update.</td></tr>
+<tr><td><code>--diag-pid</code></td><td>Run the [D] Diagnose steps without launching the client.</td></tr>
+<tr><td><code>--check-updates</code></td><td>Check for updates without launching the client.</td></tr>
+<tr><td><code>--debug</code></td><td>Print every log line for easier debugging.</td></tr>
+</tbody></table></div><p class="note">This list changes over time. New arguments are announced in the <a href="docs.html#changelog">changelog</a>.</p></section>
+<section id="menubar"><h2>Menu bar app (optional)</h2>
+<p>The daemon works the same with or without it. It needs macOS 14 Sonoma or later.</p>
+<p>Download the pre-compiled app from the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/releases/latest">Releases page</a>, or build it:</p>
+<pre><code>cd Hackintosh-TouchID-Menubar
+chmod +x build_menubar_app.sh
+./build_menubar_app.sh
+open "build/Hackintosh Touch-ID.app"</code></pre>
+<ul><li>First launch is blocked by Gatekeeper because the app is ad-hoc signed. Right-click, Open, Open again, or run <code>xattr -cr "Hackintosh Touch-ID.app"</code>.</li>
+<li>The daemon needs a small patch to send events to the app. See the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md">daemon patch README</a>.</li>
+<li>For useful notifications, set System Settings, Notifications, Show Previews to <b>Always</b>.</li>
+<li>Pause and resume is global, it affects every recognized prompt at once.</li></ul></section>
+<section id="how"><h2>How it works</h2><div class="grid">
+<div class="card"><h3>Capture</h3><p>The raw USB protocol is implemented directly against libusb with no Linux driver stack.</p></div>
+<div class="card"><h3>Matching</h3><p>NIST's mindtct extracts minutiae and bozorth3 scores matches, both compiled in.</p></div>
+<div class="card"><h3>Storage</h3><p>Templates and the password sit on an encrypted APFS volume. Its passphrase is in the System keychain.</p></div>
+<div class="card"><h3>Detection</h3><p>The daemon watches the focused UI element through the Accessibility APIs. It patches no system process.</p></div>
+<div class="card"><h3>Privilege model</h3><p>Runs as the console user and only escalates to root, via a scoped sudoers rule, for USB access. Not a system LaunchDaemon.</p></div>
+</div></section>
+<section id="limits"><h2>Limitations</h2><ul>
+<li>macOS only, and only macOS 14 Sonoma or later. On Linux, use the libfprint driver directly.</li>
+<li>No PAM module for <code>sudo</code> in a terminal yet. It is planned, but it is unknown whether modern macOS allows it.</li>
+<li>Ad-hoc code signing only. No notarization or Developer ID.</li>
+<li>Cold boot sign-in is not supported. macOS does not allow this level of access at the login window before a user has logged in. It could take months or years.</li></ul></section>
+</main>
+<footer><div class="wrap">HTID, Hackintosh Touch ID. A hobby project, not affiliated with Apple.</div></footer>
+<script src="assets/site.js"></script></body></html>
