@@ -6,6 +6,7 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 1** — Updater: when an update is found it now offers `[A]` Show changelog / `[Y]` Download and install / `[N]` Cancel. `[A]` fetches `CHANGELOG.md` from your branch and prints what's new since your version, so you no longer need GitHub to see what an update contains.
 - **Sep 14** — Metallica MIS pairing bug: pinpointed the decrypt failure to the HMAC check specifically (not key derivation, which is now confirmed correct). Added a write-then-immediate-readback diagnostic to isolate whether the write or the post-write reboot is at fault. Root cause still open.
 - **Sep 13** — Universal rebrand: `VFSStore` volume renamed to `HackTouchIDStore`, 10 `vfs5011_*` files renamed to `hack-touchid-*` (core VFS5011-specific daemon files kept their names on purpose). Verified nothing broke end-to-end post-rename.
 - **Sep 13** — macOS floor raised from Ventura 13 to Sonoma 14 (Homebrew wasn't practically usable on Ventura).
