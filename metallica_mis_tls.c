@@ -34,6 +34,7 @@
 #include <openssl/ecdsa.h>
 
 #include "metallica_mis_tls.h"
+#include "metallica_mis_debug.h"
 #include "metallica_mis_init_flash.h" /* for metallica_mis_prf(), metallica_mis_set_hwkey() */
 
 /* ==================== tiny growable byte buffer ==================== *
@@ -1093,6 +1094,10 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
     tls->secure_tx = false;
     tls->identity = identity;
     SHA256_Init(&tls->handshake_hash);
+    mmis_dbg("tls_open: begin (identity: tls_cert=%zu bytes, priv_blob=%zu bytes, ecdh_blob=%zu bytes; "
+             "key material itself is never logged)",
+             identity ? identity->tls_cert_len : 0, identity ? identity->priv_blob_len : 0,
+             identity ? identity->ecdh_blob_len : 0);
 
     /* Sep 16: this whole function has never been exercised against
      * real hardware before -- only the plaintext bootstrap stage has.
@@ -1113,6 +1118,7 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
         goto done;
     }
 
+    mmis_dbg("tls_open: flight 1 (ClientHello) built, %zu bytes of handshake framing; sending", frame1.len);
     {
         unsigned char wire_hdr[4] = { 0x44, 0x00, 0x00, 0x00 };
         bb_t out; bb_init(&out);
@@ -1142,6 +1148,7 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
         goto done;
     }
 
+    mmis_dbg("tls_open: flight 1 reply parsed (in_len=%d, server_sessid_len=%zu)", in_len, tls->server_sessid_len);
     /* --- derive session keys from device_ecdh_pub + server_random --- */
     if (make_keys(tls) != 0) {
         fprintf(stderr, "metallica_mis: tls_open(): make_keys() (session key "
@@ -1149,6 +1156,7 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
         goto done;
     }
 
+    mmis_dbg("tls_open: session keys derived (values not logged)");
     /* --- flight 2: Certificate, ClientKeyExchange, CertVerify, ChangeCipherSpec, Finished --- */
     if (make_certs(tls, &certs) != 0) {
         fprintf(stderr, "metallica_mis: tls_open(): make_certs() failed\n");
@@ -1195,6 +1203,8 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
         goto done;
     }
 
+    mmis_dbg("tls_open: flight 2 built (certs=%zu kex=%zu verify=%zu ccs=%zu finished=%zu bytes); sending",
+             certs.len, kex.len, verify.len, ccs.len, finish_frame.len);
     {
         unsigned char wire_hdr[4] = { 0x44, 0x00, 0x00, 0x00 };
         bb_t out; bb_init(&out);
@@ -1246,8 +1256,11 @@ int metallica_mis_tls_open(metallica_mis_tls_t *tls, const metallica_mis_identit
                          "was never seen/parsed\n");
     }
     rc = tls->secure_rx ? 0 : -1;
+    mmis_dbg("tls_open: %s (secure_tx=%d secure_rx=%d)", rc == 0 ? "handshake COMPLETE" : "handshake FAILED",
+             (int)tls->secure_tx, (int)tls->secure_rx);
 
 done:
+    if (rc != 0) mmis_dbg("tls_open: FAILED (see the metallica_mis: tls_open(): line above for the exact step)");
     bb_free(&hello); bb_free(&frame1); bb_free(&app_out); bb_free(&flight2);
     bb_free(&certs); bb_free(&kex); bb_free(&verify); bb_free(&ccs);
     bb_free(&hs_finish); bb_free(&finish_frame); bb_free(&frame2);
@@ -1266,8 +1279,22 @@ int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, si
      * everything downstream of it impossible to build -- caught
      * while reading init_flash.py/flash.py closely enough to notice
      * they call tls.cmd() before any pairing has happened at all. */
-    if (!(tls->secure_rx && tls->secure_tx)) {
-        return tls->transport(tls->transport_ctx, cmd, cmd_len, out_buf, out_buf_size);
+    bool secure = (tls->secure_rx && tls->secure_tx);
+    if (g_metallica_mis_debug) {
+        mmis_dbg("tls_cmd: opcode 0x%02x, %zu bytes, %s", cmd_len ? cmd[0] : 0, cmd_len,
+                 secure ? "SECURE session (plaintext shown here, encrypted on the wire)" : "PLAINTEXT (session not open yet)");
+        mmis_dbg_hex("tls_cmd: command (app layer)", cmd, cmd_len);
+    }
+
+    if (!secure) {
+        int n = tls->transport(tls->transport_ctx, cmd, cmd_len, out_buf, out_buf_size);
+        if (n < 0) {
+            mmis_dbg("tls_cmd: plaintext transport failed (%d)", n);
+        } else {
+            mmis_dbg_hex("tls_cmd: reply (app layer)", out_buf, (size_t)n);
+            mmis_dbg_status("tls_cmd", out_buf, (size_t)n);
+        }
+        return n;
     }
 
     unsigned char in_buf[8192];
@@ -1276,16 +1303,32 @@ int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, si
     bb_t app_out; bb_init(&app_out);
     int rc = -1;
 
-    if (make_app_data(tls, cmd, cmd_len, &frame) != 0) goto done;
+    if (make_app_data(tls, cmd, cmd_len, &frame) != 0) {
+        mmis_dbg("tls_cmd: make_app_data() failed (could not encrypt/sign the command)");
+        goto done;
+    }
 
     in_len = tls->transport(tls->transport_ctx, frame.data, frame.len, in_buf, sizeof(in_buf));
-    if (in_len < 0) goto done;
+    if (in_len < 0) {
+        mmis_dbg("tls_cmd: transport failed (%d) sending/receiving the encrypted record", in_len);
+        goto done;
+    }
 
-    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) goto done;
+    if (parse_tls_response(tls, in_buf, (size_t)in_len, &app_out) != 0) {
+        mmis_dbg("tls_cmd: parse_tls_response() failed on a %d byte reply (bad MAC, bad padding, or "
+                 "unexpected record type)", in_len);
+        goto done;
+    }
 
-    if (app_out.len > out_buf_size) goto done;
+    if (app_out.len > out_buf_size) {
+        mmis_dbg("tls_cmd: decrypted reply (%zu bytes) does not fit the caller's buffer (%zu bytes)",
+                 app_out.len, out_buf_size);
+        goto done;
+    }
     memcpy(out_buf, app_out.data, app_out.len);
     rc = (int)app_out.len;
+    mmis_dbg_hex("tls_cmd: reply (app layer, decrypted)", out_buf, app_out.len);
+    mmis_dbg_status("tls_cmd", out_buf, app_out.len);
 
 done:
     bb_free(&frame);
