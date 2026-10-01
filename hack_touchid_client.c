@@ -4188,6 +4188,106 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
     exit(1);
 }
 
+/* ------------------------------------------------------------------ *
+ * Update changelog viewer ([A] at the update prompt)
+ * ------------------------------------------------------------------ *
+ * Fetches CHANGELOG.md from the SAME branch as the version check and
+ * prints just what's new relative to the running build, so nobody has
+ * to open GitHub to find out what an update contains.
+ *
+ *   - Sections ("## vX.Y.Z ...") newer than the local version print in
+ *     full (bullets only).
+ *   - If the top section IS the local version (a beta build bump where
+ *     VERSION= didn't move), only its newest UPDATE_CL_BUILD_LINES
+ *     bullets print -- CHANGELOG.md is newest-first.
+ *   - Total output is capped at UPDATE_CL_MAX_LINES, then points at the
+ *     full file on GitHub.
+ * Markdown noise (** and backticks) is stripped for the terminal.
+ * Returns false if the changelog couldn't be fetched. */
+#define UPDATE_CL_MAX_BYTES    (128 * 1024)
+#define UPDATE_CL_MAX_LINES    40
+#define UPDATE_CL_BUILD_LINES  8
+
+static void print_changelog_line(const char *line, size_t len, bool header) {
+    char out[1024];
+    size_t o = 0;
+    for (size_t i = 0; i < len && o < sizeof(out) - 1; i++) {
+        if (line[i] == '`') continue;
+        if (line[i] == '*' && i + 1 < len && line[i + 1] == '*') { i++; continue; }
+        out[o++] = line[i];
+    }
+    out[o] = '\0';
+    if (header) {
+        printf("\n%s%s%s\n", VFSC_BOLD, out, VFSC_RESET);
+    } else {
+        printf("%s\n", out);
+    }
+}
+
+static bool show_update_changelog(const char *branch, const char *local_version) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "curl -fsS -m 5 '%s/%s/CHANGELOG.md' 2>/dev/null",
+             UPDATE_RAW_BASE_URL, branch);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+
+    char *buf = malloc(UPDATE_CL_MAX_BYTES + 1);
+    if (!buf) { pclose(fp); return false; }
+    size_t total = 0, n;
+    while (total < UPDATE_CL_MAX_BYTES &&
+           (n = fread(buf + total, 1, UPDATE_CL_MAX_BYTES - total, fp)) > 0) {
+        total += n;
+    }
+    buf[total] = '\0';
+    pclose(fp);
+    if (total == 0) { free(buf); return false; }
+
+    int local_code = parse_version_code(local_version);
+    printf("\n%sWhat's new%s\n", VFSC_BCYAN, VFSC_RESET);
+
+    int printed = 0, sections_shown = 0, section_bullets = 0;
+    bool in_section = false, show_section = false, same_version = false, truncated = false;
+    const char *p = buf;
+    while (*p && !truncated) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        size_t clen = len;
+        if (clen > 0 && p[clen - 1] == '\r') clen--;
+
+        if (clen >= 4 && strncmp(p, "## v", 4) == 0) {
+            int code = parse_version_code(p + 3);
+            in_section = true;
+            section_bullets = 0;
+            same_version = (code >= 0 && code == local_code && sections_shown == 0);
+            show_section = (code >= 0 && local_code >= 0 && code > local_code) || same_version;
+            if (show_section) {
+                print_changelog_line(p + 3, clen - 3, true);
+                sections_shown++;
+            } else if (code >= 0 && local_code >= 0 && code < local_code) {
+                break; /* newest-first: nothing older is relevant */
+            }
+        } else if (in_section && show_section && clen > 2 && strncmp(p, "- ", 2) == 0) {
+            if (printed >= UPDATE_CL_MAX_LINES ||
+                (same_version && section_bullets >= UPDATE_CL_BUILD_LINES)) {
+                truncated = true;
+            } else {
+                print_changelog_line(p, clen, false);
+                printed++;
+                section_bullets++;
+            }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+
+    if (sections_shown == 0) {
+        printf("No changelog entries found for this update.\n");
+    }
+    printf("\nFull changelog: %s/blob/%s/CHANGELOG.md\n\n", UPDATE_REPO_URL, branch);
+    free(buf);
+    return true;
+}
+
 static void check_for_client_update(void) {
     /* g_local_version_info is cached the first time it's needed --
      * either by print_banner() (quiet mode, runs before this) or
@@ -4238,14 +4338,28 @@ static void check_for_client_update(void) {
         printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
                VFSC_BYELLOW, VFSC_RESET);
     }
-    printf("Would you like to download the new update v%s (%s)?\n",
-           remote.version, remote.build);
-    printf("You are currently running v%s (%s). [Y/n]: ",
-           local.version, local.build);
-    fflush(stdout);
+    printf("You are currently running v%s (%s).\n", local.version, local.build);
+    printf("New version: v%s (%s)\n\n", remote.version, remote.build);
 
-    char confirm[8];
-    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+    for (;;) {
+        printf("  [A] Show changelog\n  [Y] Download and install\n  [N] Cancel\n");
+        printf("Choice [A/Y/N]: ");
+        fflush(stdout);
+
+        char confirm[16];
+        if (!fgets(confirm, sizeof(confirm), stdin)) {
+            printf("\nSkipping update. Continuing with v%s (%s).\n\n", local.version, local.build);
+            return;
+        }
+        char c = confirm[0];
+        if (c == 'a' || c == 'A') {
+            if (!show_update_changelog(local.branch, local.version)) {
+                vfsc_warn("Couldn't fetch the changelog. See: %s/blob/%s/CHANGELOG.md\n\n",
+                          UPDATE_REPO_URL, local.branch);
+            }
+            continue;
+        }
+        if (c == 'y' || c == 'Y') break;
         printf("Skipping update. Continuing with v%s (%s).\n\n", local.version, local.build);
         return;
     }
