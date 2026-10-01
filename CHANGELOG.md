@@ -6,7 +6,20 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 2** - Project website: a GitHub Pages site (served from `docs/`) with a home page, a documentation page (live changelog plus the latest 5 commits on every branch), a usage guide, the security policy and the contributing guide ("Help grow this!").
+- **Oct 1** - Metallica MIS: new sensor record DB layer (`metallica_mis_db.c/.h`), a C port of python-validity's `db.py`. Can list and wipe the prints stored on the sensor, and verifies a wipe by re-reading afterwards. The enroll path is not built yet.
+- **Oct 1** - New launch arguments: `--debug` (logs every USB transfer, TLS command and DB call with timestamps and hex dumps, plus libusb's own debug log, key material is never logged) and `--debug-full` (removes the payload size cap). Known sensor status words such as `04c3` and `04b3` are named in the log.
+- **Oct 1** - New launch arguments `--list-records` (read only) and `--wipe-records` (asks you to type WIPE, deletes every print on the sensor, does not touch HTID's saved templates on the Mac).
+- **Oct 1** - Build scripts and CI source lists updated for the new Metallica MIS files.
 - **Oct 1** — Updater: when an update is found it now offers `[A]` Show changelog / `[Y]` Download and install / `[N]` Cancel. `[A]` fetches `CHANGELOG.md` from your branch and prints what's new since your version, so you no longer need GitHub to see what an update contains.
+- **Sep 30** - Tester finding: the Metallica MIS `04c3` enroll failure is caused by a print already stored on the sensor for that user. Deleting it first lets enrollment succeed, which is what the new record DB layer is for.
+- **Sep 30** - `[D] Diagnose` / `--diag-pid` report expanded with more system, USB and daemon detail, can now be saved to a file, and `[X] Uninstall` also cleans up the agent log.
+- **Sep 30** - Release ETA updated to mid October 2026.
+- **Sep 29** - `[X] Uninstall` implemented natively: removes the daemon for any sensor. The `[A] About` screen no longer clears instantly (added a Press Return pause). CLI menu example and supported sensor statuses updated in the README.
+- **Sep 25** - Menu polish: help, Uninstall and Fpbootd entries, status rows, and fixed the `H`/`X`/`A`/`FP` options flashing before the screen clears.
+- **Sep 23-24** - README gains an ETA disclaimer and a credits section, CONTRIBUTING.md updated.
+- **Sep 21-22** - Fpbootd (pre-login authentication) spike code committed: base resources, `Info.plist`, a test harness, and install/uninstall scripts. Fixed its clang build issues. `prep_and_build.sh` now mentions `fpbootd-install.sh` when it finishes.
+- **Sep 15** - Metallica MIS pairing root cause found: `init_flash()` returned early whenever the sensor already reported partitions, so `[P] Pair` silently did nothing on an already-paired sensor. Added `--force-pair`, which runs the full fresh-pairing sequence in the correct order.
 - **Sep 14** — Metallica MIS pairing bug: pinpointed the decrypt failure to the HMAC check specifically (not key derivation, which is now confirmed correct). Added a write-then-immediate-readback diagnostic to isolate whether the write or the post-write reboot is at fault. Root cause still open.
 - **Sep 13** — Universal rebrand: `VFSStore` volume renamed to `HackTouchIDStore`, 10 `vfs5011_*` files renamed to `hack-touchid-*` (core VFS5011-specific daemon files kept their names on purpose). Verified nothing broke end-to-end post-rename.
 - **Sep 13** — macOS floor raised from Ventura 13 to Sonoma 14 (Homebrew wasn't practically usable on Ventura).
