@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security - HTID</title>
+<meta name="description" content="Hackintosh Touch ID: fingerprint authentication for macOS on unsupported Hackintosh hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+<link rel="stylesheet" href="assets/style.css"></head><body>
+<nav><div class="wrap"><a class="brand" href="index.html">HTID</a><a href="index.html">Home</a><a href="docs.html">Documentation</a><a href="guide.html">Guide</a><a href="security.html" class=on>Security</a><a href="contribute.html">Help grow this!</a><a href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></nav>
+<header class="wrap page-head"><h1>Security</h1><p>What HTID protects, what it doesn't, and how to report a problem.</p></header><main class="wrap">
+<section style="border:0"><h2>Overview</h2>
+<p>HTID intercepts macOS authentication prompts (login screen, System Settings padlock and Keychain prompts) and satisfies them with a fingerprint swipe from a supported USB sensor, matched against locally stored templates.</p>
+<p>Different sensors have real architectural differences. Some match on the host, others match on the chip and never expose raw image data, so read the per-backend notes below.</p>
+<p class="warn"><b>Not audited.</b> It touches sensitive parts of macOS (authentication, sudoers, LaunchAgents, Keychain) and is a hobbyist open-source project, not audited by Apple or any third-party firm. Evaluate it accordingly.</p></section>
+<section><h2>Threat model</h2>
+<p><b>Intended use:</b> convenience authentication on a personal Hackintosh you physically control.</p>
+<h3>It does NOT claim to</h3><ul>
+<li>Match Apple's Secure Enclave Touch ID. Hackintosh hardware has no Secure Enclave, and most backends match in userspace.</li>
+<li>Stop a skilled attacker with physical access and time, for example someone who dumps the encrypted volume and brute-forces the passphrase, or replaces the daemon binary.</li>
+<li>Defend against fake or molded fingerprints. None of the supported sensors do liveness detection.</li></ul>
+<h3>Sensitive components</h3><ul>
+<li><b>Fingerprint templates</b> live in the encrypted APFS volume <code>HackTouchIDStore</code>, with the passphrase in the System keychain. If your System keychain or FileVault is compromised, the volume is only as safe as that.</li>
+<li><b>The daemon runs with elevated privileges</b> and uses a narrowly scoped <code>sudoers</code> <code>NOPASSWD</code> rule. Review it before installing. It should cover the daemon binary only. Keep the binary root-owned and not writable by your user.</li>
+<li><b>The prompt watcher</b> is allow-listed to specific system processes. It is deliberately not wired to arbitrary third-party password fields or terminal <code>sudo</code> prompts.</li></ul></section>
+<section><h2>Known issues and per-backend caveats</h2><ul>
+<li><b>Backend maturity varies.</b> New sensor backends need real-hardware testing. Compiling cleanly is not the same as being hardware-verified.</li>
+<li><b>On-chip matching backends</b> store no local image or raw minutiae. <b>Off-chip backends</b> store extracted minutiae templates locally, never raw images, but a template is still sensitive biometric data.</li>
+<li><b>Pairing is exclusive per host.</b> On chips that support it, pairing a sensor to this Hackintosh can orphan, not delete, enrollments made under another OS on the same sensor. This is a hardware property, not a bug.</li>
+<li><b>Debug builds may log more.</b> Development branches can include verbose diagnostics (key material, session state). Do not share that output publicly without reviewing it.</li></ul></section>
+<section><h2>Supported versions</h2><p>Please download the latest source before opening an issue. There are no tagged releases for security reasons. This is a spare-time project.</p></section>
+<section id="reporting-a-vulnerability"><h2>Reporting a vulnerability</h2>
+<p>Found a privilege escalation, sudoers misconfiguration, template or passphrase exposure, daemon impersonation, or similar? Please:</p>
+<ol class="steps"><li>Open a <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/security/advisories/new">GitHub Security Advisory</a> (preferred), or</li><li>Open a <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/issues">GitHub Issue</a>.</li></ol>
+<p>Include your macOS version and hardware, which sensor and backend is involved, the steps to reproduce, and the impact you believe it has. This is a solo-maintained project, so response times won't match a corporate bug bounty.</p></section>
+<section><h2>Recommendations for users</h2><ul>
+<li>Only build from this repo. Anything claiming to be HTID from elsewhere is most likely fake.</li>
+<li>Review the <code>sudoers</code> rule and <code>LaunchAgent</code> plist before installing. Don't run install scripts blindly.</li>
+<li>Treat it as a convenience layer on top of FileVault and a strong login password, never a replacement.</li>
+<li>Keep your templates private. Don't share your <code>fingers/</code> directory or the <code>HackTouchIDStore</code> volume. They derive from your biometric print.</li></ul></section>
+<section><h2>Disclaimer</h2><p>Provided <b>as-is, without warranty of any kind</b> (see the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development?tab=License-1-ov-file">license</a>). Use at your own risk, especially on machines used for sensitive work.</p></section>
+</main>
+<footer><div class="wrap">HTID, Hackintosh Touch ID. A hobby project, not affiliated with Apple.</div></footer>
+<script src="assets/site.js"></script></body></html>
