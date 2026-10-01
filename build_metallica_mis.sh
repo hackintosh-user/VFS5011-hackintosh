@@ -36,6 +36,7 @@ clang metallica_mis_daemon.c metallica_mis_tls.c metallica_mis_init_flash.c \
     metallica_mis_flash.c metallica_mis_blobs_9a.c metallica_mis_firmware.c \
     metallica_mis_upload_fwext.c mmis_rom_info.c \
     mmis_timeslot.c mmis_calibrate.c mmis_factory_bits.c \
+    metallica_mis_debug.c metallica_mis_db.c \
     -o metallica_mis_daemon \
     -I. \
     -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
