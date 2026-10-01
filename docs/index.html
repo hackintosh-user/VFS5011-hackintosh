@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hackintosh Touch ID - HTID</title>
+<meta name="description" content="Hackintosh Touch ID: fingerprint authentication for macOS on unsupported Hackintosh hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+<link rel="stylesheet" href="assets/style.css"></head><body>
+<nav><div class="wrap"><a class="brand" href="index.html">HTID</a><a href="index.html" class=on>Home</a><a href="docs.html">Documentation</a><a href="guide.html">Guide</a><a href="security.html">Security</a><a href="contribute.html">Help grow this!</a><a href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></nav>
+<header class="hero"><div class="wrap"><span class="badge">v1.1.0</span><span class="badge">Release ETA: mid October 2026</span><span class="badge">macOS Hackintosh</span>
+<h1>Touch ID for Hackintosh</h1><p>Fingerprint authentication for macOS on unsupported hardware. Unlock with a real fingerprint sensor instead of typing your password.</p>
+<a class="btn primary" href="guide.html">Get started</a><a class="btn" href="docs.html">Documentation</a><a class="btn" href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></header><main class="wrap">
+<section style="border:0"><h2>What is it?</h2>
+<p>HTID is a fingerprint authentication daemon for macOS on Hackintosh hardware. It ports the USB capture protocol of supported fingerprint sensors to native C, matches swipes with NIST's NBIS suite, and types your password into the macOS prompt when your finger matches. It is not a kernel extension and not a libfprint port.</p>
+<p>Built for laptops that shipped with a fingerprint sensor but have no native macOS driver.</p></section>
+<section id="features"><h2>Features</h2><div class="grid">
+<div class="card"><h3>Lock screen</h3><p>Unlock with a fingerprint swipe.</p></div>
+<div class="card"><h3>Authentication prompts</h3><p>System Settings padlock, Finder, Passwords.app and Keychain Access consent prompts.</p></div>
+<div class="card"><h3>Multi-finger enrollment</h3><p>Enroll several fingers, best match wins.</p></div>
+<div class="card"><h3>Fully native</h3><p>No kernel extension and no libfprint at runtime. A small background daemon.</p></div>
+<div class="card"><h3>Encrypted storage</h3><p>Templates and the stored password live on a dedicated encrypted APFS volume.</p></div>
+<div class="card"><h3>Menu bar app</h3><p>Optional app to enable, disable or restart the daemon, with notifications when it is ready to swipe.</p></div>
+</div></section>
+<section id="macos"><h2>Supported macOS</h2><div class="scroll"><table>
+<thead><tr><th>Version</th><th>Status</th></tr></thead><tbody>
+<tr><td>macOS 15 Sequoia and later</td><td class="tag ok">Recommended</td></tr>
+<tr><td>macOS 14 Sonoma</td><td class="tag ok">Supported (minimum)</td></tr>
+<tr><td>macOS 13 Ventura and older</td><td class="tag bad">No support. It may work, but you are on your own.</td></tr>
+</tbody></table></div>
+<p class="note"><b>OpenCore v1.0.6 or later</b> is required for support. Release or Debug builds are both fine. Older versions may work but are not supported.</p></section>
+<section id="sensors"><h2>Supported sensors</h2><div class="scroll"><table>
+<thead><tr><th>Sensor</th><th>VID:PID</th><th>Status</th></tr></thead><tbody>
+<tr><td>Validity VFS5011</td><td><code>138A:0018</code></td><td class="tag ok">Supported, confirmed working</td></tr>
+<tr><td>Synaptics Metallica MIS</td><td><code>06cb:009a</code></td><td class="tag dev">In development, actively testing</td></tr>
+<tr><td>Prometheus 97</td><td><code>138A:0097</code></td><td class="tag dev">In development, planned testing</td></tr>
+<tr><td>Prometheus 9d</td><td><code>138A:009d</code></td><td class="tag dev">In development</td></tr>
+<tr><td>UPEK TouchStrip</td><td><code>147E:2016</code></td><td class="tag dev">In development, testing soon</td></tr>
+<tr><td>Validity VFS101</td><td><code>138A:0001</code></td><td class="tag plan">Planned, waiting on access to the device</td></tr>
+</tbody></table></div>
+<p class="note">This is a hobby project, so keep expectations in check. The client checks your sensor's VID:PID and tells you whether it is supported.</p></section>
+<section><h2>Credits</h2><p><b>@Hackintosh-user</b>, lead developer. <b>@ilikehackintosh</b>, documentation. Thanks to u/p0cketl1nt (Metallica MIS and Prometheus 97 testing) and u/dCold_Salamander7764 (UPEK TouchStrip testing).</p></section>
+</main>
+<footer><div class="wrap">HTID, Hackintosh Touch ID. A hobby project, not affiliated with Apple.</div></footer>
+<script src="assets/site.js"></script></body></html>
