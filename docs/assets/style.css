@@ -42,3 +42,5 @@ pre code{background:none;padding:0}
 .cl h3{margin:26px 0 6px;font-size:1.15rem;color:var(--accent)}.cl ul{padding-left:20px}.cl li{margin:6px 0}.cl hr{border:0;border-top:1px solid var(--line)}
 .muted{color:var(--muted)}
 footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:.9rem;text-align:center;margin-top:30px}
+.fp{display:inline-block;width:24px;height:24px;margin-right:8px;vertical-align:-5px;background:currentColor;-webkit-mask:url(fingerprint.png) center/contain no-repeat;mask:url(fingerprint.png) center/contain no-repeat}
+nav .brand{display:flex;align-items:center}
