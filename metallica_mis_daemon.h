@@ -25,6 +25,7 @@
 #include <stddef.h>
 
 #include "metallica_mis_tls.h"
+#include "metallica_mis_debug.h"
 
 #ifndef __METALLICA_MIS_DAEMON_H
 #define __METALLICA_MIS_DAEMON_H
@@ -102,5 +103,15 @@ int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size);
  * it does not skip on its own if valid calibration data already exists.
  * Returns 0 on success, -1 on any failure. */
 int metallica_mis_do_calibrate(metallica_mis_tls_t *tls);
+
+/* Lists (wipe=false) or wipes (wipe=true) the fingerprint records stored
+ * ON the sensor, via metallica_mis_db.c. Opens/closes the device itself.
+ * Needs an already-paired sensor with firmware loaded. Wipe deletes every
+ * user record in the sensor's StgWindsor storage and verifies by reading
+ * back -- this is the manual fix for the 0x04c3 "record save rejected"
+ * enroll failure. Does not touch HTID's own saved templates on the Mac.
+ * Returns 0 on success, -1 on failure. Honours g_metallica_mis_debug
+ * (metallica_mis_debug.h). */
+int metallica_mis_do_records(bool wipe);
 
 #endif /* __METALLICA_MIS_DAEMON_H */
