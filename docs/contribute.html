@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help grow this! - HTID</title>
+<meta name="description" content="Hackintosh Touch ID: fingerprint authentication for macOS on unsupported Hackintosh hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+<link rel="stylesheet" href="assets/style.css"></head><body>
+<nav><div class="wrap"><a class="brand" href="index.html">HTID</a><a href="index.html">Home</a><a href="docs.html">Documentation</a><a href="guide.html">Guide</a><a href="security.html">Security</a><a href="contribute.html" class=on>Help grow this!</a><a href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></nav>
+<header class="wrap page-head"><h1>Help grow this!</h1><p>Test sensors, write code, or just say hi.</p></header><main class="wrap">
+<section style="border:0"><p>Contributions are welcome and genuinely help the project grow. There are two main ways to help: testing and code.</p>
+<p class="warn"><b>Security report?</b> Please don't file it as a normal issue or PR. HTID is biometric authentication, so it is a security matter. Use the <a href="security.html#reporting-a-vulnerability">security page</a>.</p></section>
+<section><h2>Testing</h2>
+<p>Testing a sensor that is in development is the best way to make sure new code ships without bugs or security issues. Testers are heavily welcomed.</p>
+<p>To apply, send me the following (contact links are below):</p><ul>
+<li>Your laptop model</li><li>Your macOS version (must meet the minimum)</li><li>Your OpenCore version (v1.0.6 or later)</li><li>Your fingerprint sensor</li>
+<li>Your <b>VID:PID</b>. Without this I can't use your help.</li>
+<li>Your timezone, so I don't ping you at 4AM (mine is UTC+3, KSA time)</li>
+<li>Whether your sensor is enabled in your USBMap or USBMap.kext. That decides whether it is powered at all. Check your USBMap, then System Information, USB, for the VID:PID.</li></ul></section>
+<section><h2>Helping with code</h2><p>This is what expands sensor support the fastest.</p><ul>
+<li>The project is written in C, and the sensor code follows libfprint and fprintd conventions. If you know C, you're welcome. Anyone is welcome to try.</li>
+<li>Before a PR that adds a sensor backend or touches the build, check the <code>build_*.sh</code> scripts and <code>ci.yml</code>. A new source file must be added everywhere the daemon's source list appears, or CI can pass green while the real build is broken.</li>
+<li>For anything nontrivial (new backend, architecture change), open an issue first so we can align. Small fixes and typos can go straight to a PR.</li></ul>
+<p><a class="btn primary" href="https://github.com/hackintosh-user/VFS5011-hackintosh/issues">Open an issue</a><a class="btn" href="https://github.com/hackintosh-user/VFS5011-hackintosh/pulls">Pull requests</a></p></section>
+<section><h2>Contacting me</h2><div class="grid">
+<a class="card" href="https://www.reddit.com/user/Sufficient_Bus_8302/"><h3>Reddit</h3><p>u/Sufficient_Bus_8302</p></a>
+<a class="card" href="https://xdaforums.com/m/hackintosh_user.13447103/"><h3>XDA Forums</h3><p>hackintosh_user</p></a>
+<a class="card" href="https://forums.macrumors.com/members/hackintosh_user.1420199/"><h3>MacRumors Forums</h3><p>hackintosh_user</p></a>
+<a class="card" href="https://x.com/mohammad_q_124"><h3>X (Twitter)</h3><p>@mohammad_q_124</p></a></div></section>
+</main>
+<footer><div class="wrap">HTID, Hackintosh Touch ID. A hobby project, not affiliated with Apple.</div></footer>
+<script src="assets/site.js"></script></body></html>
