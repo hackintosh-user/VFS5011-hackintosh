@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="assets/style.css"></head><body>
 <nav><div class="wrap"><a class="brand" href="index.html"><span class="fp"></span>HTID</a><a href="index.html">Home</a><a href="docs.html">Documentation</a><a href="guide.html" class=on>Guide</a><a href="security.html">Security</a><a href="contribute.html">Help grow this!</a><a href="https://github.com/hackintosh-user/VFS5011-hackintosh">GitHub</a></div></nav>
 <header class="wrap page-head"><h1>Guide</h1><p>Everything you need to build, run and use HTID.</p></header><main class="wrap">
-<div class="toc"><a href="#requirements">Requirements</a><a href="#build">Build</a><a href="#run">Run the client</a><a href="#menu">The menu</a><a href="#args">Launch arguments</a><a href="#menubar">Menu bar app</a><a href="#how">How it works</a><a href="#limits">Limitations</a></div>
+<div class="toc"><a href="#requirements">Requirements</a><a href="#build">Build</a><a href="#run">Run the client</a><a href="#menu">The menu</a><a href="#args">Launch arguments</a><a href="#menubar">Menu bar app</a><a href="#fpbootd">Fpbootd</a><a href="#how">How it works</a><a href="#limits">Limitations</a></div>
 <section id="requirements"><h2>Requirements</h2><ul>
 <li><b>macOS 14 Sonoma or later</b> (macOS 15 Sequoia or later recommended). Older versions get zero support.</li>
 <li><b>OpenCore v1.0.6 or later</b>. v1.0.5 and older are not supported.</li>
@@ -66,6 +66,14 @@ open "build/Hackintosh Touch-ID.app"</code></pre>
 <li>The daemon needs a small patch to send events to the app. See the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md">daemon patch README</a>.</li>
 <li>For useful notifications, set System Settings, Notifications, Show Previews to <b>Always</b>.</li>
 <li>Pause and resume is global, it affects every recognized prompt at once.</li></ul></section>
+<section id="fpbootd"><h2>Fpbootd: pre-login authentication</h2>
+<p>Fpbootd is an experimental effort to use your fingerprint before you have logged in to macOS. Today HTID only works after login, at the lock screen and in authentication prompts.</p>
+<p class="warn"><b>Not usable yet.</b> This is early research, with no release date.</p>
+<h3>Current state</h3><ul>
+<li>Early spike code is committed on the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development">active-development</a> branch.</li>
+<li>The <code>[FP]</code> entry in the client menu is a placeholder. It does nothing yet.</li>
+<li>Cold boot sign-in is not supported. See <a href="#limits">Limitations</a>.</li></ul>
+<p>Progress is announced in the <a href="docs.html#changelog">changelog</a>.</p></section>
 <section id="how"><h2>How it works</h2><div class="grid">
 <div class="card"><h3>Capture</h3><p>The raw USB protocol is implemented directly against libusb with no Linux driver stack.</p></div>
 <div class="card"><h3>Matching</h3><p>NIST's mindtct extracts minutiae and bozorth3 scores matches, both compiled in.</p></div>
