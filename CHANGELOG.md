@@ -6,6 +6,9 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 2** - New launch arguments `--host-product` and `--host-serial` (Metallica MIS). They replace the spoofed Mac model and serial that HTID uses to derive the sensor's pairing key. For a sensor paired on Linux or Windows, pass the laptop's real DMI `product_name` and `product_serial` so `--list-records` and `--wipe-records` can open a session without re-pairing.
+- **Oct 2** - Tester finding (Metallica MIS): `--force-pair` cannot wipe a sensor that is already paired to another host identity. The partition write goes out in plaintext and the sensor rejects it with `0x0404`. Record listing fails the HMAC check because HTID derives its key from the spoofed Mac identity while Linux used the real one.
+- **Oct 2** - Website: new "Releases" section on the home page (current release v1.0.5, upcoming v1.1.0) and a Fpbootd section in the guide.
 - **Oct 2** - Project website: a GitHub Pages site (served from `docs/`) with a home page, a documentation page (live changelog plus the latest 5 commits on every branch), a usage guide, the security policy and the contributing guide ("Help grow this!").
 - **Oct 1** - Metallica MIS: new sensor record DB layer (`metallica_mis_db.c/.h`), a C port of python-validity's `db.py`. Can list and wipe the prints stored on the sensor, and verifies a wipe by re-reading afterwards. The enroll path is not built yet.
 - **Oct 1** - New launch arguments: `--debug` (logs every USB transfer, TLS command and DB call with timestamps and hex dumps, plus libusb's own debug log, key material is never logged) and `--debug-full` (removes the payload size cap). Known sensor status words such as `04c3` and `04b3` are named in the log.
