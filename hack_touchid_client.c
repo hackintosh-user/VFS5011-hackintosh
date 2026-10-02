@@ -1916,6 +1916,10 @@ static void print_usage(void) {
     printf("  --debug-full        Same as --debug, but never truncates large payloads\n");
     printf("  --list-records      List the prints stored on a Metallica MIS sensor and exit\n");
     printf("  --wipe-records      Delete ALL prints stored on a Metallica MIS sensor and exit\n");
+    printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
+    printf("  --host-serial X     Metallica MIS: use X as the host serial instead of this Mac's\n");
+    printf("                      (for a sensor paired on Linux/Windows: pass the laptop's real\n");
+    printf("                      DMI product_name / product_serial, not the spoofed Mac values)\n");
     printf("  --fpbootd-daemon    Run as the Fpbootd pre-login socket server\n\n");
     printf("From the interactive menu, [H] shows this same help.\n\n");
 }
@@ -5189,6 +5193,25 @@ static void run_deploy_agent_mode(void) {
     getchar();
 }
 
+/* Matches "--flag VALUE" or "--flag=VALUE" at argv[*i]. Returns 1 and sets
+ * *out (pointing into argv) on a match, advancing *i past the value for the
+ * two-argument form. Returns 0 if argv[*i] is not this flag, and -1 if the
+ * flag is present without a usable value. */
+static int match_value_flag(int argc, char **argv, int *i, const char *flag, const char **out) {
+    size_t n = strlen(flag);
+    const char *a = argv[*i];
+    if (strncmp(a, flag, n) != 0) return 0;
+    if (a[n] == '=') {
+        if (a[n + 1] == '\0') return -1;
+        *out = a + n + 1;
+        return 1;
+    }
+    if (a[n] != '\0') return 0;
+    if (*i + 1 >= argc || argv[*i + 1][0] == '\0') return -1;
+    *out = argv[++(*i)];
+    return 1;
+}
+
 int main(int argc, char **argv) {
     /* Checked in its own pass, before anything else (including the
      * sudo re-exec below) -- seeing -h/--help should never require a
@@ -5237,6 +5260,20 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
+        {
+            int r = match_value_flag(argc, argv, &i, "--host-product", &g_metallica_mis_host_product_override);
+            if (r < 0) {
+                vfsc_err("--host-product needs a value, e.g. --host-product \"20L5CTO1WW\"\n");
+                return 1;
+            }
+            if (r == 0) {
+                r = match_value_flag(argc, argv, &i, "--host-serial", &g_metallica_mis_host_serial_override);
+                if (r < 0) {
+                    vfsc_err("--host-serial needs a value, e.g. --host-serial \"PF1ABCDE\"\n");
+                    return 1;
+                }
+            }
+        }
     }
     srand((unsigned int)time(NULL));
 
@@ -5252,7 +5289,7 @@ int main(int argc, char **argv) {
      * to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[16];
+        char *sudo_argv[24];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
@@ -5266,6 +5303,14 @@ int main(int argc, char **argv) {
         if (g_records_list_mode) sudo_argv[ai++] = "--list-records";
         if (g_records_wipe_mode) sudo_argv[ai++] = "--wipe-records";
         if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
+        if (g_metallica_mis_host_product_override) {
+            sudo_argv[ai++] = "--host-product";
+            sudo_argv[ai++] = (char *)g_metallica_mis_host_product_override;
+        }
+        if (g_metallica_mis_host_serial_override) {
+            sudo_argv[ai++] = "--host-serial";
+            sudo_argv[ai++] = (char *)g_metallica_mis_host_serial_override;
+        }
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
