@@ -39,6 +39,17 @@
  * identity is gone for good once this runs. */
 extern int g_metallica_mis_force_pair;
 
+/* Set from --host-product / --host-serial. When non-NULL, get_host_identity()
+ * uses these instead of the macOS IOPlatformExpertDevice values. On a
+ * Hackintosh those values are the SPOOFED Mac model/serial, so a sensor that
+ * was paired from Linux or Windows (which use the laptop's real DMI
+ * product_name / product_serial) derives a different PSK and fails the
+ * handle_priv() HMAC check. Passing the real values lets HTID derive the
+ * same key. Either flag may be used alone; the other value is then still
+ * read from IOKit. */
+extern const char *g_metallica_mis_host_product_override;
+extern const char *g_metallica_mis_host_serial_override;
+
 /* Opens the sensor over libusb and claims its interface. Tries each
  * known Metallica MIS identity (06cb:009a, 138a:0097, 138a:009d) in
  * turn. Returns 0 on success, -1 on failure (already prints its own
