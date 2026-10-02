@@ -778,6 +778,12 @@ static bool g_check_updates_mode = false;
  * single relaunched process's lifetime. */
 static bool g_post_update_mode = false;
 
+/* Set when the updater just removed the installed daemon (see
+ * remove_daemon_for_update()). Carried across the post-update relaunch
+ * with the internal "--daemon-removed" flag so the new process can repeat
+ * the "run [3] again" reminder next to the menu. */
+static bool g_daemon_removed_by_update = false;
+
 static void vfsc_boot_line(const char *fmt, ...) {
     if (!g_verbose_boot) return;
 
@@ -2069,6 +2075,109 @@ static void do_uninstall(void) {
 
     if (problems == 0) vfsc_ok("Uninstall complete. Run [3] Deploy to reinstall.\n\n");
     else vfsc_warn("Uninstall finished with %d problem(s), see above.\n\n", problems);
+}
+
+/* remove_daemon_for_update() -- called by the updater right after a new
+ * build succeeded and was copied into place. The installed daemon is a
+ * separately compiled binary that the update does NOT replace (only [3]
+ * Deploy does), so an old daemon would keep running, or trip the startup
+ * version gate, until the user deploys. Instead of leaving a stale daemon
+ * behind, this scans for the installed or running one and removes it, so
+ * the only next step is [3] Deploy.
+ *
+ * Removes: the LaunchAgent registration + plist, the installed daemon
+ * binary for every sensor in supported_sensors.h, and the daemon's
+ * Accessibility (TCC) rows. Keeps: the HackTouchIDStore volume, enrolled
+ * templates, match_threshold.conf, the sudoers rule and the agent log
+ * (Deploy rewrites the rule, the log is useful to keep).
+ * Needs no confirmation: the user already confirmed the update.
+ * Returns true if a daemon was found and removed. */
+static bool remove_daemon_for_update(void) {
+    printf("Checking for an installed daemon...\n");
+
+    char installed[HACK_TOUCHID_SENSOR_COUNT][PATH_MAX];
+    size_t n_installed = 0;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const char *bin = HACK_TOUCHID_SENSORS[i].daemon_binary_name;
+        if (!bin || !*bin) continue;
+        bool dup = false;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", HTID_INSTALL_DIR, bin);
+        for (size_t j = 0; j < n_installed; j++) {
+            if (strcmp(installed[j], path) == 0) { dup = true; break; }
+        }
+        if (!dup && access(path, F_OK) == 0) {
+            strncpy(installed[n_installed], path, PATH_MAX - 1);
+            installed[n_installed][PATH_MAX - 1] = '\0';
+            n_installed++;
+        }
+    }
+
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw && getuid() != 0) pw = getpwuid(getuid());
+
+    char plist_path[PATH_MAX] = {0};
+    if (pw) {
+        snprintf(plist_path, sizeof(plist_path),
+                 "%s/Library/LaunchAgents/%s.plist", pw->pw_dir, AGENT_LABEL);
+    }
+    bool plist_present = plist_path[0] && access(plist_path, F_OK) == 0;
+    bool agent_running = is_auth_service_deployed();
+
+    if (n_installed == 0 && !plist_present && !agent_running) {
+        printf("No daemon installed, nothing to remove.\n");
+        return false;
+    }
+
+    int problems = 0;      /* anything that didn't go cleanly */
+    int file_problems = 0; /* a file that is still on disk */
+    char cmd[PATH_MAX * 2 + 128];
+
+    /* 1. Stop + unregister the LaunchAgent so nothing holds the binary. */
+    if (pw) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl bootout \"gui/%d/%s\" >/dev/null 2>&1; "
+                 "launchctl bootout \"gui/%d\" \"%s\" >/dev/null 2>&1; true",
+                 (int)pw->pw_uid, AGENT_LABEL, (int)pw->pw_uid, plist_path);
+        system(cmd);
+        if (plist_present && unlink(plist_path) != 0) {
+            vfsc_err("Couldn't remove %s: %s\n", plist_path, strerror(errno));
+            problems++;
+            file_problems++;
+        }
+    } else {
+        vfsc_warn("Couldn't determine the console user; skipped LaunchAgent removal.\n");
+        problems++;
+    }
+
+    /* 2. Delete the installed daemon binaries + their TCC rows. */
+    for (size_t i = 0; i < n_installed; i++) {
+        if (access(TCC_DB_PATH, F_OK) == 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "sqlite3 \"%s\" \"DELETE FROM access WHERE "
+                     "service='kTCCServiceAccessibility' AND client='%s';\" >/dev/null 2>&1",
+                     TCC_DB_PATH, installed[i]);
+            system(cmd);
+        }
+        if (unlink(installed[i]) != 0) {
+            vfsc_err("Couldn't remove %s: %s\n", installed[i], strerror(errno));
+            problems++;
+            file_problems++;
+        }
+    }
+
+    if (problems == 0) {
+        printf("%sDaemon un-installed, Please run [3] Again.%s\n", VFSC_YELLOW, VFSC_RESET);
+    } else if (file_problems > 0) {
+        vfsc_warn("Daemon removal had %d problem(s), see above. Delete the files "
+                  "listed above manually, then run sudo hack-touchid and press [3].\n", problems);
+    } else {
+        vfsc_warn("The daemon file was removed, but the LaunchAgent could not be unregistered. "
+                  "Press [3] to redeploy, or [X] Uninstall first if the old daemon still runs.\n");
+    }
+    return true;
 }
 
 static void print_about(void) {
@@ -4165,6 +4274,11 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
     snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
     system(cmd);
 
+    /* The new source is in place. The installed daemon is now stale, and
+     * only [3] Deploy replaces it, so remove it here. */
+    bool daemon_removed = remove_daemon_for_update();
+    g_daemon_removed_by_update = daemon_removed;
+
     if (!relaunch) {
         printf("Update installed.\n");
         printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
@@ -4177,11 +4291,12 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
 
     char new_path[PATH_MAX];
     snprintf(new_path, sizeof(new_path), "%s/hack-touchid", g_exec_dir);
-    char *new_argv[4];
+    char *new_argv[5];
     int nai = 0;
     new_argv[nai++] = new_path;
     if (!g_verbose_boot) new_argv[nai++] = (char *)"--q";
     new_argv[nai++] = (char *)"--post-update";
+    if (daemon_removed) new_argv[nai++] = (char *)"--daemon-removed";
     new_argv[nai++] = NULL;
     execv(new_path, new_argv);
 
@@ -5240,6 +5355,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--post-update") == 0) {
             g_post_update_mode = true;
         }
+        if (strcmp(argv[i], "--daemon-removed") == 0) {
+            g_daemon_removed_by_update = true;
+        }
         if (strcmp(argv[i], "--force-pair") == 0) {
             g_metallica_mis_force_pair = 1;
         }
@@ -5467,7 +5585,11 @@ int main(int argc, char **argv) {
     }
 
     if (g_post_update_mode) {
-        printf("%sUpdate was successfully deployed & installed! :)%s\n\n", VFSC_YELLOW, VFSC_RESET);
+        printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
+        if (g_daemon_removed_by_update) {
+            printf("%sDaemon un-installed, Please run [3] Again.%s\n", VFSC_YELLOW, VFSC_RESET);
+        }
+        printf("\n");
     }
 
     printf("%sWelcome to HTID Client!%s\n\n", VFSC_BOLD, VFSC_RESET);
