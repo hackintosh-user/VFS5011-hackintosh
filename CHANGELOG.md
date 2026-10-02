@@ -6,6 +6,7 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 2** - Updater: after a successful update build the client now removes the installed daemon (LaunchAgent, daemon binary and its Accessibility grant) and prints `Daemon un-installed, Please run [3] Again.`, so a stale daemon never keeps running or blocks the client from launching. Enrolled fingers and the encrypted volume are kept.
 - **Oct 2** - New launch arguments `--host-product` and `--host-serial` (Metallica MIS). They replace the spoofed Mac model and serial that HTID uses to derive the sensor's pairing key. For a sensor paired on Linux or Windows, pass the laptop's real DMI `product_name` and `product_serial` so `--list-records` and `--wipe-records` can open a session without re-pairing.
 - **Oct 2** - Tester finding (Metallica MIS): `--force-pair` cannot wipe a sensor that is already paired to another host identity. The partition write goes out in plaintext and the sensor rejects it with `0x0404`. Record listing fails the HMAC check because HTID derives its key from the spoofed Mac identity while Linux used the real one.
 - **Oct 2** - Website: new "Releases" section on the home page (current release v1.0.5, upcoming v1.1.0) and a Fpbootd section in the guide.
