@@ -96,3 +96,36 @@ void mmis_dbg_status(const char *label, const unsigned char *reply, size_t reply
     uint16_t st = (uint16_t)(reply[0] | (reply[1] << 8));
     mmis_dbg("%s: status=0x%04x (%s)", label, st, mmis_status_name(st));
 }
+
+void mmis_key_fp(const unsigned char *key, size_t len, char out[MMIS_KEY_FP_LEN]) {
+    snprintf(out, MMIS_KEY_FP_LEN, "<redacted, fp=%08x>", key ? fnv1a(key, len) : 0u);
+}
+
+const char *mmis_tls_alert_name(unsigned char d) {
+    switch (d) {
+    case 0:   return "close_notify";
+    case 10:  return "unexpected_message";
+    case 20:  return "bad_record_mac";
+    case 21:  return "decryption_failed";
+    case 22:  return "record_overflow";
+    case 30:  return "decompression_failure";
+    case 40:  return "handshake_failure";
+    case 41:  return "no_certificate";
+    case 42:  return "bad_certificate";
+    case 43:  return "unsupported_certificate";
+    case 44:  return "certificate_revoked";
+    case 45:  return "certificate_expired";
+    case 46:  return "certificate_unknown";
+    case 47:  return "illegal_parameter";
+    case 48:  return "unknown_ca";
+    case 49:  return "access_denied";
+    case 50:  return "decode_error";
+    case 51:  return "decrypt_error";
+    case 70:  return "protocol_version";
+    case 71:  return "insufficient_security";
+    case 80:  return "internal_error";
+    case 90:  return "user_canceled";
+    case 100: return "no_renegotiation";
+    default:  return "unknown";
+    }
+}

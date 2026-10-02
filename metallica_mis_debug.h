@@ -38,6 +38,16 @@ void mmis_dbg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * to the MMIS_DBG_HEX_CAP rule above at level 1. */
 void mmis_dbg_hex(const char *label, const unsigned char *buf, size_t len);
 
+/* Key redaction. Key material is never printed. Writes
+ * "<redacted, fp=xxxxxxxx>" into out (>= MMIS_KEY_FP_LEN bytes), where
+ * fp is a 32-bit FNV-1a fingerprint, enough to see whether two runs
+ * derived the same key without revealing it. */
+#define MMIS_KEY_FP_LEN 32
+void mmis_key_fp(const unsigned char *key, size_t len, char out[MMIS_KEY_FP_LEN]);
+
+/* Human name for a TLS alert description byte (RFC 5246 7.2). */
+const char *mmis_tls_alert_name(unsigned char desc);
+
 /* Human name for the 2-byte little-endian status word most replies
  * start with. Returns "unknown" for anything not seen in real logs
  * yet -- unknown does NOT mean "bad", just "not catalogued". */

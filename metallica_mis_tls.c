@@ -798,6 +798,19 @@ static int parse_tls_response(metallica_mis_tls_t *tls, const unsigned char *rsp
 
         if (t == 0x16) {
             if (handle_handshake(tls, pkt, pkt_len) != 0) return -1;
+        } else if (t == 0x15) {
+            /* TLS alert from the sensor: log level + description so a
+             * rejected handshake says WHY instead of a generic parse failure. */
+            if (pkt_len >= 2) {
+                fprintf(stderr, "metallica_mis: TLS alert from sensor: level=%u (%s) "
+                                 "description=%u (%s)\n",
+                        pkt[0], pkt[0] == 2 ? "fatal" : "warning",
+                        pkt[1], mmis_tls_alert_name(pkt[1]));
+            } else {
+                fprintf(stderr, "metallica_mis: TLS alert from sensor with a truncated "
+                                 "payload (%zu bytes)\n", pkt_len);
+            }
+            return -1;
         } else if (t == 0x14) {
             if (!(pkt_len == 1 && pkt[0] == 0x01)) return -1; /* "Unexpected ChangeCipherSpec payload" */
             tls->secure_rx = true;
@@ -968,9 +981,9 @@ int metallica_mis_handle_priv(metallica_mis_identity_t *identity,
         for (int i = 0; i < 32; i++) fprintf(stderr, "%02x", sig[i]);
         fprintf(stderr, " vs stored sig=");
         for (int i = 0; i < 32; i++) fprintf(stderr, "%02x", hs[i]);
-        fprintf(stderr, " (psk_validation_key=");
-        for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", psk_validation_key[i]);
-        fprintf(stderr, ", c_len=%zu)\n", payload_len);
+        char kfp[MMIS_KEY_FP_LEN];
+        mmis_key_fp(psk_validation_key, METALLICA_MIS_TLS_KEYLEN, kfp);
+        fprintf(stderr, " (psk_validation_key=%s, c_len=%zu)\n", kfp, payload_len);
         return -1; /* "This device was probably paired with another computer." */
     }
     fprintf(stderr, "metallica_mis: [diag] handle_priv(): HMAC check passed\n");

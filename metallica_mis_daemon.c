@@ -639,11 +639,13 @@ int metallica_mis_do_pairing(void) {
      * open_calibration_session()) so the next log directly shows where
      * the two diverge, instead of guessing further. Remove once root
      * cause is found. */
-    fprintf(stderr, "metallica_mis: [diag] do_pairing() psk_encryption_key: ");
-    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls.psk_encryption_key[i]);
-    fprintf(stderr, "\nmetallica_mis: [diag] do_pairing() psk_validation_key: ");
-    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls.psk_validation_key[i]);
-    fprintf(stderr, "\n");
+    {
+        char efp[MMIS_KEY_FP_LEN], vfp[MMIS_KEY_FP_LEN];
+        mmis_key_fp(tls.psk_encryption_key, METALLICA_MIS_TLS_KEYLEN, efp);
+        mmis_key_fp(tls.psk_validation_key, METALLICA_MIS_TLS_KEYLEN, vfp);
+        fprintf(stderr, "metallica_mis: [diag] do_pairing() psk_encryption_key: %s\n"
+                        "metallica_mis: [diag] do_pairing() psk_validation_key: %s\n", efp, vfp);
+    }
 
     memset(&identity, 0, sizeof(identity));
 
@@ -1210,11 +1212,13 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     }
 
     /* Sep 13 diagnostic -- see matching block in do_pairing(). */
-    fprintf(stderr, "metallica_mis: [diag] open_calibration_session() psk_encryption_key: ");
-    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls_out->psk_encryption_key[i]);
-    fprintf(stderr, "\nmetallica_mis: [diag] open_calibration_session() psk_validation_key: ");
-    for (int i = 0; i < METALLICA_MIS_TLS_KEYLEN; i++) fprintf(stderr, "%02x", tls_out->psk_validation_key[i]);
-    fprintf(stderr, "\n");
+    {
+        char efp[MMIS_KEY_FP_LEN], vfp[MMIS_KEY_FP_LEN];
+        mmis_key_fp(tls_out->psk_encryption_key, METALLICA_MIS_TLS_KEYLEN, efp);
+        mmis_key_fp(tls_out->psk_validation_key, METALLICA_MIS_TLS_KEYLEN, vfp);
+        fprintf(stderr, "metallica_mis: [diag] open_calibration_session() psk_encryption_key: %s\n"
+                        "metallica_mis: [diag] open_calibration_session() psk_validation_key: %s\n", efp, vfp);
+    }
 
     memset(&identity, 0, sizeof(identity));
 
