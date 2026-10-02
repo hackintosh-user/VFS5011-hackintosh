@@ -578,7 +578,7 @@ static int make_finish(metallica_mis_tls_t *tls, bb_t *out) {
     tls->secure_tx = true;
     hs_hash_snapshot(tls, hs_hash);
 
-    if (bb_append(&seed, (const unsigned char *)"client finished", 16) != 0) goto done;
+    if (bb_append(&seed, (const unsigned char *)"client finished", 15) != 0) goto done;
     if (bb_append(&seed, hs_hash, sizeof(hs_hash)) != 0) goto done;
     metallica_mis_prf(tls->master_secret, sizeof(tls->master_secret), seed.data, seed.len,
                        verify_data, sizeof(verify_data));
@@ -703,7 +703,7 @@ static int handle_finish(metallica_mis_tls_t *tls, const unsigned char *b, size_
     if (b_len != sizeof(verify_data)) goto done;
 
     hs_hash_snapshot(tls, hs_hash);
-    if (bb_append(&seed, (const unsigned char *)"server finished", 16) != 0) goto done;
+    if (bb_append(&seed, (const unsigned char *)"server finished", 15) != 0) goto done;
     if (bb_append(&seed, hs_hash, sizeof(hs_hash)) != 0) goto done;
     metallica_mis_prf(tls->master_secret, sizeof(tls->master_secret), seed.data, seed.len,
                        verify_data, sizeof(verify_data));
