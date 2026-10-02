@@ -131,6 +131,11 @@ static unsigned short g_detected_pid = 0;
  * metallica_mis_do_pairing(). See metallica_mis_daemon.h. */
 int g_metallica_mis_force_pair = 0;
 
+/* Set by hack_touchid_client.c's argv parsing for --host-product /
+ * --host-serial. See metallica_mis_daemon.h. Point into argv, never freed. */
+const char *g_metallica_mis_host_product_override = NULL;
+const char *g_metallica_mis_host_serial_override = NULL;
+
 /*
  * open_device() -- transport open/claim is genuinely reusable in
  * shape from vfs5011_daemon.c's open_device(), same libusb calls,
@@ -453,9 +458,48 @@ static void mmis_hexdump(const char *label, const uint8_t *buf, size_t len) {
  * capacity; both are null-terminated on success. Returns 0 on
  * success, -1 if either IOKit lookup fails.
  */
+/*
+ * apply_host_identity_override() -- copies --host-product / --host-serial
+ * (whichever were given) over the buffers get_host_identity() fills.
+ * Returns 0 on success, -1 if a value is empty or doesn't fit. Prints a
+ * line so a --debug log makes it obvious the identity was not the real
+ * IOKit one.
+ */
+static int apply_host_identity_override(char *out_product, size_t product_cap,
+                                         char *out_serial, size_t serial_cap) {
+    if (g_metallica_mis_host_product_override) {
+        size_t n = strlen(g_metallica_mis_host_product_override);
+        if (n == 0 || n >= product_cap) {
+            fprintf(stderr, "metallica_mis: get_host_identity(): --host-product value is %s\n",
+                    n == 0 ? "empty" : "too long");
+            return -1;
+        }
+        memcpy(out_product, g_metallica_mis_host_product_override, n + 1);
+    }
+    if (g_metallica_mis_host_serial_override) {
+        size_t n = strlen(g_metallica_mis_host_serial_override);
+        if (n == 0 || n >= serial_cap) {
+            fprintf(stderr, "metallica_mis: get_host_identity(): --host-serial value is %s\n",
+                    n == 0 ? "empty" : "too long");
+            return -1;
+        }
+        memcpy(out_serial, g_metallica_mis_host_serial_override, n + 1);
+    }
+    fprintf(stderr, "metallica_mis: host identity OVERRIDDEN from the command line:%s%s\n",
+            g_metallica_mis_host_product_override ? " product" : "",
+            g_metallica_mis_host_serial_override ? " serial" : "");
+    return 0;
+}
+
 static int get_host_identity(char *out_product, size_t product_cap,
                               char *out_serial, size_t serial_cap) {
     int rc = -1;
+
+    /* Both values given: no need to touch IOKit at all. */
+    if (g_metallica_mis_host_product_override && g_metallica_mis_host_serial_override) {
+        return apply_host_identity_override(out_product, product_cap, out_serial, serial_cap);
+    }
+
     io_service_t platform_expert = IOServiceGetMatchingService(
         kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
     if (platform_expert == IO_OBJECT_NULL) {
@@ -503,6 +547,10 @@ done:
     if (model_ref) CFRelease(model_ref);
     if (serial_ref) CFRelease(serial_ref);
     IOObjectRelease(platform_expert);
+    /* Only one of the two overridden: the other value came from IOKit above. */
+    if (rc == 0 && (g_metallica_mis_host_product_override || g_metallica_mis_host_serial_override)) {
+        rc = apply_host_identity_override(out_product, product_cap, out_serial, serial_cap);
+    }
     return rc;
 }
 
@@ -570,6 +618,10 @@ int metallica_mis_do_pairing(void) {
     }
     fprintf(stderr, "metallica_mis: host identity: product=\"%s\" serial=\"%s\"\n",
             product_name, serial_number);
+    if (g_metallica_mis_host_product_override || g_metallica_mis_host_serial_override) {
+        fprintf(stderr, "metallica_mis: WARNING: pairing with an overridden host identity. Every later run "
+                        "(--list-records, --wipe-records, ...) must pass the same --host-product / --host-serial.\n");
+    }
     mmis_dbg("do_pairing: begin (vid:pid %04x:%04x, force_pair=%d)", g_detected_vid, g_detected_pid, g_metallica_mis_force_pair);
 
     if (metallica_mis_tls_init(&tls, mis_transport, NULL, product_name, serial_number) != 0) {
