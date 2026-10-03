@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <errno.h>
 #include <libgen.h>
 #include <limits.h>
@@ -4328,20 +4329,89 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
 #define UPDATE_CL_MAX_LINES    40
 #define UPDATE_CL_BUILD_LINES  8
 
+/* Usable text width for the changelog: terminal columns minus a small
+ * margin, capped so very wide windows stay readable. Falls back to 80
+ * when stdout isn't a terminal. */
+static int changelog_width(void) {
+    int cols = 80;
+    struct winsize ws;
+    if (isatty(STDOUT_FILENO) && ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 40)
+        cols = ws.ws_col;
+    cols -= 2;
+    if (cols > 100) cols = 100;
+    return cols;
+}
+
+/* Prints out[from..to) and bolds whatever falls inside out[0..date_len). */
+static void changelog_emit(const char *out, size_t from, size_t to, size_t date_len) {
+    if (date_len > 0 && from < date_len) {
+        size_t mid = to < date_len ? to : date_len;
+        printf("%s", VFSC_BOLD);
+        fwrite(out + from, 1, mid - from, stdout);
+        printf("%s", VFSC_RESET);
+        if (to > mid) fwrite(out + mid, 1, to - mid, stdout);
+    } else {
+        fwrite(out + from, 1, to - from, stdout);
+    }
+}
+
+/* Prints one changelog line for the terminal:
+ *   - section headers in bold,
+ *   - bullets as "  * " with the leading date bolded, word-wrapped to the
+ *     terminal width with a hanging indent so wrapped lines line up.
+ * Markdown noise (** and backticks) is stripped. */
 static void print_changelog_line(const char *line, size_t len, bool header) {
-    char out[1024];
-    size_t o = 0;
-    for (size_t i = 0; i < len && o < sizeof(out) - 1; i++) {
+    char out[2048];
+    size_t o = 0, date_len = 0;
+    size_t i = 0;
+
+    if (!header && len >= 2 && line[0] == '-' && line[1] == ' ') i = 2;
+
+    /* Leading "**Oct 2**" becomes a bold date. */
+    if (!header && i + 1 < len && line[i] == '*' && line[i + 1] == '*') {
+        size_t j = i + 2;
+        while (j + 1 < len && !(line[j] == '*' && line[j + 1] == '*')) j++;
+        if (j + 1 < len) {
+            for (size_t k = i + 2; k < j && o < sizeof(out) - 1; k++) out[o++] = line[k];
+            date_len = o;
+            i = j + 2;
+        }
+    }
+    for (; i < len && o < sizeof(out) - 1; i++) {
         if (line[i] == '`') continue;
         if (line[i] == '*' && i + 1 < len && line[i + 1] == '*') { i++; continue; }
         out[o++] = line[i];
     }
     out[o] = '\0';
+
     if (header) {
         printf("\n%s%s%s\n", VFSC_BOLD, out, VFSC_RESET);
-    } else {
-        printf("%s\n", out);
+        return;
     }
+
+    const int width = changelog_width();
+    const int indent = 4;
+    printf("  * ");
+    int col = indent;
+    size_t pos = 0;
+    while (pos < o) {
+        while (pos < o && out[pos] == ' ') pos++;
+        if (pos >= o) break;
+        size_t ws_ = pos;
+        int wlen = 0;
+        while (pos < o && out[pos] != ' ') {
+            if (((unsigned char)out[pos] & 0xC0) != 0x80) wlen++; /* count code points */
+            pos++;
+        }
+        if (col > indent && col + 1 + wlen > width) {
+            printf("\n%*s", indent, "");
+            col = indent;
+        }
+        if (col > indent) { putchar(' '); col++; }
+        changelog_emit(out, ws_, pos, date_len);
+        col += wlen;
+    }
+    putchar('\n');
 }
 
 static bool show_update_changelog(const char *branch, const char *local_version) {
