@@ -4103,7 +4103,8 @@ static bool download_with_progress(const char *url, const char *out_path) {
  *
  * Only returns on failure -- success means execv() replaced this
  * process image and never came back here. */
-static bool download_build_and_swap_update(const char *branch, bool relaunch) {
+static bool download_build_and_swap_update(const char *branch, bool relaunch,
+                                           const char *new_version, const char *new_build) {
     char tmp_dir[PATH_MAX];
     snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/hack-touchid-update-%d", (int)getpid());
 
@@ -4111,7 +4112,7 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch) {
     snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", tmp_dir, tmp_dir);
     system(cmd);
 
-    printf("\nDownloading %s...\n", branch);
+    printf("\nDownloading HTID Update v%s %s...\n", new_version, new_build);
     char zip_path[PATH_MAX];
     snprintf(zip_path, sizeof(zip_path), "%s/update.zip", tmp_dir);
     char dl_url[PATH_MAX];
@@ -4554,7 +4555,7 @@ static void check_for_client_update(void) {
         return;
     }
 
-    download_build_and_swap_update(local.branch, true);
+    download_build_and_swap_update(local.branch, true, remote.version, remote.build);
     /* Only reachable if the update attempt failed -- already explained
      * why above. Fall through and let the caller continue booting the
      * current version. */
@@ -4608,7 +4609,7 @@ static void run_check_updates_mode(void) {
         return;
     }
 
-    download_build_and_swap_update(local.branch, false);
+    download_build_and_swap_update(local.branch, false, remote.version, remote.build);
     /* Only reachable if the update attempt itself failed -- its own
      * error path already printed why and left the current install
      * untouched. */
