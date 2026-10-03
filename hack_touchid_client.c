@@ -42,6 +42,7 @@
 #include <sys/un.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <ctype.h>
 #include <stdbool.h>
@@ -769,6 +770,27 @@ static bool g_records_wipe_mode = false;
  * session on its own. Survives the sudo re-exec the same way the
  * other flags do. */
 static bool g_check_updates_mode = false;
+
+/* Live update notifications: while the client sits at the main menu it
+ * re-checks the remote VERSION.txt every UPDATE_WATCH_INTERVAL_SEC and,
+ * if the branch got a newer version/build since launch, shows the same
+ * [A]/[Y]/[N] prompt as the boot-time updater. On by default; Settings
+ * [U] flips it and the choice is saved in LIVE_UPDATE_CONF_PATH. */
+#define LIVE_UPDATE_CONF_PATH "/usr/local/libexec/hack-touchid/live_update_check.conf"
+#define UPDATE_WATCH_INTERVAL_SEC 60
+static bool g_live_update_check = true;
+static time_t g_update_watch_next = 0;
+static char g_update_watch_seen_version[32] = "";
+static char g_update_watch_seen_build[32] = "";
+
+static bool load_live_update_setting(void) {
+    FILE *f = fopen(LIVE_UPDATE_CONF_PATH, "r");
+    if (!f) return true;
+    int v = 1;
+    if (fscanf(f, "%d", &v) != 1) v = 1;
+    fclose(f);
+    return v != 0;
+}
 
 /* Set by argv parsing in main() when "--post-update" is passed. Only
  * ever passed by download_build_and_swap_update()'s own relaunch
@@ -3689,6 +3711,27 @@ static void do_settings_toggle_beta(void) {
     }
 }
 
+/* Settings [U]: turns the live (while-running) update notifications on
+ * or off and saves the choice so it survives relaunches. The boot-time
+ * update check is not affected. */
+static void do_settings_toggle_live_update(void) {
+    bool new_state = !g_live_update_check;
+    FILE *f = fopen(LIVE_UPDATE_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", LIVE_UPDATE_CONF_PATH, strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", new_state ? 1 : 0);
+    fclose(f);
+    g_live_update_check = new_state;
+    if (new_state) {
+        vfsc_ok("Live update notifications ON. You'll be prompted if a new version is "
+                "published while the client is open.\n\n");
+    } else {
+        vfsc_ok("Live update notifications OFF. Updates are only checked at launch.\n\n");
+    }
+}
+
 static void print_settings_menu(void) {
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
@@ -3707,6 +3750,8 @@ static void print_settings_menu(void) {
                ? g_local_version_info.branch : "unknown");
     printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
+           g_live_update_check ? "ON" : "OFF");
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -3746,9 +3791,10 @@ static void do_settings_menu(void) {
             case '7': do_settings_toggle_beta(); break;
             case '8': do_settings_link_volume(); break;
             case '9': do_settings_setup_fpov(); break;
+            case 'U': case 'u': do_settings_toggle_live_update(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-9 or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-9, U or B.\n\n", line);
         }
     }
 }
@@ -4479,6 +4525,65 @@ static bool show_update_changelog(const char *branch, const char *local_version)
     return true;
 }
 
+/* Shared [A]/[Y]/[N] update prompt, used by the boot-time check and by
+ * the live watcher. `live` only changes the wording (the update was
+ * published while the client was already open). Returns only if the
+ * user declined or the update attempt failed; a successful update
+ * relaunches the client and never comes back. */
+static void run_update_prompt(const client_version_info_t *local,
+                              const client_version_info_t *remote, bool live) {
+    printf("\n");
+    if (remote->critical) {
+        printf("%s[NEW | CRITICAL]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BRED, VFSC_RESET);
+    } else {
+        printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BYELLOW, VFSC_RESET);
+    }
+    if (live) {
+        printf("A new version was published while the client was open.\n");
+    }
+    printf("You are currently running v%s (%s).\n", local->version, local->build);
+    printf("New version: v%s (%s)\n\n", remote->version, remote->build);
+
+    for (;;) {
+        printf("  [A] Show changelog\n  [Y] Download and install\n  [N] Cancel\n");
+        printf("Choice [A/Y/N]: ");
+        fflush(stdout);
+
+        char confirm[16];
+        if (!fgets(confirm, sizeof(confirm), stdin)) {
+            printf("\nSkipping update. Continuing with v%s (%s).\n\n", local->version, local->build);
+            return;
+        }
+        char c = confirm[0];
+        if (c == 'a' || c == 'A') {
+            if (!show_update_changelog(local->branch, local->version)) {
+                vfsc_warn("Couldn't fetch the changelog. See: %s/blob/%s/CHANGELOG.md\n\n",
+                          UPDATE_REPO_URL, local->branch);
+            }
+            continue;
+        }
+        if (c == 'y' || c == 'Y') break;
+        printf("Skipping update. Continuing with v%s (%s).\n\n", local->version, local->build);
+        return;
+    }
+
+    download_build_and_swap_update(local->branch, true, remote->version, remote->build);
+}
+
+/* True if `remote` is a newer version, or the same version with a
+ * higher build number. Same rule as the boot-time check. */
+static bool remote_is_newer(const client_version_info_t *local, const client_version_info_t *remote) {
+    int local_code = parse_version_code(local->version);
+    int remote_code = parse_version_code(remote->version);
+    if (local_code < 0 || remote_code < 0) return false;
+    if (remote_code != local_code) return remote_code > local_code;
+    long local_build = parse_build_code(local->build);
+    long remote_build = parse_build_code(remote->build);
+    return local_build >= 0 && remote_build >= 0 && remote_build > local_build;
+}
+
 static void check_for_client_update(void) {
     /* g_local_version_info is cached the first time it's needed --
      * either by print_banner() (quiet mode, runs before this) or
@@ -4521,41 +4626,11 @@ static void check_for_client_update(void) {
     }
     if (!is_newer) return;
 
-    printf("\n");
-    if (remote.critical) {
-        printf("%s[NEW | CRITICAL]%s Update for Hackintosh TouchID was found!!!\n",
-               VFSC_BRED, VFSC_RESET);
-    } else {
-        printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
-               VFSC_BYELLOW, VFSC_RESET);
-    }
-    printf("You are currently running v%s (%s).\n", local.version, local.build);
-    printf("New version: v%s (%s)\n\n", remote.version, remote.build);
-
-    for (;;) {
-        printf("  [A] Show changelog\n  [Y] Download and install\n  [N] Cancel\n");
-        printf("Choice [A/Y/N]: ");
-        fflush(stdout);
-
-        char confirm[16];
-        if (!fgets(confirm, sizeof(confirm), stdin)) {
-            printf("\nSkipping update. Continuing with v%s (%s).\n\n", local.version, local.build);
-            return;
-        }
-        char c = confirm[0];
-        if (c == 'a' || c == 'A') {
-            if (!show_update_changelog(local.branch, local.version)) {
-                vfsc_warn("Couldn't fetch the changelog. See: %s/blob/%s/CHANGELOG.md\n\n",
-                          UPDATE_REPO_URL, local.branch);
-            }
-            continue;
-        }
-        if (c == 'y' || c == 'Y') break;
-        printf("Skipping update. Continuing with v%s (%s).\n\n", local.version, local.build);
-        return;
-    }
-
-    download_build_and_swap_update(local.branch, true, remote.version, remote.build);
+    run_update_prompt(&local, &remote, false);
+    /* Declined (or failed): remember this build so the live watcher
+     * doesn't announce the same one again a minute later. */
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
     /* Only reachable if the update attempt failed -- already explained
      * why above. Fall through and let the caller continue booting the
      * current version. */
@@ -5399,6 +5474,71 @@ static int match_value_flag(int argc, char **argv, int *i, const char *flag, con
     return 1;
 }
 
+/* ------------------------------------------------------------------ *
+ * Live update watcher (main menu only)
+ * ------------------------------------------------------------------ *
+ * read_menu_line() replaces the plain fgets() at the main menu prompt.
+ * While it waits for the user to type, it wakes up every
+ * UPDATE_WATCH_INTERVAL_SEC, compares the remote VERSION.txt on this
+ * install's branch with the local one, and if a newer build exists
+ * that it hasn't already announced, shows the normal [A]/[Y]/[N]
+ * prompt. A declined update isn't announced again until an even newer
+ * build is published. Network failures are silent here (the boot check
+ * already warns about being offline). Only active on a terminal and
+ * when Settings [U] is ON; otherwise it is exactly fgets(). */
+/* Returns true if it showed a prompt (so the caller redraws the menu). */
+static bool update_watch_check_now(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) return false;
+    const client_version_info_t local = g_local_version_info;
+
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) return false;
+    if (!remote_is_newer(&local, &remote)) return false;
+    if (strcmp(remote.version, g_update_watch_seen_version) == 0 &&
+        strcmp(remote.build, g_update_watch_seen_build) == 0) {
+        return false;
+    }
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
+
+    /* Drop anything the user had half-typed at the menu prompt so it
+     * doesn't leak into the A/Y/N answer. */
+    tcflush(STDIN_FILENO, TCIFLUSH);
+    run_update_prompt(&local, &remote, true);
+    return true;
+}
+
+static char *read_menu_line(char *buf, size_t size) {
+    if (!g_live_update_check || !isatty(STDIN_FILENO)) {
+        return fgets(buf, (int)size, stdin);
+    }
+    if (g_update_watch_next == 0) {
+        g_update_watch_next = time(NULL) + UPDATE_WATCH_INTERVAL_SEC;
+    }
+    for (;;) {
+        time_t now = time(NULL);
+        if (now >= g_update_watch_next) {
+            bool prompted = update_watch_check_now();
+            g_update_watch_next = time(NULL) + UPDATE_WATCH_INTERVAL_SEC;
+            if (prompted) {
+                print_menu();
+                printf("<Hack-touchid> ");
+                fflush(stdout);
+            }
+            continue;
+        }
+        long wait_ms = (long)(g_update_watch_next - now) * 1000L;
+        if (wait_ms > 1000) wait_ms = 1000;
+        struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+        int r = poll(&pfd, 1, (int)wait_ms);
+        if (r > 0) return fgets(buf, (int)size, stdin);
+        if (r < 0 && errno != EINTR) return fgets(buf, (int)size, stdin);
+    }
+}
+
 int main(int argc, char **argv) {
     /* Checked in its own pass, before anything else (including the
      * sudo re-exec below) -- seeing -h/--help should never require a
@@ -5616,6 +5756,7 @@ int main(int argc, char **argv) {
 
     check_macos_version_warning();
 
+    g_live_update_check = load_live_update_setting();
     vfsc_boot_line("Checking for updates...");
     check_for_client_update();
 
@@ -5672,7 +5813,7 @@ int main(int argc, char **argv) {
         printf("<Hack-touchid> ");
         fflush(stdout);
 
-        if (!fgets(line, sizeof(line), stdin)) {
+        if (!read_menu_line(line, sizeof(line))) {
             printf("\n");
             break;
         }
