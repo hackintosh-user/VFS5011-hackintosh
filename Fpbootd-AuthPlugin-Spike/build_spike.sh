@@ -5,12 +5,6 @@
 # Builds fpbootd_spike.c into a proper CFBundle (.bundle) that macOS's
 # Authorization Plugin loader can load -- FpbootdSpike.bundle.
 #
-# STAGE A ONLY. This script builds and packages the bundle to a local
-# folder. It does NOT copy it into /Library/Security/SecurityAgentPlugins
-# and does NOT touch the authorization database in any way -- the
-# built bundle is inert until something explicitly does that (Stage B,
-# a separate script, deliberately not written yet).
-#
 # Usage:
 #   ./build_spike.sh
 #
@@ -53,6 +47,3 @@ echo "Built: $SCRIPT_DIR/$BUNDLE_NAME"
 echo ""
 echo "Before trusting this bundle at all, check it exports the right symbol:"
 echo "  nm $BUNDLE_NAME/Contents/MacOS/$EXECUTABLE_NAME | grep AuthorizationPluginCreate"
-echo ""
-echo "This does NOT install or register anything. The bundle is just"
-echo "sitting here until Stage B (not written yet) does something with it."

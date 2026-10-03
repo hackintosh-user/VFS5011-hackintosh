@@ -1,20 +1,24 @@
 #!/bin/bash
 # fpbootd-authplugin-install.sh
-# Stage B: registers FpbootdSpike.bundle into the system.login.console
-# authorization mechanism chain. Always backs up the current rule first
-# and is fully reversible via fpbootd-authplugin-uninstall.sh.
+# Registers FpbootdSpike.bundle into the system.login.console
+# authorization mechanism chain, right after builtin:auto-login,privileged.
+# Backs up the current rule first (only when the rule is still clean) and
+# is fully reversible via fpbootd-authplugin-uninstall.sh.
 #
 # SAFETY MODEL:
 #  - FpbootdSpike always calls SetResult(kAuthorizationResultAllow),
 #    so it cannot itself deny a login.
 #  - The one real risk is a HANG (plugin never returns) rather than a
-#    denial. loginwindow has its own pluginhost timeout, but this has
-#    never been exercised in this project. Do NOT test this on the
-#    only macOS install on the machine without a rescue path (Recovery
-#    mode / another OS / SSH) ready to run the uninstall script's
-#    restore step by hand if needed.
-#  - This script is idempotent: running it twice will not add a
-#    duplicate mechanism entry.
+#    denial. Every blocking call in the plugin is bounded by a timeout,
+#    but do NOT test this on the only macOS install on the machine
+#    without a rescue path (Recovery mode / another OS / SSH) ready to
+#    run the uninstall script's restore step by hand if needed.
+#  - Idempotent: running it twice relocates the entry, it never adds a
+#    duplicate. Backups only ever hold the rule WITHOUT FpbootdSpike, so
+#    a rerun can never overwrite a clean backup with a dirty one.
+#  - If the rule does not contain builtin:auto-login,privileged or
+#    builtin:authenticate,privileged, the script aborts before changing
+#    anything.
 
 set -euo pipefail
 
@@ -38,59 +42,75 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 required (Homebrew or Xcod
 
 mkdir -p "$BACKUP_DIR"
 TS=$(date +%Y%m%d%H%M%S)
-BACKUP_FILE="$BACKUP_DIR/system.login.console.$TS.plist"
+LIVE_RULE=$(mktemp /tmp/fpbootd_live.XXXXXX.plist)
+NEW_PLIST=$(mktemp /tmp/fpbootd_authdb.XXXXXX.plist)
+trap 'rm -f "$LIVE_RULE" "$NEW_PLIST"' EXIT
 
-echo "[1/5] Backing up current $RULE_NAME rule -> $BACKUP_FILE"
-security authorizationdb read "$RULE_NAME" > "$BACKUP_FILE"
-chmod 600 "$BACKUP_FILE"
+security authorizationdb read "$RULE_NAME" > "$LIVE_RULE"
 
-echo "[2/5] Installing bundle -> $BUNDLE_DST"
-mkdir -p /Library/Security/SecurityAgentPlugins
-rm -rf "$BUNDLE_DST"
-cp -R "$BUNDLE_SRC" "$BUNDLE_DST"
-chown -R root:wheel "$BUNDLE_DST"
-chmod -R 755 "$BUNDLE_DST"
-
-echo "[3/5] Checking whether mechanism is already registered"
-if security authorizationdb read "$RULE_NAME" 2>/dev/null | grep -q "$MECHANISM_ENTRY"; then
-    echo "    Already present — skipping mechanism insert (idempotent)."
+echo "[1/4] Backing up current $RULE_NAME rule"
+if grep -q "FpbootdSpike" "$LIVE_RULE"; then
+    echo "    Rule already contains FpbootdSpike -- keeping the existing clean backup(s) in $BACKUP_DIR."
+    BACKUP_FILE="(see $BACKUP_DIR, oldest file)"
 else
-    echo "[4/5] Inserting mechanism entry: $MECHANISM_ENTRY"
-    NEW_PLIST=$(mktemp /tmp/fpbootd_authdb.XXXXXX.plist)
-    python3 - "$BACKUP_FILE" "$NEW_PLIST" "$MECHANISM_ENTRY" <<'PYEOF'
+    BACKUP_FILE="$BACKUP_DIR/system.login.console.$TS.plist"
+    cp "$LIVE_RULE" "$BACKUP_FILE"
+    chmod 600 "$BACKUP_FILE"
+    echo "    -> $BACKUP_FILE"
+fi
+
+echo "[2/4] Building the new rule (nothing is changed yet)"
+# Removes any existing occurrence first, then inserts right after
+# builtin:auto-login,privileged. Position 0 stalled the boot progress
+# bar until a swipe resolved, and gains nothing now that password-skip
+# has been ruled out, so it is no longer used.
+python3 - "$LIVE_RULE" "$NEW_PLIST" "$MECHANISM_ENTRY" <<'PYEOF'
 import plistlib, sys
 
 src, dst, entry = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(src, "rb") as f:
     data = plistlib.load(f)
 
-mechs = data.get("mechanisms", [])
-if entry not in mechs:
-    # Insert as the FIRST mechanism: fires early, never blocks (always
-    # Allow), and if it hangs, it hangs before the password field would
-    # have appeared rather than after — the least-confusing failure mode
-    # to be looking at from a physical login screen.
-    mechs.insert(0, entry)
+mechs = [m for m in data.get("mechanisms", []) if m != entry]
+
+if "builtin:auto-login,privileged" in mechs:
+    idx = mechs.index("builtin:auto-login,privileged") + 1
+elif "builtin:authenticate,privileged" in mechs:
+    idx = mechs.index("builtin:authenticate,privileged")
+else:
+    sys.stderr.write("Neither builtin:auto-login,privileged nor "
+                     "builtin:authenticate,privileged found in the rule; "
+                     "refusing to guess a position. Nothing was changed.\n")
+    sys.exit(1)
+
+mechs.insert(idx, entry)
 data["mechanisms"] = mechs
 
 with open(dst, "wb") as f:
     plistlib.dump(data, f)
 PYEOF
-    security authorizationdb write "$RULE_NAME" < "$NEW_PLIST"
-    rm -f "$NEW_PLIST"
-fi
 
-echo "[5/5] Verifying"
+echo "[3/4] Installing bundle -> $BUNDLE_DST"
+mkdir -p /Library/Security/SecurityAgentPlugins
+rm -rf "$BUNDLE_DST"
+cp -R "$BUNDLE_SRC" "$BUNDLE_DST"
+chown -R root:wheel "$BUNDLE_DST"
+chmod -R 755 "$BUNDLE_DST"
+
+echo "[4/4] Registering $MECHANISM_ENTRY in $RULE_NAME and verifying"
+security authorizationdb write "$RULE_NAME" < "$NEW_PLIST"
+
 if security authorizationdb read "$RULE_NAME" 2>/dev/null | grep -q "$MECHANISM_ENTRY"; then
-    echo "OK — FpbootdSpike is registered in $RULE_NAME."
+    echo "OK -- FpbootdSpike is registered in $RULE_NAME."
     echo "Backup for rollback: $BACKUP_FILE"
     echo ""
     echo "Next: lock the screen or log out and watch /Library/Logs/fpbootd.log"
-    echo "and Console.app (process: FpbootdSpike / pluginhost) during the next login."
+    echo "and Console.app (process: FpbootdSpike / authorizationhost) during the next login."
     echo "If login hangs at any point, reboot to Recovery/another OS and run:"
-    echo "  security authorizationdb write $RULE_NAME < $BACKUP_FILE"
+    echo "  security authorizationdb write $RULE_NAME < <a clean backup from $BACKUP_DIR>"
+    echo "or just run fpbootd-authplugin-uninstall.sh."
 else
-    echo "FAILED — mechanism not found after write. Restoring backup now." >&2
-    security authorizationdb write "$RULE_NAME" < "$BACKUP_FILE"
+    echo "FAILED -- mechanism not found after write. Restoring the previous rule now." >&2
+    security authorizationdb write "$RULE_NAME" < "$LIVE_RULE"
     exit 1
 fi
