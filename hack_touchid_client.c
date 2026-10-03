@@ -1917,7 +1917,8 @@ static void print_usage(void) {
     printf("  --deploy-agent      Headless (re)install of the daemon, no menu\n");
     printf("  --diag-pid          Print a diagnostic report and exit\n");
     printf("  --check-updates     Check for a client update and exit\n");
-    printf("  --force-pair        Wipe identity partitions before Metallica MIS pairing\n");
+    printf("  --force-pair        Metallica MIS: force a fresh pairing (refused by a sensor that is\n");
+    printf("                      already paired, see --host-product / --host-serial below)\n");
     printf("  --debug             Verbose protocol log (every USB transfer, TLS command, DB call)\n");
     printf("  --debug-full        Same as --debug, but never truncates large payloads\n");
     printf("  --list-records      List the prints stored on a Metallica MIS sensor and exit\n");
@@ -2254,14 +2255,14 @@ static void do_pair_metallica_mis(void) {
 
     if (g_metallica_mis_force_pair) {
         vfsc_warn(
-            "--force-pair is active: the identity partitions will be WIPED\n"
-            "before pairing runs, even if this device already looks paired.\n"
-            "This is meant for a device that reports itself as already\n"
-            "paired but whose stored identity was never actually written\n"
-            "correctly (or was written under a stale/wrong host identity) --\n"
-            "normal [P] Pair silently no-ops on a device in that state,\n"
-            "which is why this flag exists. There is no way to get the old\n"
-            "identity back after this runs.\n\n");
+            "--force-pair is active: pairing will try to rewrite the identity\n"
+            "partitions even if this device already looks paired.\n"
+            "A sensor that is already paired refuses unauthenticated flash\n"
+            "writes (status 0x0404), so this normally fails on a sensor that\n"
+            "Windows or Linux paired first. If that happens, run again with\n"
+            "--host-product and --host-serial set to the laptop's real values\n"
+            "(see --help). There is no way to get the old identity back if\n"
+            "the write does go through.\n\n");
     }
 
     printf("Type PAIR (all caps) to proceed, anything else to cancel: ");
