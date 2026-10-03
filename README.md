@@ -235,6 +235,11 @@ password automatically.
 * ```--diag-pid```: Runs the [D] Diagnostic steps but without launching the client.
 * ```--check-updates```: checks for updates without launching the client. And prompts if there is.
 * ```--debug```: Makes the client print every log for better debugging.
+* ```--list-records```: Read-only. Lists the storage, users and enrolled fingers stored on the sensor, plus database size and free space.
+* ```--wipe-records```: Deletes all enrolled prints stored on the sensor. Destructive, cannot be undone.
+* ```--force-pair```: Experimental. Tries to pair the sensor by writing its identity partitions. A sensor that is already paired refuses this (error `0x0404`), so use the two host flags below instead.
+* ```--host-product "<name>"```: Overrides the product name HTID uses to derive the pairing key. Use the laptop's real value, not the spoofed Mac one. Use together with `--host-serial`. Applies to this run only, nothing is saved.
+* ```--host-serial "<serial>"```: Overrides the serial HTID uses to derive the pairing key. Use the laptop's real value. Use together with `--host-product`. Applies to this run only, nothing is saved. 
 
 ## How it works
 
