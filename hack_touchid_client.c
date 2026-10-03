@@ -3732,6 +3732,42 @@ static void do_settings_toggle_live_update(void) {
     }
 }
 
+/* Defined further down in the updater section. */
+static bool fetch_remote_version_file(const char *branch, client_version_info_t *out);
+static void run_update_prompt(const client_version_info_t *local,
+                              const client_version_info_t *remote, bool live);
+static bool remote_is_newer(const client_version_info_t *local, const client_version_info_t *remote);
+
+/* Settings [CU]: manual "check for updates now". Same comparison and
+ * [A]/[Y]/[N] prompt as the launch-time check, but it also tells the
+ * user when they are already up to date or when the check couldn't run. */
+static void do_settings_check_updates(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        vfsc_err("No local %s found, so there is nothing to compare against. "
+                 "Update once normally first.\n\n", VERSION_FILE_NAME);
+        return;
+    }
+    const client_version_info_t local = g_local_version_info;
+
+    printf("Checking for updates on \"%s\"...\n", local.branch);
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) {
+        vfsc_warn("Couldn't reach GitHub. Check your internet connection and try again.\n\n");
+        return;
+    }
+    if (!remote_is_newer(&local, &remote)) {
+        vfsc_ok("You are up to date: v%s (%s).\n\n", local.version, local.build);
+        return;
+    }
+    run_update_prompt(&local, &remote, false);
+    /* Declined or failed: don't let the live watcher re-announce this build. */
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
+}
+
 static void print_settings_menu(void) {
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
     printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
@@ -3752,6 +3788,7 @@ static void print_settings_menu(void) {
     printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_live_update_check ? "ON" : "OFF");
+    printf("%s[CU]%s Check for Updates Now\n", VFSC_BOLD, VFSC_RESET);
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
@@ -3781,6 +3818,10 @@ static void do_settings_menu(void) {
 
         char cmd = line[0];
         printf("\n");
+        if ((line[0] == 'C' || line[0] == 'c') && (line[1] == 'U' || line[1] == 'u') && line[2] == '\0') {
+            do_settings_check_updates();
+            continue;
+        }
         switch (cmd) {
             case '1': do_settings_delete_fingers(); break;
             case '2': do_settings_clear_password_cache(); break;
@@ -3794,7 +3835,7 @@ static void do_settings_menu(void) {
             case 'U': case 'u': do_settings_toggle_live_update(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-9, U or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-9, U, CU or B.\n\n", line);
         }
     }
 }
