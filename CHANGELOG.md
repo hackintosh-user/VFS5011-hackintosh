@@ -6,6 +6,7 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 3** - Live update notifications: while the client sits at the main menu it re-checks the branch's `VERSION.txt` every minute. If a newer version or build is published while it is open, it shows the usual `[A]` / `[Y]` / `[N]` update prompt, and a declined build is not announced again until an even newer one appears. New Settings `[U]` toggles it (on by default, saved across launches). The check at launch is unchanged.
 - **Oct 3** - Updater: the download line now names the update instead of the branch, for example `Downloading HTID Update v1.1.0 26B240...`, using the version and build from the remote `VERSION.txt`.
 - **Oct 3** - Updater: `[A] Show changelog` is now readable in the terminal. Entries are word-wrapped to the window width with a hanging indent and a bold date, instead of long lines that broke mid-word.
 - **Oct 3** - Metallica MIS: clearer `--force-pair` and `0x0404` messages. The `--force-pair` banner and `--help` no longer claim it wipes a paired sensor. They now say a sensor that is already paired refuses unauthenticated flash writes (status `0x0404`) and point to `--host-product` / `--host-serial`. The `0x0404` status name and the partition write failure line carry the same hint.
