@@ -79,7 +79,7 @@ void mmis_dbg_hex(const char *label, const unsigned char *buf, size_t len) {
 const char *mmis_status_name(uint16_t status) {
     switch (status) {
         case 0x0000: return "OK";
-        case 0x0404: return "rejected (seen when a command is sent in plaintext instead of through the TLS session)";
+        case 0x0404: return "rejected (a paired sensor refuses unauthenticated flash writes; also seen when a command is sent in plaintext instead of through the TLS session. Try --host-product / --host-serial)";
         case 0x0491: return "nothing to commit (treated as success by flash cleanup)";
         case 0x04b3: return "not found (storage/user does not exist)";
         case 0x04c3: return "record save rejected (seen on enroll when a print for this user already exists on the sensor)";
