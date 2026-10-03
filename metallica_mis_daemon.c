@@ -817,9 +817,39 @@ int metallica_mis_do_pairing(void) {
     return 0;
 }
 
+/*
+ * mmis_recover_stale_session() -- Oct 3. A previous run that died
+ * mid-session (e.g. an interrupted --wipe-records) can leave the
+ * sensor still inside its TLS session. It then answers the very first
+ * plaintext command with a TLS alert record (0x15 0x03 0x03 ...)
+ * instead of a status word, which used to surface as the bogus status
+ * 0x0315. Reset the USB device, drop the handle and reopen it so the
+ * sensor starts from a clean state. Returns 0 if the device is open
+ * and claimed again, -1 otherwise.
+ */
+static int mmis_recover_stale_session(void) {
+    mmis_dbg("recover: resetting device to clear a stale TLS session");
+    if (g_handle) {
+        int rr = libusb_reset_device(g_handle);
+        mmis_dbg("recover: libusb_reset_device -> %s", libusb_error_name(rr));
+    }
+    metallica_mis_close_device();
+    sleep(2);
+    for (int i = 0; i < 5; i++) {
+        if (metallica_mis_open_device() == 0) {
+            mmis_dbg("recover: device reopened");
+            return 0;
+        }
+        metallica_mis_close_device();
+        usleep(500000);
+    }
+    return -1;
+}
+
 int metallica_mis_send_init(void) {
     unsigned char reply[256];
     int n;
+    int stale_resets = 0;
 
     mmis_dbg("send_init: begin plaintext bootstrap (RomInfo, cmd_19, get_fw_info, init_hardcoded[, clean slate])");
 
@@ -838,6 +868,25 @@ int metallica_mis_send_init(void) {
     for (int tries = 0; ; tries++) {
         n = cmd(metallica_mis_cmd_rominfo, sizeof(metallica_mis_cmd_rominfo), reply, sizeof(reply));
         if (n < 0) return -1;
+        if (n >= 3 && reply[0] == 0x15 && reply[1] == 0x03 && reply[2] == 0x03) {
+            if (stale_resets < 2) {
+                stale_resets++;
+                fprintf(stderr, "metallica_mis: sensor answered with a TLS alert; it is still "
+                                 "in a session from an earlier run. Resetting the device "
+                                 "(%d/2)...\n", stale_resets);
+                if (mmis_recover_stale_session() != 0) {
+                    fprintf(stderr, "metallica_mis: could not reopen the sensor after the "
+                                     "reset. Unplug and replug it, or reboot the host.\n");
+                    return -1;
+                }
+                tries = -1;
+                continue;
+            }
+            fprintf(stderr, "metallica_mis: sensor is still stuck in a TLS session after "
+                             "2 resets. Unplug and replug it (or reboot the host) and try "
+                             "again.\n");
+            return -1;
+        }
         if (n >= 2) {
             unsigned short stat = (unsigned short)reply[0] | ((unsigned short)reply[1] << 8);
             if (stat == 0x0104 && tries < 20) {

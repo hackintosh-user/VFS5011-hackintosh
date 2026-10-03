@@ -6,6 +6,7 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 3** - Metallica MIS: `--list-records` / `--wipe-records` no longer fail with the bogus status `0x0315` after an interrupted earlier run. The sensor can stay inside its TLS session and answers the first plaintext command with a TLS alert. HTID now detects that, resets the USB device, reopens it and retries (up to 2 times), and tells you to unplug and replug the sensor if it is still stuck.
 - **Oct 3** - Settings `[CU]` Check for Updates Now: checks the branch's `VERSION.txt` on demand and shows the usual `[A]` / `[Y]` / `[N]` update prompt when a newer version or build exists. It also says when you are already up to date or when GitHub can't be reached. A build declined here is not re-announced by the live update notifications.
 - **Oct 3** - Live update notifications: while the client sits at the main menu it re-checks the branch's `VERSION.txt` every minute. If a newer version or build is published while it is open, it shows the usual `[A]` / `[Y]` / `[N]` update prompt, and a declined build is not announced again until an even newer one appears. New Settings `[U]` toggles it (on by default, saved across launches). The check at launch is unchanged.
 - **Oct 3** - Updater: the download line now names the update instead of the branch, for example `Downloading HTID Update v1.1.0 26B240...`, using the version and build from the remote `VERSION.txt`.
