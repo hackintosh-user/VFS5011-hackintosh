@@ -728,6 +728,13 @@ int metallica_mis_partition_flash(metallica_mis_tls_t *tls, metallica_mis_identi
                          "for anything beyond the status word (the device sometimes "
                          "appends detail bytes assert_status() doesn't know how to "
                          "interpret)\n", status);
+        if (status == 0x0404) {
+            fprintf(stderr, "metallica_mis: status 0x0404 here usually means this sensor is "
+                             "already paired and refuses unauthenticated flash writes. "
+                             "Re-run with --host-product and --host-serial set to the laptop's "
+                             "real values (as seen from Linux/Windows) so a secure session "
+                             "can be opened first.\n");
+        }
         goto done;
     }
 
