@@ -3,11 +3,20 @@
 # Run this from the folder containing all the vfs5011_* files and the nbis/ folder.
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+. ./ht_env.sh
+
+if [ ! -f "$HT_LIBUSB_INC/libusb.h" ]; then
+    echo "error: libusb not found under $HT_BREW_PREFIX -- install with: brew install libusb" >&2
+    exit 1
+fi
+
 clang vfs5011_daemon.c hack-touchid-matcher.c hack-touchid-menubar-ipc.c \
     nbis/mindtct/*.c nbis/bozorth3/*.c \
     -o vfs5011_daemon \
     -I. -Inbis/include \
-    -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
+    -I"$HT_LIBUSB_INC" -L"$HT_LIBUSB_LIB" -lusb-1.0 \
     -framework CoreFoundation -framework ApplicationServices -framework IOKit \
     -lm -lpthread \
     -Wno-implicit-function-declaration

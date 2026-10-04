@@ -55,11 +55,17 @@
 #include "vfs5011_proto.h"
 #include "hack-touchid-matcher.h"
 #include "supported_sensors.h"
+#ifdef HT_NO_METALLICA
+/* Built for a non-Metallica sensor: no OpenSSL, no innoextract. The
+ * Metallica entry points are do-nothing stubs, see ht_sensor_stubs.c. */
+#include "ht_sensor_stubs.h"
+#else
 #include "metallica_mis_firmware.h"
 #include "metallica_mis_daemon.h"
 #include "metallica_mis_debug.h"
 #include "metallica_mis_db.h"
 #include "mmis_calibrate.h"
+#endif
 #include "upek_proto.h"
 #include "upek_daemon.h"
 
@@ -4848,6 +4854,127 @@ static bool check_sensor_presence_gate(void) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Sensor dependency check (startup, Oct 4)
+ * ------------------------------------------------------------------ *
+ * supported_sensors.h lists, per sensor, which third-party tools it
+ * needs at run time (deps_runtime). Now that the build scripts only
+ * install what the chosen sensor needs, this is the matching safety
+ * net at launch: look at what is actually present for the detected
+ * sensor, and offer to install ONLY the missing pieces with Homebrew.
+ * Nothing is installed for sensors the user does not own.
+ *
+ * The client runs as root (sudo) but Homebrew refuses to run as root,
+ * so the install drops back to $SUDO_USER. Never blocks launch: the
+ * features that need a missing piece refuse with their own message. */
+
+static bool ht_file_exists(const char *path) {
+    return access(path, F_OK) == 0;
+}
+
+/* Checks the same two Homebrew prefixes the build scripts know about
+ * (Intel /usr/local first, then /opt/homebrew). */
+static bool ht_dep_present(unsigned bit) {
+    static const char *prefixes[] = { "/usr/local", "/opt/homebrew" };
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        switch (bit) {
+            case HT_DEP_LIBUSB:
+                snprintf(path, sizeof(path), "%s/lib/libusb-1.0.dylib", prefixes[i]);
+                break;
+            case HT_DEP_OPENSSL:
+                snprintf(path, sizeof(path), "%s/opt/openssl@3/lib/libssl.3.dylib", prefixes[i]);
+                break;
+            case HT_DEP_INNOEXTRACT:
+                snprintf(path, sizeof(path), "%s/bin/innoextract", prefixes[i]);
+                break;
+            default:
+                return true;
+        }
+        if (ht_file_exists(path)) return true;
+    }
+    /* sudo often strips Homebrew from PATH, so the file checks above are
+     * the real test; PATH is only a last resort for odd installs. */
+    if (bit == HT_DEP_INNOEXTRACT)
+        return system("command -v innoextract >/dev/null 2>&1") == 0;
+    return false;
+}
+
+static const char *ht_find_brew(void) {
+    if (ht_file_exists("/usr/local/bin/brew"))    return "/usr/local/bin/brew";
+    if (ht_file_exists("/opt/homebrew/bin/brew")) return "/opt/homebrew/bin/brew";
+    return NULL;
+}
+
+static bool check_sensor_dependencies(void) {
+    if (!g_detected_sensor) return true;
+
+    vfsc_status_line("Checking sensor dependencies...");
+
+#ifdef HT_NO_METALLICA
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_warn("This build has no Metallica MIS support (it was built for a different sensor).\n");
+        vfsc_warn("Pairing, calibration and records are unavailable. Rebuild with:\n");
+        vfsc_warn("  ./prep_and_build.sh --sensor metallica\n");
+        return true;
+    }
+#endif
+
+    unsigned missing = 0;
+    for (unsigned bit = 1; bit & HT_DEP_ALL; bit <<= 1) {
+        if ((g_detected_sensor->deps_runtime & bit) && !ht_dep_present(bit))
+            missing |= bit;
+    }
+
+    if (!missing) {
+        vfsc_status_line_ok("All dependencies for %s are installed.", g_detected_sensor->display_name);
+        return true;
+    }
+
+    char formulas[256] = "";
+    vfsc_warn("%s needs software that is not installed yet:\n", g_detected_sensor->display_name);
+    for (unsigned bit = 1; bit & HT_DEP_ALL; bit <<= 1) {
+        if (!(missing & bit)) continue;
+        printf("  - %s\n", ht_dep_label(bit));
+        size_t used = strlen(formulas);
+        snprintf(formulas + used, sizeof(formulas) - used, "%s%s", used ? " " : "", ht_dep_formula(bit));
+    }
+
+    const char *brew = ht_find_brew();
+    const char *sudo_user = getenv("SUDO_USER");
+    if (!brew) {
+        printf("Homebrew was not found. Install it, then run: brew install %s\n", formulas);
+        return true;
+    }
+    if (!isatty(STDIN_FILENO)) {
+        printf("Install with: brew install %s\n", formulas);
+        return true;
+    }
+
+    printf("Install only these now with Homebrew? [y/N] ");
+    fflush(stdout);
+    char answer[16] = "";
+    if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+        printf("Skipped. Install later with: brew install %s\n", formulas);
+        return true;
+    }
+
+    char cmd[512];
+    if (geteuid() == 0 && sudo_user && strcmp(sudo_user, "root") != 0) {
+        /* Homebrew refuses root: run it as the invoking user. */
+        snprintf(cmd, sizeof(cmd), "sudo -u \"%s\" -H \"%s\" install %s", sudo_user, brew, formulas);
+    } else {
+        snprintf(cmd, sizeof(cmd), "\"%s\" install %s", brew, formulas);
+    }
+    if (system(cmd) != 0) {
+        vfsc_warn("Homebrew could not finish the install. Run it yourself: brew install %s\n", formulas);
+        return true;
+    }
+
+    vfsc_status_line_ok("Dependencies installed.");
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
  * Daemon version check (startup gate, v1.0.5, generalized in v1.1)
  * ------------------------------------------------------------------ *
  * The client and the installed daemon binary are two separately
@@ -5806,6 +5933,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     vfsc_boot_line("Sensor descriptor matched, claiming interface...");
+
+    check_sensor_dependencies();
 
     vfsc_boot_line("launchd: querying installed daemon version...");
     if (!check_daemon_version_gate()) {

@@ -140,9 +140,10 @@ Known limitations:
 - **macOS 15 Sequoia and later is the recommended version for Hackintosh Touch-ID** 
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
-- `libusb` (`brew install libusb`)
-- `openssl@3` (`brew install openssl@3`) [will be Deprecated on Novemeber 1st 2026 but should work fine still]
-- `innoextract` (`brew install innoextract`)
+- Dependencies depend on your sensor. `prep_and_build.sh` installs only what yours needs (run `./prep_and_build.sh --list` to see it):
+  - `libusb` (`brew install libusb`), every sensor
+  - `openssl@3` (`brew install openssl@3`), Metallica MIS only [will be Deprecated on Novemeber 1st 2026 but should work fine still]
+  - `innoextract` (`brew install innoextract`), Metallica MIS only
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
 - ```OpenCore v1.0.6 or later``` (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
@@ -153,8 +154,11 @@ Known limitations:
 git clone https://github.com/hackintosh-user/VFS5011-hackintosh.git
 cd /path/to/vfs5011-hackintosh-active-development
 chmod +x prep_and_build.sh
-./prep_and_build.sh
+./prep_and_build.sh                    # detects your sensor over USB
+./prep_and_build.sh --sensor vfs5011   # or name it: vfs5011, upek, metallica, or a VID:PID
 ```
+
+Only the dependencies for that sensor are installed and built. Add `--yes` to skip the install prompt or `--no-install` to only report what is missing.
 
 This produces the needed binaries for running the client and each sensor's Daemon + other needed files. 
 

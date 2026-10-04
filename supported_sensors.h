@@ -17,6 +17,12 @@
  *   3. Flip backend_available to true once that daemon is built,
  *      tested on real hardware, and its own hack-touchid-agent-install.sh-
  *      style installer exists.
+ *   4. Fill in .family, .deps_build and .deps_runtime. The build
+ *      scripts (prep_and_build.sh and friends) and the client's
+ *      launch-time dependency check both read these, so a user only
+ *      ever installs what their own sensor needs. Rows that share a
+ *      family string share one build (e.g. the three Metallica MIS
+ *      identities are all family "metallica").
  * Until backend_available is true, the client will detect the sensor
  * and say so, but Enroll/Verify/Deploy will refuse with a clear
  * "not yet implemented" message rather than pretending to work.
@@ -25,7 +31,19 @@
 #ifndef __SUPPORTED_SENSORS_H
 #define __SUPPORTED_SENSORS_H
 
+#include <stddef.h>
+
+/* Third-party dependencies a sensor family can need. Each bit maps to
+ * a Homebrew formula in ht_dep_formula() below. */
+#define HT_DEP_LIBUSB       (1u << 0)  /* every sensor: USB access */
+#define HT_DEP_OPENSSL      (1u << 1)  /* Metallica MIS: ECDH/HMAC/SHA session crypto */
+#define HT_DEP_INNOEXTRACT  (1u << 2)  /* Metallica MIS: unpacks Lenovo's firmware installer */
+#define HT_DEP_ALL (HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT)
+
 typedef struct {
+    const char *family;            /* build family: "vfs5011", "upek" or "metallica" */
+    unsigned deps_build;           /* HT_DEP_* bits needed to compile and link this family */
+    unsigned deps_runtime;         /* HT_DEP_* bits needed while the client/daemon runs */
     const char *display_name;      /* shown in the client, e.g. "VFS5011" */
     unsigned short vid;
     unsigned short pid;
@@ -36,6 +54,9 @@ typedef struct {
 
 static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
     {
+        .family              = "vfs5011",
+        .deps_build          = HT_DEP_LIBUSB,
+        .deps_runtime        = HT_DEP_LIBUSB,
         .display_name        = "Validity VFS5011",
         .vid                  = 0x138a,
         .pid                  = 0x0018,
@@ -65,6 +86,9 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * [U] actually happens and looks good, same policy as Metallica
          * MIS below. install_script_name is still a placeholder; no
          * installer exists until backend_available flips. */
+        .family              = "upek",
+        .deps_build          = HT_DEP_LIBUSB,
+        .deps_runtime        = HT_DEP_LIBUSB,
         .display_name        = "UPEK/AuthenTec TouchStrip",
         .vid                  = 0x147e,
         .pid                  = 0x2016,
@@ -92,6 +116,9 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * family still doesn't exist, so backend_available stays 0
          * until that's built -- Enroll/Verify/Deploy still refuse for
          * this sensor exactly as before. */
+        .family              = "metallica",
+        .deps_build          = HT_DEP_LIBUSB | HT_DEP_OPENSSL,
+        .deps_runtime        = HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT,
         .display_name        = "Synaptics Metallica MIS",
         .vid                  = 0x06cb,
         .pid                  = 0x009a,
@@ -111,6 +138,9 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * build here, same backend_available gate as 09a above.
          * p0cketl1nt's spare ThinkPad X1C5 has this exact identity
          * (confirmed via lsusb), untested against real hardware yet. */
+        .family              = "metallica",
+        .deps_build          = HT_DEP_LIBUSB | HT_DEP_OPENSSL,
+        .deps_runtime        = HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT,
         .display_name        = "Synaptics Metallica MIS",
         .vid                  = 0x138a,
         .pid                  = 0x0097,
@@ -125,6 +155,9 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * 09a and 97. No hardware confirmed on this exact identity yet
          * (unlike 09a and 97, which both have real ThinkPads behind
          * them); included for completeness since it's the same chip. */
+        .family              = "metallica",
+        .deps_build          = HT_DEP_LIBUSB | HT_DEP_OPENSSL,
+        .deps_runtime        = HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT,
         .display_name        = "Synaptics Metallica MIS",
         .vid                  = 0x138a,
         .pid                  = 0x009d,
@@ -136,5 +169,25 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
 
 #define HACK_TOUCHID_SENSOR_COUNT \
     (sizeof(HACK_TOUCHID_SENSORS) / sizeof(HACK_TOUCHID_SENSORS[0]))
+
+/* ---- dependency helpers (shared by the client and ht_sensor_tool.c) ---- */
+
+static inline const char *ht_dep_formula(unsigned bit) {
+    switch (bit) {
+        case HT_DEP_LIBUSB:      return "libusb";
+        case HT_DEP_OPENSSL:     return "openssl@3";
+        case HT_DEP_INNOEXTRACT: return "innoextract";
+        default:                 return NULL;
+    }
+}
+
+static inline const char *ht_dep_label(unsigned bit) {
+    switch (bit) {
+        case HT_DEP_LIBUSB:      return "libusb (USB access)";
+        case HT_DEP_OPENSSL:     return "OpenSSL 3 (sensor session crypto)";
+        case HT_DEP_INNOEXTRACT: return "innoextract (firmware unpacker)";
+        default:                 return "unknown";
+    }
+}
 
 #endif /* __SUPPORTED_SENSORS_H */

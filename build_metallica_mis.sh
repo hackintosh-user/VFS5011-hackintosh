@@ -25,10 +25,18 @@
 # files. Requires: brew install openssl@3 (in addition to libusb).
 set -e
 
-OPENSSL_PREFIX="/usr/local/opt/openssl@3"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+. ./ht_env.sh
+
+OPENSSL_PREFIX="$HT_OPENSSL_PREFIX"
 
 if [ ! -d "$OPENSSL_PREFIX" ]; then
     echo "error: $OPENSSL_PREFIX not found -- install with: brew install openssl@3" >&2
+    exit 1
+fi
+if [ ! -f "$HT_LIBUSB_INC/libusb.h" ]; then
+    echo "error: libusb not found under $HT_BREW_PREFIX -- install with: brew install libusb" >&2
     exit 1
 fi
 
@@ -39,7 +47,7 @@ clang metallica_mis_daemon.c metallica_mis_tls.c metallica_mis_init_flash.c \
     metallica_mis_debug.c metallica_mis_db.c \
     -o metallica_mis_daemon \
     -I. \
-    -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
+    -I"$HT_LIBUSB_INC" -L"$HT_LIBUSB_LIB" -lusb-1.0 \
     -I"$OPENSSL_PREFIX/include" -L"$OPENSSL_PREFIX/lib" -lssl -lcrypto \
     -framework CoreFoundation -framework IOKit \
     -lpthread \
