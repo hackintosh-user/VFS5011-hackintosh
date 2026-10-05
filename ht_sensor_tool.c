@@ -133,9 +133,18 @@ static int cmd_deps(const char *phase, const char *list) {
     return 0;
 }
 
-/* ioreg prints each USB device's "idVendor" and "idProduct" as decimal
- * integers on separate lines. Track the most recent of each and test the
- * pair whenever a product id arrives. */
+/* ioreg prints each USB device as a node starting with "+-o", with
+ * "idVendor" and "idProduct" as decimal integers somewhere inside it, in
+ * either order. Collect both per node and test the pair when the next
+ * node starts (or the input ends). */
+static void detect_check(long vid, long pid, char fams[][32], int *n) {
+    if (vid < 0 || pid < 0) return;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const hack_touchid_sensor_t *s = &HACK_TOUCHID_SENSORS[i];
+        if ((long)s->vid == vid && (long)s->pid == pid) add_family(fams, n, s->family);
+    }
+}
+
 static int cmd_detect(void) {
     char line[1024];
     long vid = -1, pid = -1;
@@ -144,18 +153,15 @@ static int cmd_detect(void) {
 
     while (fgets(line, sizeof(line), stdin)) {
         char *p;
-        if ((p = strstr(line, "\"idVendor\" = ")) != NULL)  vid = strtol(p + 13, NULL, 10);
-        if ((p = strstr(line, "\"idProduct\" = ")) != NULL) {
-            pid = strtol(p + 14, NULL, 10);
-            if (vid >= 0 && pid >= 0) {
-                for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
-                    const hack_touchid_sensor_t *s = &HACK_TOUCHID_SENSORS[i];
-                    if ((long)s->vid == vid && (long)s->pid == pid) add_family(fams, &n, s->family);
-                }
-            }
+        if (strstr(line, "+-o ") != NULL) {
+            detect_check(vid, pid, fams, &n);
             vid = pid = -1;
         }
+        if ((p = strstr(line, "\"idVendor\" = ")) != NULL)  vid = strtol(p + 13, NULL, 10);
+        if ((p = strstr(line, "\"idProduct\" = ")) != NULL) pid = strtol(p + 14, NULL, 10);
     }
+    detect_check(vid, pid, fams, &n);
+
     for (int i = 0; i < n; i++) printf("%s\n", fams[i]);
     return 0;
 }

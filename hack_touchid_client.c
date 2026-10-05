@@ -3911,6 +3911,13 @@ static bool do_deploy(void) {
     printf("\n%sDeploying Authentication Service (%s)...%s\n",
            VFSC_CYAN, g_detected_sensor->display_name, VFSC_RESET);
 
+    /* This client already confirmed the sensor over libusb a moment ago
+     * (g_detected_sensor above), so tell the installer not to repeat the
+     * check with its own shell-level USB probe. That second probe used to
+     * refuse on Tahoe while the sensor was clearly present. Inherited by
+     * the popen() child below. */
+    setenv("HT_SENSOR_VERIFIED", "1", 1);
+
     char cmd[PATH_MAX + 32];
     snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, g_detected_sensor->install_script_name);
 

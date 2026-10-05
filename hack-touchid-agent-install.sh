@@ -91,19 +91,52 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# v1.0.5: same hardware gate as hack-touchid client's Deploy option, duplicated
-# here because prep_and_build.sh and a bare `sudo ./hack-touchid-agent-install.sh`
-# both call this script directly, bypassing hack-touchid client entirely. Uses
-# system_profiler rather than a libusb helper since this is a plain
-# shell script -- "Product ID: 0x0018" is always immediately followed
-# by its own "Vendor ID: 0x138a" line in SPUSBDataType's per-device
-# block, so pairing them with -A1 (rather than grepping each field
-# separately across the whole tree) avoids a false match against some
-# other 0x138a or 0x0018 device that isn't actually a VFS5011.
-if ! system_profiler SPUSBDataType 2>/dev/null | grep -A1 "Product ID: 0x0018" | grep -qi "Vendor ID: 0x138a"; then
-    echo "Error: No VFS5011 sensor detected on the USB bus (VID 0x138a / PID 0x0018 not found)." >&2
-    echo "Refusing to install a background service tied to hardware that isn't present." >&2
-    exit 1
+# Hardware gate (v1.0.5, rewritten Oct 4). Same idea as hack-touchid
+# client's Deploy option, duplicated here because prep_and_build.sh and a
+# bare `sudo ./hack-touchid-agent-install.sh` both call this script
+# directly, bypassing the client entirely.
+#
+# Oct 4 fix: on Tahoe the old check (system_profiler, "Product ID:
+# 0x0018" followed on the NEXT line by "Vendor ID: 0x138a") refused to
+# install even though the sensor was present and the client itself had
+# just detected it over libusb. It depended on one exact field order in
+# system_profiler's text output, which is not guaranteed across macOS
+# versions. Now:
+#   1. When the client launched this script it already confirmed the
+#      sensor over libusb and sets HT_SENSOR_VERIFIED=1, so there is
+#      nothing to re-check.
+#   2. Otherwise ioreg is read per USB device node (idVendor and
+#      idProduct are matched inside the same node, in either order).
+#   3. system_profiler stays as a fallback, also order-agnostic: a
+#      matching Vendor ID and Product ID within a few lines of each
+#      other count as one device.
+SENSOR_VID_DEC=5002   # 0x138a
+SENSOR_PID_DEC=24     # 0x0018
+
+sensor_present_ioreg() {
+    ioreg -p IOUSB -l -w0 2>/dev/null | awk -v want_v="$SENSOR_VID_DEC" -v want_p="$SENSOR_PID_DEC" '
+        function check() { if (v == want_v && p == want_p) found = 1 }
+        /\+-o / { check(); v = -1; p = -1 }
+        /"idVendor" *=/  { sub(/.*= */, ""); v = $1 + 0 }
+        /"idProduct" *=/ { sub(/.*= */, ""); p = $1 + 0 }
+        END { check(); exit (found ? 0 : 1) }'
+}
+
+sensor_present_profiler() {
+    system_profiler SPUSBDataType 2>/dev/null | awk '
+        { l = tolower($0) }
+        l ~ /product id: 0x0018/ { pl = NR }
+        l ~ /vendor id: 0x138a/  { vl = NR }
+        pl && vl && (pl - vl <= 6) && (vl - pl <= 6) { found = 1 }
+        END { exit (found ? 0 : 1) }'
+}
+
+if [ "${HT_SENSOR_VERIFIED:-0}" != "1" ]; then
+    if ! sensor_present_ioreg && ! sensor_present_profiler; then
+        echo "Error: No VFS5011 sensor detected on the USB bus (VID 0x138a / PID 0x0018 not found)." >&2
+        echo "Refusing to install a background service tied to hardware that isn't present." >&2
+        exit 1
+    fi
 fi
 
 # Resolve this script's own directory so build_daemon.sh and the
