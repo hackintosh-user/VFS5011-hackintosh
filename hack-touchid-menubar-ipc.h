@@ -40,11 +40,17 @@
 #define VFS5011_NOTIFY_SCANNING_ENABLED  VFS5011_NOTIFY_PREFIX ".scanning_enabled"
 #define VFS5011_NOTIFY_SCANNING_DISABLED VFS5011_NOTIFY_PREFIX ".scanning_disabled"
 
-/* Menu bar app -> daemon (requests) */
+/* Daemon -> menu bar app (swipe-to-lock state confirmation) */
+#define VFS5011_NOTIFY_LOCKSWIPE_ENABLED  VFS5011_NOTIFY_PREFIX ".lockswipe_enabled"
+#define VFS5011_NOTIFY_LOCKSWIPE_DISABLED VFS5011_NOTIFY_PREFIX ".lockswipe_disabled"
+
+/* Menu bar app (or the Control Center control) -> daemon (requests) */
 #define VFS5011_NOTIFY_REQUEST_ENABLE    VFS5011_NOTIFY_PREFIX ".request_enable"
 #define VFS5011_NOTIFY_REQUEST_DISABLE   VFS5011_NOTIFY_PREFIX ".request_disable"
 #define VFS5011_NOTIFY_REQUEST_RESTART   VFS5011_NOTIFY_PREFIX ".request_restart"
 #define VFS5011_NOTIFY_REQUEST_STATE     VFS5011_NOTIFY_PREFIX ".request_state_announce"
+#define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_ENABLE  VFS5011_NOTIFY_PREFIX ".request_lockswipe_enable"
+#define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE VFS5011_NOTIFY_PREFIX ".request_lockswipe_disable"
 
 /*
  * Path to the persisted pause/resume flag. Presence of this file means
@@ -54,6 +60,16 @@
  */
 #define VFS5011_SCANNING_DISABLED_FLAG_PATH \
     "/Library/Application Support/VFS5011/scanning_disabled"
+
+/*
+ * Path to the persisted swipe-to-lock flag. Presence of this file means
+ * swipe-to-lock is ON. Same pattern as the scanning flag above, and
+ * also what the Control Center control reads (read-only) to draw its
+ * current state, so the file stays the single source of truth for the
+ * daemon, the menu bar app and the control.
+ */
+#define VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH \
+    "/Library/Application Support/VFS5011/lockswipe_enabled"
 
 /*
  * Call once from main(), after the screenIsLocked/Unlocked observers
@@ -72,6 +88,18 @@ void vfs5011_menubar_ipc_init(void);
  * early-return right below it.
  */
 bool vfs5011_scanning_is_enabled(void);
+
+/* Returns true if swipe-to-lock is switched on (persisted across restarts). */
+bool vfs5011_lockswipe_is_enabled(void);
+
+/*
+ * Registers a callback that runs on the main run loop whenever the menu
+ * bar app or the Control Center control asks to turn swipe-to-lock on or
+ * off. By the time it runs, vfs5011_lockswipe_is_enabled() already
+ * returns the new value. The daemon uses it to arm or disarm the sensor.
+ * Call before vfs5011_menubar_ipc_init().
+ */
+void vfs5011_set_lockswipe_handler(void (*handler)(bool enabled));
 
 /* Fire-and-forget event posts. */
 void vfs5011_notify_swipe_requested(void); /* after successfully entering STATE_POLLING */
