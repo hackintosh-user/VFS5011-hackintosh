@@ -24,17 +24,19 @@ HT_LIBUSB_INC="$HT_BREW_PREFIX/include/libusb-1.0"
 HT_LIBUSB_LIB="$HT_BREW_PREFIX/lib"
 HT_OPENSSL_PREFIX="$HT_BREW_PREFIX/opt/openssl@3"
 
-# Builds the sensor tool (needs clang only). Rebuilt when the header is
-# newer so a table edit is picked up automatically.
+# Builds the sensor tool (needs clang only). Always rebuilt, it compiles
+# in well under a second. A timestamp check ("rebuild only if the source
+# is newer") is not safe here: files that arrive through a GitHub zip,
+# a web upload or the in-app updater can carry timestamps OLDER than a
+# binary built from a previous version, which left a stale tool running
+# and made sensor auto-detect fall back to asking.
 ht_ensure_tool() {
-    if [ ! -x "$HT_TOOL" ] || [ "$HT_DIR/supported_sensors.h" -nt "$HT_TOOL" ] \
-       || [ "$HT_DIR/ht_sensor_tool.c" -nt "$HT_TOOL" ]; then
-        if ! command -v clang >/dev/null 2>&1; then
-            echo "error: clang not found. Install the Xcode Command Line Tools: xcode-select --install" >&2
-            return 1
-        fi
-        clang -O1 -I"$HT_DIR" "$HT_DIR/ht_sensor_tool.c" -o "$HT_TOOL" || return 1
+    if ! command -v clang >/dev/null 2>&1; then
+        echo "error: clang not found. Install the Xcode Command Line Tools: xcode-select --install" >&2
+        return 1
     fi
+    rm -f "$HT_TOOL"
+    clang -O1 -I"$HT_DIR" "$HT_DIR/ht_sensor_tool.c" -o "$HT_TOOL" || return 1
 }
 
 # Is this Homebrew formula's content present? Checked by looking for the
