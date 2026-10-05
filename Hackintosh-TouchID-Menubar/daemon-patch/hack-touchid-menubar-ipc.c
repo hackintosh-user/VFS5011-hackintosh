@@ -29,6 +29,12 @@
  * across the ~300ms poll tick is fine). */
 static volatile bool g_scanning_enabled = true;
 
+/* Swipe-to-lock (Tahoe feature). Same read-mostly reasoning as above.
+ * The handler is set once before init and only called from the main
+ * run loop, so it needs no locking either. */
+static volatile bool g_lockswipe_enabled = false;
+static void (*g_lockswipe_handler)(bool enabled) = NULL;
+
 /* --- Flag file persistence --- */
 
 static bool flag_file_exists(void) {
@@ -54,7 +60,41 @@ static void remove_flag_file(void) {
     }
 }
 
+static bool lockswipe_flag_exists(void) {
+    struct stat st;
+    return stat(VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH, &st) == 0;
+}
+
+static void write_lockswipe_flag(void) {
+    FILE *f = fopen(VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH, "w");
+    if (f == NULL) {
+        fprintf(stderr, "vfs5011: failed to write swipe-to-lock flag file: %s\n",
+                strerror(errno));
+        return;
+    }
+    fprintf(f, "enabled at %ld\n", (long)time(NULL));
+    fclose(f);
+    /* World-readable on purpose: the sandboxed Control Center control
+     * reads this file (read-only) to show its current state. */
+    chmod(VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH, 0644);
+}
+
+static void remove_lockswipe_flag(void) {
+    if (unlink(VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH) != 0 && errno != ENOENT) {
+        fprintf(stderr, "vfs5011: failed to remove swipe-to-lock flag file: %s\n",
+                strerror(errno));
+    }
+}
+
 /* --- Public: read current state --- */
+
+bool vfs5011_lockswipe_is_enabled(void) {
+    return g_lockswipe_enabled;
+}
+
+void vfs5011_set_lockswipe_handler(void (*handler)(bool enabled)) {
+    g_lockswipe_handler = handler;
+}
 
 bool vfs5011_scanning_is_enabled(void) {
     return g_scanning_enabled;
@@ -100,12 +140,33 @@ static void set_scanning_enabled(bool enabled) {
     }
 }
 
+static void announce_lockswipe_state(void) {
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDistributedCenter(),
+        g_lockswipe_enabled ? CFSTR(VFS5011_NOTIFY_LOCKSWIPE_ENABLED)
+                             : CFSTR(VFS5011_NOTIFY_LOCKSWIPE_DISABLED),
+        NULL, NULL, TRUE);
+}
+
+static void set_lockswipe_enabled(bool enabled) {
+    if (g_lockswipe_enabled == enabled) {
+        announce_lockswipe_state(); /* still confirm, so a UI that guessed wrong corrects itself */
+        return;
+    }
+    g_lockswipe_enabled = enabled;
+    if (enabled) write_lockswipe_flag(); else remove_lockswipe_flag();
+    printf("vfs5011: swipe-to-lock %s via request\n", enabled ? "ENABLED" : "DISABLED");
+    if (g_lockswipe_handler) g_lockswipe_handler(enabled);
+    announce_lockswipe_state();
+}
+
 static void announce_current_state(void) {
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDistributedCenter(),
         g_scanning_enabled ? CFSTR(VFS5011_NOTIFY_SCANNING_ENABLED)
                             : CFSTR(VFS5011_NOTIFY_SCANNING_DISABLED),
         NULL, NULL, TRUE);
+    announce_lockswipe_state();
 }
 
 /*
@@ -139,11 +200,16 @@ static void menubar_ipc_callback(CFNotificationCenterRef center,
         handle_restart_request();
     } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_STATE), 0) == kCFCompareEqualTo) {
         announce_current_state();
+    } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_ENABLE), 0) == kCFCompareEqualTo) {
+        set_lockswipe_enabled(true);
+    } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE), 0) == kCFCompareEqualTo) {
+        set_lockswipe_enabled(false);
     }
 }
 
 void vfs5011_menubar_ipc_init(void) {
     g_scanning_enabled = !flag_file_exists();
+    g_lockswipe_enabled = lockswipe_flag_exists();
 
     CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
     CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
@@ -158,7 +224,14 @@ void vfs5011_menubar_ipc_init(void) {
     CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
                                      CFSTR(VFS5011_NOTIFY_REQUEST_STATE), NULL,
                                      CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
+                                     CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_ENABLE), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
+                                     CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 
-    printf("Menu bar IPC observers registered (scanning currently %s).\n",
-           g_scanning_enabled ? "enabled" : "disabled");
+    printf("Menu bar IPC observers registered (scanning currently %s, swipe-to-lock %s).\n",
+           g_scanning_enabled ? "enabled" : "disabled",
+           g_lockswipe_enabled ? "on" : "off");
 }
