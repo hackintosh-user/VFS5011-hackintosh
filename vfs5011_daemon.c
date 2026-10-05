@@ -46,6 +46,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>
+#include <sys/sysctl.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <libusb.h>
@@ -725,7 +726,13 @@ static void unmount_template_volume(void) {
 
 typedef enum {
     STATE_IDLE,
-    STATE_POLLING
+    STATE_POLLING,
+    /* Swipe-to-lock (macOS Tahoe feature, toggled from the menu bar app
+     * or the Control Center control): the sensor is armed and any real
+     * swipe locks the screen. Never matches a finger, never types a
+     * password. Yields to STATE_POLLING the moment the screen locks or
+     * an auth padlock appears. */
+    STATE_LOCK_ARMED
 } daemon_state_t;
 
 static atomic_int g_state = STATE_IDLE;
@@ -876,6 +883,156 @@ static void type_password_and_enter(const char *password) {
     CGEventRef return_up = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x24, false);
     CGEventPost(kCGSessionEventTap, return_up);
     CFRelease(return_up);
+}
+
+/* ------------------------------------------------------------------ *
+ * Swipe-to-lock (macOS Tahoe feature)
+ *
+ * While STATE_LOCK_ARMED, polling_thread_main() waits for a real swipe
+ * and then locks the screen with Ctrl+Cmd+Q. Locking is not a
+ * privileged action, so unlike password auto-typing this does NOT load
+ * templates or match a finger: any swipe long enough to be a real
+ * swipe (not a graze or a palm) locks. The sensor stays lit while armed
+ * -- the capture sequence this driver knows about has no "detect
+ * finger, LED off" mode.
+ * ------------------------------------------------------------------ */
+
+/* Minimum aligned image height (rows) for a swipe to count as a lock
+ * swipe. Rejects grazes and resting palms. UNTUNED: confirm on real
+ * hardware by reading the "lock swipe height" log line. */
+#define LOCKSWIPE_MIN_HEIGHT 60
+
+/* IDLE -> LOCK_ARMED, only if the feature is on and a sensor is there.
+ * Compare-and-swap so it can never clobber STATE_POLLING being set by
+ * the main run loop at the same moment. */
+static bool screen_is_locked_now(void);
+
+/* Swipe-to-lock is a macOS Tahoe (26, Darwin 25) feature. The menu bar
+ * app only offers it there, but the flag file survives across OS
+ * changes, so the daemon checks too. */
+static bool os_is_tahoe_or_newer(void) {
+    char rel[32] = "";
+    size_t len = sizeof(rel);
+    if (sysctlbyname("kern.osrelease", rel, &len, NULL, 0) != 0) return false;
+    return atoi(rel) >= 25;
+}
+
+static void lockswipe_try_arm(void) {
+    if (!vfs5011_lockswipe_is_enabled()) return;
+    if (!os_is_tahoe_or_newer()) return;
+    if (!vfs5011_scanning_is_enabled()) return; /* paused from the menu: don't wake the sensor */
+    if (screen_is_locked_now()) return;         /* the lock screen has its own auth episode */
+    if (!vfs5011_sensor_is_present()) return;
+    int expected = STATE_IDLE;
+    if (atomic_compare_exchange_strong(&g_state, &expected, STATE_LOCK_ARMED)) {
+        print_timestamp();
+        printf("Swipe-to-lock armed.\n");
+    }
+}
+
+static void lockswipe_disarm(void) {
+    int expected = STATE_LOCK_ARMED;
+    if (atomic_compare_exchange_strong(&g_state, &expected, STATE_IDLE)) {
+        print_timestamp();
+        printf("Swipe-to-lock disarmed.\n");
+    }
+}
+
+/* Every place that used to drop to STATE_IDLE unconditionally goes
+ * through here instead, so an episode ending falls back to the armed
+ * state when swipe-to-lock is on. */
+static void settle_to_idle(void) {
+    atomic_store(&g_state, STATE_IDLE);
+    lockswipe_try_arm();
+}
+
+/* Called from the menu bar IPC (main run loop) on enable/disable. */
+static void on_lockswipe_setting_changed(bool enabled) {
+    if (enabled) lockswipe_try_arm(); else lockswipe_disarm();
+}
+
+static bool screen_is_locked_now(void) {
+    CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+    if (!session) return false;
+    /* Key is only present (and true) while the screen is locked. */
+    const void *v = CFDictionaryGetValue(session, CFSTR("CGSSessionScreenIsLocked"));
+    bool locked = (v != NULL && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)v));
+    CFRelease(session);
+    return locked;
+}
+
+static void post_lock_keystroke(void) {
+    const CGKeyCode kVK_ANSI_Q = 0x0C;
+    CGEventFlags flags = kCGEventFlagMaskControl | kCGEventFlagMaskCommand;
+
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, kVK_ANSI_Q, true);
+    CGEventSetFlags(down, flags);
+    CGEventPost(kCGSessionEventTap, down);
+    CFRelease(down);
+
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, kVK_ANSI_Q, false);
+    CGEventSetFlags(up, flags);
+    CGEventPost(kCGSessionEventTap, up);
+    CFRelease(up);
+}
+
+static void trigger_lockswipe(void) {
+    if (screen_is_locked_now()) return; /* already locked, nothing to do */
+
+    /* Drop to IDLE first: on_screen_locked() only arms the lock-screen
+     * auth episode from IDLE/LOCK_ARMED, and the CAS also catches the
+     * state having changed under us (e.g. a padlock just appeared). */
+    int expected = STATE_LOCK_ARMED;
+    if (!atomic_compare_exchange_strong(&g_state, &expected, STATE_IDLE)) return;
+
+    print_timestamp();
+    printf("Swipe-to-lock: swipe detected -> locking the screen (Ctrl+Cmd+Q).\n");
+    post_lock_keystroke();
+
+    /* If the keystroke didn't actually lock (Accessibility not granted
+     * to the daemon, or Ctrl+Cmd+Q remapped), nothing else will ever
+     * re-arm us, so check and re-arm here. */
+    usleep(1000000);
+    if (!screen_is_locked_now() && atomic_load(&g_state) == STATE_IDLE) {
+        print_timestamp();
+        printf("Swipe-to-lock: screen did not lock (is Accessibility granted to the daemon?). Re-arming.\n");
+        lockswipe_try_arm();
+    }
+}
+
+/* Captures one swipe while LOCK_ARMED. Unlike capture_quality_template()
+ * this does not demand enough minutiae -- a lock swipe only has to be a
+ * real swipe. If the state flipped to STATE_POLLING mid-capture (the
+ * screen locked some other way, or a padlock appeared), the swipe is
+ * not thrown away: a template is extracted so it can be used as the
+ * auth probe. Returns 0 if a swipe was captured. */
+static int capture_swipe_adaptive(struct xyt_struct *out_tmpl, bool *template_valid, int *height_out) {
+    *template_valid = false;
+    *height_out = 0;
+
+    if (open_device() != 0) {
+        close_device();
+        usleep(500000);
+        return -1;
+    }
+    int height = 0;
+    unsigned char *image = capture_fingerprint_image(g_handle, &height);
+    close_device();
+    if (!image) {
+        usleep(500000);
+        return -1;
+    }
+    *height_out = height;
+
+    if (atomic_load(&g_state) == STATE_POLLING) {
+        memset(out_tmpl, 0, sizeof(*out_tmpl));
+        if (vfs5011_extract_template(image, VFS5011_IMAGE_WIDTH, height, out_tmpl) == 0
+            && out_tmpl->nrows >= MIN_MINUTIAE) {
+            *template_valid = true;
+        }
+    }
+    free(image);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1180,7 +1337,7 @@ static void *load_templates_thread_main(void *arg) {
         if (atomic_load(&g_state) == STATE_POLLING) {
             print_timestamp();
             printf("Staying IDLE (no templates available).\n");
-            atomic_store(&g_state, STATE_IDLE);
+            settle_to_idle();
             atomic_store(&g_trigger_source, TRIGGER_NONE);
             if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
             vfs5011_notify_swipe_failed(); /* we already told them to swipe -- let the menu bar app walk that back */
@@ -1195,7 +1352,8 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
                                      AXUIElementRef secure_field, const char *label);
 
 static void on_screen_locked(void) {
-    if (atomic_load(&g_state) != STATE_IDLE) return; /* shouldn't happen, but don't interrupt an episode */
+    int st = atomic_load(&g_state);
+    if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* shouldn't happen, but don't interrupt an episode */
     arm_polling_for_trigger(TRIGGER_LOCK_SCREEN, 0, NULL, "Screen lock");
 }
 
@@ -1219,6 +1377,8 @@ static void on_screen_unlocked(void) {
 
     print_timestamp();
     printf("Screen UNLOCKED -> entering IDLE state.\n");
+
+    lockswipe_try_arm(); /* back to the armed state if swipe-to-lock is on */
 }
 
 /* Shared by both triggers: loads templates for one episode and flips
@@ -1233,7 +1393,7 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
          * function fresh rather than needing a new prompt to appear. */
         print_timestamp();
         printf("%s detected, but scanning is paused -- staying IDLE.\n", label);
-        atomic_store(&g_state, STATE_IDLE);
+        settle_to_idle();
         if (secure_field) CFRelease(secure_field);
         return;
     }
@@ -1248,7 +1408,7 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
          * notification goes out. */
         print_timestamp();
         printf("%s detected, but no VFS5011 sensor found on this system -- staying IDLE.\n", label);
-        atomic_store(&g_state, STATE_IDLE);
+        settle_to_idle();
         if (secure_field) CFRelease(secure_field);
         return;
     }
@@ -1279,7 +1439,7 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
          * swipe_requested we already sent. */
         print_timestamp();
         printf("Could not start template loader thread -- staying IDLE.\n");
-        atomic_store(&g_state, STATE_IDLE);
+        settle_to_idle();
         atomic_store(&g_trigger_source, TRIGGER_NONE);
         if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
         vfs5011_notify_swipe_failed();
@@ -1436,7 +1596,8 @@ static atomic_bool g_padlock_prompt_already_armed = false;
  * cleanly next time. */
 static void auth_prompt_poll_callback(CFRunLoopTimerRef timer, void *info) {
     (void)timer; (void)info;
-    if (atomic_load(&g_state) != STATE_IDLE) return; /* already mid-episode elsewhere */
+    int st = atomic_load(&g_state);
+    if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* already mid-episode elsewhere */
 
     pid_t candidates[8];
     int candidate_count = get_auth_candidate_pids(candidates, 8);
@@ -1518,14 +1679,45 @@ static void notification_callback(CFNotificationCenterRef center,
  * below) rather than assumed single-writer/single-reader. */
 static void *polling_thread_main(void *arg) {
     (void)arg;
+    unsigned idle_ticks = 0;
     while (atomic_load(&g_running)) {
-        if (atomic_load(&g_state) != STATE_POLLING) {
+        int loop_state = atomic_load(&g_state);
+        if (loop_state != STATE_POLLING && loop_state != STATE_LOCK_ARMED) {
             usleep(200000);
+            /* Self-heal every ~2s: picks swipe-to-lock back up after a
+             * pause/resume from the menu, or a sensor plugged in
+             * mid-session, without needing a dedicated hook for each. */
+            if (++idle_ticks % 10 == 0) lockswipe_try_arm();
+            continue;
+        }
+        if (loop_state == STATE_LOCK_ARMED && !vfs5011_scanning_is_enabled()) {
+            lockswipe_disarm();
             continue;
         }
 
         struct xyt_struct probe;
-        if (capture_quality_template(&probe) != 0) {
+        if (loop_state == STATE_LOCK_ARMED) {
+            struct xyt_struct lock_probe;
+            memset(&lock_probe, 0, sizeof(lock_probe));
+            bool lock_template_valid = false;
+            int lock_height = 0;
+            if (capture_swipe_adaptive(&lock_probe, &lock_template_valid, &lock_height) != 0) {
+                usleep(POLL_RETRY_DELAY_USEC);
+                continue;
+            }
+            int now = atomic_load(&g_state);
+            if (now == STATE_LOCK_ARMED) {
+                print_timestamp();
+                printf("Swipe-to-lock: lock swipe height %d (need %d)\n", lock_height, LOCKSWIPE_MIN_HEIGHT);
+                if (lock_height >= LOCKSWIPE_MIN_HEIGHT) trigger_lockswipe();
+                continue;
+            }
+            if (now == STATE_POLLING && lock_template_valid) {
+                probe = lock_probe; /* the screen locked mid-capture: use this swipe for auth */
+            } else {
+                continue; /* episode ended, or the swipe was too weak to score */
+            }
+        } else if (capture_quality_template(&probe) != 0) {
             /* Weak/failed swipe -- or nobody swiped at all yet. Back
              * off briefly and try again as long as we're still locked. */
             usleep(POLL_RETRY_DELAY_USEC);
@@ -1636,7 +1828,7 @@ static void *polling_thread_main(void *arg) {
             /* Stop hammering the sensor until the next trigger. For
              * the lock screen specifically, on_screen_unlocked will
              * also fire and re-confirm IDLE -- harmless overlap. */
-            atomic_store(&g_state, STATE_IDLE);
+            settle_to_idle();
         } else {
             /* A real swipe was captured (capture_quality_template
              * succeeded above) but didn't match any enrolled finger
@@ -1846,7 +2038,9 @@ int main(int argc, char **argv) {
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), auth_prompt_timer, kCFRunLoopDefaultMode);
     printf("Auth-prompt watcher registered (padlock, polling every 300ms).\n");
 
+    vfs5011_set_lockswipe_handler(on_lockswipe_setting_changed);
     vfs5011_menubar_ipc_init();
+    lockswipe_try_arm(); /* restore swipe-to-lock after a daemon restart */
 
     CFRunLoopRun();
 
