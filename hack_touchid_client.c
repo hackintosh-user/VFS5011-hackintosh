@@ -37,6 +37,7 @@
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -1854,6 +1855,47 @@ static void get_fpov_status_line(char *out, size_t out_size) {
     snprintf(out, out_size, "v%s (%s)", FPOV_SCHEMA_VERSION, label);
 }
 
+/* Fills `out` with e.g. "26.7.1 Tahoe (Darwin: 25.6.0)" for the Status
+ * section. "Reported" on purpose: both values come from the kernel, and
+ * a spoofed or compat-mode system can report something other than the
+ * real OS. The marketing name comes from the product-version major;
+ * if it is not one we know, the name is simply left out. */
+static void get_macos_version_line(char *out, size_t out_size) {
+    char product[64] = "";
+    size_t len = sizeof(product);
+    if (sysctlbyname("kern.osproductversion", product, &len, NULL, 0) != 0) {
+        product[0] = '\0';
+    }
+
+    char darwin[64] = "";
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(darwin, sizeof(darwin), "%s", uts.release);
+    }
+
+    const char *name = "";
+    int major = atoi(product);
+    switch (major) {
+        case 26: name = " Tahoe";    break;
+        case 15: name = " Sequoia";  break;
+        case 14: name = " Sonoma";   break;
+        case 13: name = " Ventura";  break;
+        case 12: name = " Monterey"; break;
+        case 11: name = " Big Sur";  break;
+        default: break;
+    }
+
+    if (product[0] == '\0' && darwin[0] == '\0') {
+        snprintf(out, out_size, "unknown");
+    } else if (product[0] == '\0') {
+        snprintf(out, out_size, "unknown (Darwin: %s)", darwin);
+    } else if (darwin[0] == '\0') {
+        snprintf(out, out_size, "%s%s", product, name);
+    } else {
+        snprintf(out, out_size, "%s%s (Darwin: %s)", product, name, darwin);
+    }
+}
+
 static void print_menu(void) {
     int sensor_present = (g_detected_sensor != NULL);
     int deployed = is_auth_service_deployed();
@@ -1886,6 +1928,11 @@ static void print_menu(void) {
     printf("%s[X]%s Uninstall\n", VFSC_BRED, VFSC_RESET);
     printf("%s[Q]%s Quit\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    {
+        char macos_line[128];
+        get_macos_version_line(macos_line, sizeof(macos_line));
+        printf("  * Reported macOS Version: %s%s%s\n", VFSC_DIM, macos_line, VFSC_RESET);
+    }
     printf("  * Sensor Status        : %s%s%s\n",
            sensor_present ? VFSC_GREEN : VFSC_YELLOW,
            sensor_present ? "Ready" : "Not Detected", VFSC_RESET);
