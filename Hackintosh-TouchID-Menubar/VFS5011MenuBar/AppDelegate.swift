@@ -28,6 +28,11 @@ import Cocoa
 import UserNotifications
 import ServiceManagement
 import Darwin
+// WidgetKit's ControlCenter reload API only exists in the macOS 26 SDK
+// (Swift 6.2 toolchain). Older toolchains skip it and still build.
+#if canImport(WidgetKit) && compiler(>=6.2)
+import WidgetKit
+#endif
 
 // MARK: - Daemon health-check constants
 //
@@ -63,6 +68,11 @@ enum VFS5011Notification {
     static let scanningEnabled  = "\(prefix).scanning_enabled"
     static let scanningDisabled = "\(prefix).scanning_disabled"
 
+    // Swipe-to-lock (macOS Tahoe only). Daemon confirms its state with
+    // these two, same pattern as scanning.
+    static let lockswipeEnabled  = "\(prefix).lockswipe_enabled"
+    static let lockswipeDisabled = "\(prefix).lockswipe_disabled"
+
     // Menu bar app -> daemon (requests; daemon confirms back via the
     // two state notifications above rather than the app assuming the
     // toggle succeeded)
@@ -70,6 +80,42 @@ enum VFS5011Notification {
     static let requestDisable   = "\(prefix).request_disable"
     static let requestRestart   = "\(prefix).request_restart"
     static let requestState     = "\(prefix).request_state_announce"
+    static let requestLockswipeEnable  = "\(prefix).request_lockswipe_enable"
+    static let requestLockswipeDisable = "\(prefix).request_lockswipe_disable"
+}
+
+// MARK: - macOS version helpers
+
+enum MacOSInfo {
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buf)
+    }
+
+    /// Darwin 25 == macOS 26 Tahoe. Uses the kernel's own report, so a
+    /// spoofed product version does not fool the feature gate.
+    static var isTahoeOrNewer: Bool {
+        guard let rel = sysctlString("kern.osrelease"),
+              let major = Int(rel.split(separator: ".").first ?? "") else { return false }
+        return major >= 25
+    }
+
+    /// e.g. "reported macOS Version: 26.7.1 Tahoe (Darwin: 25.6.0)".
+    /// "Reported" because both values come from the kernel and can be
+    /// spoofed or compat-mode.
+    static var reportedVersionLine: String {
+        let product = sysctlString("kern.osproductversion")
+        let darwin = sysctlString("kern.osrelease")
+        let major = Int((product ?? "").split(separator: ".").first ?? "") ?? 0
+        let names = [26: "Tahoe", 15: "Sequoia", 14: "Sonoma", 13: "Ventura", 12: "Monterey", 11: "Big Sur"]
+        var parts = product ?? "unknown"
+        if let name = names[major] { parts += " \(name)" }
+        if let darwin = darwin { parts += " (Darwin: \(darwin))" }
+        return "reported macOS Version: \(parts)"
+    }
 }
 
 @main
@@ -91,6 +137,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var aboutWindow: NSWindow?
     private var scanningEnabled: Bool = true {
         didSet { updateMenuForCurrentState() }
+    }
+    // Swipe-to-lock: mirrors what the daemon confirmed, never a guess.
+    private var lockSwipeEnabled: Bool = false {
+        didSet {
+            updateMenuForCurrentState()
+            reloadControlCenterControl()
+        }
     }
 
     // MARK: - Lifecycle
@@ -193,6 +246,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         toggleItem.tag = 100 // used to find + relabel this item later
         menu.addItem(toggleItem)
 
+        // Swipe-to-lock is a macOS Tahoe feature, so the item only
+        // exists there.
+        if MacOSInfo.isTahoeOrNewer {
+            let lockItem = NSMenuItem(
+                title: lockSwipeEnabled ? "Disable Swipe to Lock" : "Enable Swipe to Lock",
+                action: #selector(toggleLockSwipeTapped),
+                keyEquivalent: ""
+            )
+            lockItem.target = self
+            lockItem.tag = 101
+            menu.addItem(lockItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let versionItem = NSMenuItem(title: MacOSInfo.reportedVersionLine, action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        versionItem.tag = 102
+        menu.addItem(versionItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let aboutItem = NSMenuItem(
@@ -224,9 +297,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             ? "Disable Fingerprint Authentication"
             : "Enable Fingerprint Authentication"
 
+        if let lockItem = menu.item(withTag: 101) {
+            lockItem.title = lockSwipeEnabled ? "Disable Swipe to Lock" : "Enable Swipe to Lock"
+            lockItem.state = lockSwipeEnabled ? .on : .off
+        }
+
         // Dim the icon while paused so the state is visible without
         // opening the menu.
         statusItem.button?.appearsDisabled = !scanningEnabled
+    }
+
+    // Tells Control Center to re-read the swipe-to-lock control's state
+    // (the control itself lives in the optional Tahoe extension, see
+    // ControlCenterExtension/README.md). No-op without the macOS 26 SDK.
+    private func reloadControlCenterControl() {
+        #if canImport(WidgetKit) && compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            ControlCenter.shared.reloadControls(ofKind: "com.vfs5011.hackintosh.lockswipe")
+        }
+        #endif
     }
 
     // MARK: - Menu actions
@@ -310,6 +399,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Deliberately NOT flipping `scanningEnabled` here. The menu
         // should reflect what the daemon confirms, not what we hope
         // happened -- avoids the UI lying if a request is ever dropped.
+    }
+
+    @objc private func toggleLockSwipeTapped() {
+        if lockSwipeEnabled {
+            postDistributedNotification(VFS5011Notification.requestLockswipeDisable)
+        } else {
+            postDistributedNotification(VFS5011Notification.requestLockswipeEnable)
+        }
+        // Same rule as scanning: the menu follows the daemon's confirmation.
     }
 
     @objc private func quitTapped() {
@@ -488,6 +586,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             VFS5011Notification.swipeFailed,
             VFS5011Notification.scanningEnabled,
             VFS5011Notification.scanningDisabled,
+            VFS5011Notification.lockswipeEnabled,
+            VFS5011Notification.lockswipeDisabled,
         ]
 
         for name in names {
@@ -557,6 +657,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
             case VFS5011Notification.scanningDisabled:
                 self.scanningEnabled = false
+
+            case VFS5011Notification.lockswipeEnabled:
+                self.lockSwipeEnabled = true
+
+            case VFS5011Notification.lockswipeDisabled:
+                self.lockSwipeEnabled = false
 
             default:
                 break
