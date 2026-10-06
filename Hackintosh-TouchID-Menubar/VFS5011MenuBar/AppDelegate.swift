@@ -103,7 +103,7 @@ enum MacOSInfo {
         return major >= 25
     }
 
-    /// e.g. "reported macOS Version: 26.7.1 Tahoe (Darwin: 25.6.0)".
+    /// e.g. "Reported macOS Version: 26.7.1 Tahoe (Darwin: 25.6.0)".
     /// "Reported" because both values come from the kernel and can be
     /// spoofed or compat-mode.
     static var reportedVersionLine: String {
@@ -114,7 +114,7 @@ enum MacOSInfo {
         var parts = product ?? "unknown"
         if let name = names[major] { parts += " \(name)" }
         if let darwin = darwin { parts += " (Darwin: \(darwin))" }
-        return "reported macOS Version: \(parts)"
+        return "Reported macOS Version: \(parts)"
     }
 }
 
