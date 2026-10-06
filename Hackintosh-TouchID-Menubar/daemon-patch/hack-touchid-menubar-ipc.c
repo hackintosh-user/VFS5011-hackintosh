@@ -37,12 +37,20 @@ static void (*g_lockswipe_handler)(bool enabled) = NULL;
 
 /* --- Flag file persistence --- */
 
+/* The state directory may not exist yet (fresh install), which made the
+ * flag writes fail with ENOENT and the setting vanish on the next boot. */
+static void ensure_state_dir(void) {
+    mkdir("/Library/Application Support", 0755);
+    mkdir("/Library/Application Support/VFS5011", 0755); /* EEXIST is fine */
+}
+
 static bool flag_file_exists(void) {
     struct stat st;
     return stat(VFS5011_SCANNING_DISABLED_FLAG_PATH, &st) == 0;
 }
 
 static void write_flag_file(void) {
+    ensure_state_dir();
     FILE *f = fopen(VFS5011_SCANNING_DISABLED_FLAG_PATH, "w");
     if (f == NULL) {
         fprintf(stderr, "vfs5011: failed to write scanning-disabled flag file: %s\n",
@@ -66,6 +74,7 @@ static bool lockswipe_flag_exists(void) {
 }
 
 static void write_lockswipe_flag(void) {
+    ensure_state_dir();
     FILE *f = fopen(VFS5011_LOCKSWIPE_ENABLED_FLAG_PATH, "w");
     if (f == NULL) {
         fprintf(stderr, "vfs5011: failed to write swipe-to-lock flag file: %s\n",
@@ -230,6 +239,8 @@ void vfs5011_menubar_ipc_init(void) {
     CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
                                      CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE), NULL,
                                      CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    announce_lockswipe_state(); /* a menu bar app that launched first still learns the state */
 
     printf("Menu bar IPC observers registered (scanning currently %s, swipe-to-lock %s).\n",
            g_scanning_enabled ? "enabled" : "disabled",
