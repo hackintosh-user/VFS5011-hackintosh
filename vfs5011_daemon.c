@@ -537,6 +537,10 @@ static int load_match_threshold(void) {
 #define MIN_MINUTIAE 20          /* below this, a capture is too weak to trust */
 #define MAX_SWIPE_RETRIES 3      /* re-prompt this many times before giving up on one swipe */
 #define MAX_FAILED_SWIPES 4      /* scored non-matching swipes in one episode before falling back to the password */
+/* Set only around the daemon polling thread's own capture, so a weak swipe
+ * tells the menu bar app -- but the interactive client's Enroll/Verify,
+ * which share capture_quality_template(), never pops a banner. */
+static atomic_bool g_notify_weak_swipes = false;
 static atomic_int g_failed_swipes = 0; /* reset whenever an episode starts or the screen unlocks */
 #define MIN_SELF_CONSISTENCY 15  /* a new enroll swipe must score at least this well against
                                     at least one already-saved swipe from this same session,
@@ -616,6 +620,7 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
         if (out_tmpl->nrows < MIN_MINUTIAE) {
             fprintf(stderr, "Swipe too weak (%d minutiae, need %d) — swipe again, slower and fuller.\n",
                     out_tmpl->nrows, MIN_MINUTIAE);
+            if (atomic_load(&g_notify_weak_swipes)) vfs5011_notify_swipe_weak();
             usleep(500000);
             continue;
         }
@@ -623,6 +628,15 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
     }
     fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
     return -1;
+}
+
+/* The daemon polling thread's capture: same as capture_quality_template(),
+ * but a weak swipe also tells the menu bar app. */
+static int capture_poll_swipe(struct xyt_struct *out_tmpl) {
+    atomic_store(&g_notify_weak_swipes, true);
+    int rc = capture_quality_template(out_tmpl);
+    atomic_store(&g_notify_weak_swipes, false);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1785,7 +1799,7 @@ static void *polling_thread_main(void *arg) {
             } else {
                 continue; /* episode ended, or the swipe was too weak to score */
             }
-        } else if (capture_quality_template(&probe) != 0) {
+        } else if (capture_poll_swipe(&probe) != 0) {
             /* Weak/failed swipe -- or nobody swiped at all yet. Back
              * off briefly and try again as long as we're still locked. */
             usleep(POLL_RETRY_DELAY_USEC);
