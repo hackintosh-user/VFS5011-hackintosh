@@ -63,6 +63,7 @@ enum VFS5011Notification {
     static let swipeSuccess     = "\(prefix).swipe_success"
     static let swipeFailed      = "\(prefix).swipe_failed"
     static let swipeLockout     = "\(prefix).swipe_lockout"
+    static let swipeWeak        = "\(prefix).swipe_weak"
 
     // Daemon -> menu bar app (state confirmation, so the UI is correct
     // even if the app launches after the daemon, or the daemon restarts)
@@ -606,6 +607,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             VFS5011Notification.swipeSuccess,
             VFS5011Notification.swipeFailed,
             VFS5011Notification.swipeLockout,
+            VFS5011Notification.swipeWeak,
             VFS5011Notification.scanningEnabled,
             VFS5011Notification.scanningDisabled,
             VFS5011Notification.lockswipeEnabled,
@@ -689,6 +691,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     body: "Authentication failed, try swiping better ❌"
                 )
                 self.clearSwipeNotifications(after: 10.0)
+
+            case VFS5011Notification.swipeWeak:
+                self.clearSwipeNotifications(after: 0) { [weak self] in
+                    self?.fireLocalNotification(
+                        title: "Hackintosh Touch-ID",
+                        body: "Swipe was too weak, please try again 🔻"
+                    )
+                    self?.clearSwipeNotifications(after: 10.0)
+                }
 
             case VFS5011Notification.swipeLockout:
                 // Same ordering as the prompt: clear the leftover "try
