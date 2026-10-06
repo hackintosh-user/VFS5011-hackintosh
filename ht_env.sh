@@ -21,6 +21,7 @@ else
     HT_BREW_PREFIX="/usr/local"
 fi
 HT_LIBUSB_INC="$HT_BREW_PREFIX/include/libusb-1.0"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 HT_LIBUSB_LIB="$HT_BREW_PREFIX/lib"
 HT_OPENSSL_PREFIX="$HT_BREW_PREFIX/opt/openssl@3"
 
