@@ -65,7 +65,16 @@ open "build/Hackintosh Touch-ID.app"</code></pre>
 <ul><li>First launch is blocked by Gatekeeper because the app is ad-hoc signed. Right-click, Open, Open again, or run <code>xattr -cr "Hackintosh Touch-ID.app"</code>.</li>
 <li>The daemon needs a small patch to send events to the app. See the <a href="https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md">daemon patch README</a>.</li>
 <li>For useful notifications, set System Settings, Notifications, Show Previews to <b>Always</b>.</li>
-<li>Pause and resume is global, it affects every recognized prompt at once.</li></ul></section>
+<li>Pause and resume is global, it affects every recognized prompt at once.</li>
+<li>Swipe notifications are cleared from Notification Center automatically after each swipe, so they do not pile up.</li></ul>
+<h3>Swipe to Lock (macOS Tahoe only)</h3>
+<p class="note"><b>macOS 26 Tahoe only</b>, and VFS5011 sensors only. The menu item does not appear on earlier macOS versions, and the daemon ignores the setting there.</p>
+<ul><li>Choose <b>Enable Swipe to Lock</b> in the menu bar app. The sensor lights up, and one swipe locks the screen (Ctrl+Cmd+Q). Choose <b>Disable Swipe to Lock</b> to turn it off.</li>
+<li>It never matches a finger or types a password for the lock. It steps aside for the real lock screen and padlock prompts, then arms again.</li>
+<li>The setting is remembered across daemon restarts and reboots. Update the daemon together with the app.</li>
+<li>The daemon needs Accessibility access to send the lock keystroke.</li>
+<li>The sensor stays lit while it is on. The client's Enroll and Verify cannot open the sensor meanwhile, so turn Swipe to Lock off first.</li>
+<li>It detects that a swipe happened, not its direction.</li></ul></section>
 <section id="fpbootd"><h2>Fpbootd: pre-login authentication</h2>
 <p>Fpbootd is an experimental effort to use your fingerprint before you have logged in to macOS. Today HTID only works after login, at the lock screen and in authentication prompts.</p>
 <p class="warn"><b>Not usable yet.</b> This is early research, with no release date.</p>
@@ -83,6 +92,7 @@ open "build/Hackintosh Touch-ID.app"</code></pre>
 </div></section>
 <section id="limits"><h2>Limitations</h2><ul>
 <li>macOS only, and only macOS 14 Sonoma or later. On Linux, use the libfprint driver directly.</li>
+<li>Swipe to Lock works only on macOS 26 Tahoe with a VFS5011 sensor.</li>
 <li>No PAM module for <code>sudo</code> in a terminal yet. It is planned, but it is unknown whether modern macOS allows it.</li>
 <li>Ad-hoc code signing only. No notarization or Developer ID.</li>
 <li>Cold boot sign-in is not supported. macOS does not allow this level of access at the login window before a user has logged in. It could take months or years.</li></ul></section>
