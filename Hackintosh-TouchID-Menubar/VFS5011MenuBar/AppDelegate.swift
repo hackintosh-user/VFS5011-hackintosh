@@ -670,21 +670,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 self.clearSwipeNotifications(after: 0) { [weak self] in
                     self?.fireLocalNotification(
                         title: "Hackintosh Touch-ID",
-                        body: "Swipe to authenticate! 🫆"
+                        body: "Swipe to authenticate! 🔻"
                     )
                 }
 
             case VFS5011Notification.swipeSuccess:
                 self.fireLocalNotification(
                     title: "Hackintosh Touch-ID",
-                    body: "Authentication successful! 🫆"
+                    body: "Authentication successful! ✅"
                 )
                 self.clearSwipeNotifications(after: 10.0)
 
             case VFS5011Notification.swipeFailed:
                 self.fireLocalNotification(
                     title: "Hackintosh Touch-ID",
-                    body: "Authentication failed, try swiping better 🫆"
+                    body: "Authentication failed, try swiping better ❌"
                 )
                 self.clearSwipeNotifications(after: 10.0)
 
