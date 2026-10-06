@@ -76,6 +76,7 @@ Features with Hackintosh Touch-ID:
 - [D] Diagnose option for debugging issues, and opening issues on github
 - Multi operating system (macOS) support on one APFS encrypted volume
 - Multiple Launch-arguments for easier access like --q or --diag-pid, there's more [Read about them here](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
+- **macOS Tahoe only**: Swipe to lock with the menubar app!
 
  
 ## Menu Bar Companion App (optional)
