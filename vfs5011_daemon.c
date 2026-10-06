@@ -839,6 +839,30 @@ static void print_timestamp(void) {
     CFRelease(fmt);
 }
 
+/* When the lock screen last appeared (monotonic ms, 0 = unknown). A
+ * match that lands right after a lock (typical for swipe-to-lock, where
+ * the finger is still on the sensor) must not type until the password
+ * field is ready, or the characters are dropped but Return still lands. */
+static atomic_llong g_lock_screen_since_ms = 0;
+#define LOCK_SCREEN_SETTLE_MS 1500
+
+static long long monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void wait_for_lock_screen_settle(void) {
+    long long since = atomic_load(&g_lock_screen_since_ms);
+    if (since == 0) return;
+    long long wait = LOCK_SCREEN_SETTLE_MS - (monotonic_ms() - since);
+    if (wait > 0) {
+        print_timestamp();
+        printf("Lock screen just appeared, waiting %lld ms before typing.\n", wait);
+        usleep((useconds_t)(wait * 1000));
+    }
+}
+
 /* Types a UTF-8 string via synthetic keyboard events, then presses
  * Return. Uses CGEventKeyboardSetUnicodeString rather than per-key
  * virtual keycodes, so it doesn't need to know the active keyboard
@@ -863,11 +887,13 @@ static void type_password_and_enter(const char *password) {
 
     CGEventRef key_down = CGEventCreateKeyboardEvent(NULL, 0, true);
     CGEventKeyboardSetUnicodeString(key_down, (UniCharCount)len, unichars);
+    CGEventSetFlags(key_down, 0); /* no Ctrl/Cmd leaking in from the lock keystroke */
     CGEventPost(kCGSessionEventTap, key_down);
     CFRelease(key_down);
 
     CGEventRef key_up = CGEventCreateKeyboardEvent(NULL, 0, false);
     CGEventKeyboardSetUnicodeString(key_up, (UniCharCount)len, unichars);
+    CGEventSetFlags(key_up, 0);
     CGEventPost(kCGSessionEventTap, key_up);
     CFRelease(key_up);
 
@@ -877,10 +903,12 @@ static void type_password_and_enter(const char *password) {
     usleep(150000);
 
     CGEventRef return_down = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x24 /* kVK_Return */, true);
+    CGEventSetFlags(return_down, 0);
     CGEventPost(kCGSessionEventTap, return_down);
     CFRelease(return_down);
 
     CGEventRef return_up = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x24, false);
+    CGEventSetFlags(return_up, 0);
     CGEventPost(kCGSessionEventTap, return_up);
     CFRelease(return_up);
 }
@@ -917,14 +945,28 @@ static bool os_is_tahoe_or_newer(void) {
     return atoi(rel) >= 25;
 }
 
+/* Logs why arming was skipped, but only when the reason changes, so the
+ * 2 s self-heal doesn't spam the log. */
+static void lockswipe_note_skip(const char *why) {
+    static const char *last = NULL;
+    if (last == why) return;
+    last = why;
+    if (!why) return; /* reset only, nothing to log */
+    print_timestamp();
+    printf("Swipe-to-lock not armed: %s\n", why);
+}
+
 static void lockswipe_try_arm(void) {
     if (!vfs5011_lockswipe_is_enabled()) return;
-    if (!os_is_tahoe_or_newer()) return;
-    if (!vfs5011_scanning_is_enabled()) return; /* paused from the menu: don't wake the sensor */
-    if (screen_is_locked_now()) return;         /* the lock screen has its own auth episode */
-    if (!vfs5011_sensor_is_present()) return;
+    if (!os_is_tahoe_or_newer()) { lockswipe_note_skip("not macOS Tahoe or newer"); return; }
+    if (!vfs5011_scanning_is_enabled()) { lockswipe_note_skip("scanning is paused"); return; } /* don't wake the sensor */
+    if (screen_is_locked_now()) { lockswipe_note_skip("screen is locked"); return; }
+    if (!vfs5011_sensor_is_present()) { lockswipe_note_skip("no VFS5011 sensor present"); return; }
+    int cur = atomic_load(&g_state);
+    if (cur != STATE_IDLE && cur != STATE_LOCK_ARMED) { lockswipe_note_skip("another auth episode is active"); return; }
     int expected = STATE_IDLE;
     if (atomic_compare_exchange_strong(&g_state, &expected, STATE_LOCK_ARMED)) {
+        lockswipe_note_skip(NULL); /* reset so the next skip is logged again */
         print_timestamp();
         printf("Swipe-to-lock armed.\n");
     }
@@ -1354,12 +1396,14 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
 static void on_screen_locked(void) {
     int st = atomic_load(&g_state);
     if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* shouldn't happen, but don't interrupt an episode */
+    atomic_store(&g_lock_screen_since_ms, monotonic_ms());
     arm_polling_for_trigger(TRIGGER_LOCK_SCREEN, 0, NULL, "Screen lock");
 }
 
 static void on_screen_unlocked(void) {
     atomic_store(&g_state, STATE_IDLE);
     atomic_store(&g_trigger_source, TRIGGER_NONE);
+    atomic_store(&g_lock_screen_since_ms, 0);
     if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
 
     /* g_enrolled_templates/g_enrolled_count/g_cached_password/
@@ -1597,6 +1641,26 @@ static atomic_bool g_padlock_prompt_already_armed = false;
 static void auth_prompt_poll_callback(CFRunLoopTimerRef timer, void *info) {
     (void)timer; (void)info;
     int st = atomic_load(&g_state);
+
+    /* Stuck-episode heal: a lock-screen episode whose screen is no longer
+     * locked (e.g. logged in by typing after a cold boot, so no
+     * screenIsUnlocked ever fired) would block swipe-to-lock forever. */
+    static int not_locked_ticks = 0;
+    if (st == STATE_POLLING && atomic_load(&g_trigger_source) == TRIGGER_LOCK_SCREEN) {
+        if (!screen_is_locked_now()) {
+            if (++not_locked_ticks >= 10) { /* ~3 s */
+                not_locked_ticks = 0;
+                print_timestamp();
+                printf("Lock-screen episode but screen is not locked -> treating as unlocked.\n");
+                on_screen_unlocked();
+            }
+        } else {
+            not_locked_ticks = 0;
+        }
+        return;
+    }
+    not_locked_ticks = 0;
+
     if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* already mid-episode elsewhere */
 
     pid_t candidates[8];
@@ -1810,6 +1874,11 @@ static void *polling_thread_main(void *arg) {
                  * dialog grabbed focus first. */
                 AXUIElementSetAttributeValue(g_trigger_secure_field, kAXFocusedAttribute, kCFBooleanTrue);
                 usleep(50000);
+            }
+
+            if (ok_to_type && password_valid_snapshot && source == TRIGGER_LOCK_SCREEN) {
+                wait_for_lock_screen_settle();
+                if (atomic_load(&g_state) != STATE_POLLING) ok_to_type = false; /* unlocked meanwhile */
             }
 
             if (ok_to_type && password_valid_snapshot) {
