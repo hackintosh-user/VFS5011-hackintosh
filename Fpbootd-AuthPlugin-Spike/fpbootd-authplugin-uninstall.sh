@@ -53,8 +53,11 @@ else
     # No python3: fall back to the newest backup that does NOT mention
     # FpbootdSpike (never blindly the newest one).
     FALLBACK=""
-    for f in $(ls -t "$BACKUP_DIR"/system.login.console.*.plist 2>/dev/null); do
-        if ! grep -q "FpbootdSpike" "$f"; then FALLBACK="$f"; break; fi
+    for f in "$BACKUP_DIR"/system.login.console.*.plist; do
+        [[ -e "$f" ]] || continue
+        grep -q "FpbootdSpike" "$f" && continue
+        # keep the newest clean backup
+        if [[ -z "$FALLBACK" || "$f" -nt "$FALLBACK" ]]; then FALLBACK="$f"; fi
     done
     if [[ -z "$FALLBACK" ]]; then
         echo "python3 not found and no clean backup in $BACKUP_DIR." >&2
