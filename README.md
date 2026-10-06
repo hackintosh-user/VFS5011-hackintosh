@@ -111,6 +111,8 @@ open "build/Hackintosh Touch-ID.app"
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
 and `iconutil`. No other dependencies. And it needs **macOS 14 Sonoma and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
 
+**IMPORTANT NOTE**: the Swipe to Lock feature is ment and will always be for **macOS 26 Tahoe only**.
+
 First launch will be blocked by Gatekeeper since this is ad-hoc signed,
 not notarized with a paid Apple Developer account — right-click the app →
 **Open** → **Open** again, or run `xattr -cr "Hackintosh Touch-ID.app"` once.
