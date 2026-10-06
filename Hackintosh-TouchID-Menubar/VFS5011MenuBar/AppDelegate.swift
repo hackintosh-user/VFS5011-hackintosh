@@ -465,6 +465,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // Removes this app's swipe notifications from Notification Center so
+    // they don't pile up. The daemon-missing alert (it has a category and
+    // an action button) is left alone.
+    private func clearSwipeNotifications(after delay: TimeInterval, then completion: (() -> Void)? = nil) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            let center = UNUserNotificationCenter.current()
+            center.getDeliveredNotifications { delivered in
+                let ids = delivered
+                    .filter { $0.request.content.categoryIdentifier != daemonMissingCategoryID }
+                    .map { $0.request.identifier }
+                if !ids.isEmpty {
+                    center.removeDeliveredNotifications(withIdentifiers: ids)
+                }
+                if let completion = completion {
+                    DispatchQueue.main.async { completion() }
+                }
+            }
+        }
+    }
+
     // MARK: - Daemon health check
 
     // Checked with `launchctl print gui/<uid>/<label>` rather than just
@@ -609,6 +629,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // scanning state, since this app may have launched after the
         // daemon and otherwise wouldn't know if scanning is paused.
         postDistributedNotification(VFS5011Notification.requestState)
+        clearSwipeNotifications(after: 1.0) // leftovers from before this launch
+
+        // After a cold boot this app can launch before the daemon is up,
+        // so the first request goes unanswered. Ask again a few times;
+        // the daemon's answer is idempotent.
+        for delay in [2.0, 5.0, 10.0, 20.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.postDistributedNotification(VFS5011Notification.requestState)
+            }
+        }
     }
 
     private func unregisterForDaemonNotifications() {
@@ -635,22 +665,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
             switch name {
             case VFS5011Notification.swipeRequested:
-                self.fireLocalNotification(
-                    title: "Hackintosh Touch-ID",
-                    body: "Swipe to authenticate! 🫆"
-                )
+                // Drop leftovers first, and only then post the new prompt,
+                // so the clean-up can never remove the prompt itself.
+                self.clearSwipeNotifications(after: 0) { [weak self] in
+                    self?.fireLocalNotification(
+                        title: "Hackintosh Touch-ID",
+                        body: "Swipe to authenticate! 🫆"
+                    )
+                }
 
             case VFS5011Notification.swipeSuccess:
                 self.fireLocalNotification(
                     title: "Hackintosh Touch-ID",
                     body: "Authentication successful! 🫆"
                 )
+                self.clearSwipeNotifications(after: 10.0)
 
             case VFS5011Notification.swipeFailed:
                 self.fireLocalNotification(
                     title: "Hackintosh Touch-ID",
                     body: "Authentication failed, try swiping better 🫆"
                 )
+                self.clearSwipeNotifications(after: 10.0)
 
             case VFS5011Notification.scanningEnabled:
                 self.scanningEnabled = true
