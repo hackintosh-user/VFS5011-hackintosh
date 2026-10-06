@@ -36,6 +36,7 @@
 #define VFS5011_NOTIFY_SWIPE_SUCCESS     VFS5011_NOTIFY_PREFIX ".swipe_success"
 #define VFS5011_NOTIFY_SWIPE_FAILED      VFS5011_NOTIFY_PREFIX ".swipe_failed"
 #define VFS5011_NOTIFY_SWIPE_LOCKOUT     VFS5011_NOTIFY_PREFIX ".swipe_lockout"
+#define VFS5011_NOTIFY_SWIPE_WEAK        VFS5011_NOTIFY_PREFIX ".swipe_weak"
 
 /* Daemon -> menu bar app (state confirmation) */
 #define VFS5011_NOTIFY_SCANNING_ENABLED  VFS5011_NOTIFY_PREFIX ".scanning_enabled"
@@ -106,6 +107,7 @@ void vfs5011_set_lockswipe_handler(void (*handler)(bool enabled));
 void vfs5011_notify_swipe_requested(void); /* after successfully entering STATE_POLLING */
 void vfs5011_notify_swipe_success(void);   /* after a match is confirmed AND typed */
 void vfs5011_notify_swipe_failed(void);    /* after a real captured swipe scores below MATCH_THRESHOLD */
+void vfs5011_notify_swipe_weak(void);      /* a swipe was captured but had too few minutiae to be scored */
 void vfs5011_notify_swipe_lockout(void);   /* too many failed swipes in a row: the episode is over, use the password */
 
 #endif /* VFS5011_MENUBAR_IPC_H */
