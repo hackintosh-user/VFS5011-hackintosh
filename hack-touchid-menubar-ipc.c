@@ -129,6 +129,12 @@ void vfs5011_notify_swipe_failed(void) {
                                           NULL, NULL, TRUE);
 }
 
+void vfs5011_notify_swipe_lockout(void) {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                          CFSTR(VFS5011_NOTIFY_SWIPE_LOCKOUT),
+                                          NULL, NULL, TRUE);
+}
+
 /* --- Internal: state transitions, always announce after changing --- */
 
 static void set_scanning_enabled(bool enabled) {
