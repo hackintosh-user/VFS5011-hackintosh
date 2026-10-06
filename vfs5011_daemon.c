@@ -536,6 +536,8 @@ static int load_match_threshold(void) {
 #define MAX_STORED_TEMPLATES 8   /* array bound for save/load */
 #define MIN_MINUTIAE 20          /* below this, a capture is too weak to trust */
 #define MAX_SWIPE_RETRIES 3      /* re-prompt this many times before giving up on one swipe */
+#define MAX_FAILED_SWIPES 4      /* scored non-matching swipes in one episode before falling back to the password */
+static atomic_int g_failed_swipes = 0; /* reset whenever an episode starts or the screen unlocks */
 #define MIN_SELF_CONSISTENCY 15  /* a new enroll swipe must score at least this well against
                                     at least one already-saved swipe from this same session,
                                     or it's treated as an outlier capture and re-prompted */
@@ -1404,6 +1406,7 @@ static void on_screen_unlocked(void) {
     atomic_store(&g_state, STATE_IDLE);
     atomic_store(&g_trigger_source, TRIGGER_NONE);
     atomic_store(&g_lock_screen_since_ms, 0);
+    atomic_store(&g_failed_swipes, 0);
     if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
 
     /* g_enrolled_templates/g_enrolled_count/g_cached_password/
@@ -1471,6 +1474,7 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
      * polling_thread_main keeps the sensor warm and holds any captured
      * swipe until g_templates_ready flips true before scoring it. */
     atomic_store(&g_templates_ready, false);
+    atomic_store(&g_failed_swipes, 0);
     atomic_store(&g_state, STATE_POLLING);
     print_timestamp();
     printf("%s detected -> entering POLLING state, loading templates in background...\n", label);
@@ -1904,7 +1908,26 @@ static void *polling_thread_main(void *arg) {
              * well enough -- give an audible reject cue and let the
              * loop immediately try the next swipe. */
             play_failure_sound();
-            vfs5011_notify_swipe_failed();
+
+            int fails = atomic_fetch_add(&g_failed_swipes, 1) + 1;
+            if (fails >= MAX_FAILED_SWIPES) {
+                /* Out of attempts for this episode (lock screen or
+                 * padlock): stop scanning, let the password field take
+                 * over, and tell the menu bar app. The padlock watcher's
+                 * debounce flag keeps the same prompt from re-arming,
+                 * and a lock screen only re-arms on the next lock. */
+                print_timestamp();
+                printf("Swipe failed %d times in a row -> giving up, use the password.\n", fails);
+                if (g_trigger_secure_field) { CFRelease(g_trigger_secure_field); g_trigger_secure_field = NULL; }
+                atomic_store(&g_trigger_source, TRIGGER_NONE);
+                atomic_store(&g_failed_swipes, 0);
+                settle_to_idle();
+                vfs5011_notify_swipe_lockout();
+            } else {
+                print_timestamp();
+                printf("Swipe failed (%d of %d).\n", fails, MAX_FAILED_SWIPES);
+                vfs5011_notify_swipe_failed();
+            }
         }
     }
     return NULL;
