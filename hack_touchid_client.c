@@ -5761,6 +5761,60 @@ static char *read_menu_line(char *buf, size_t size) {
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * Sensor yield: while Swipe to Lock is on, the daemon holds the sensor.
+ * Before Enroll, Verify or View Fingerprint the client asks the daemon
+ * to let go of it (same distributed-notification channel the menu bar
+ * app uses), waits for the daemon to confirm, and hands it back after.
+ * The names must match hack-touchid-menubar-ipc.h. If no daemon answers
+ * the client just carries on. The daemon also drops the yield by itself
+ * after a timeout, so a crashed client cannot leave Swipe to Lock off.
+ * ------------------------------------------------------------------ */
+#define YIELD_NOTIFY_BEGIN "com.vfs5011.hackintosh.request_yield_begin"
+#define YIELD_NOTIFY_END   "com.vfs5011.hackintosh.request_yield_end"
+#define YIELD_NOTIFY_READY "com.vfs5011.hackintosh.yield_ready"
+#define YIELD_WAIT_SEC     3.0
+
+static volatile bool g_yield_ready_seen = false;
+static bool g_sensor_yielded = false;
+
+static void yield_ready_callback(CFNotificationCenterRef center, void *observer,
+                                 CFStringRef name, const void *object,
+                                 CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    g_yield_ready_seen = true;
+}
+
+static void sensor_yield_end(void) {
+    if (!g_sensor_yielded) return;
+    g_sensor_yielded = false;
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                         CFSTR(YIELD_NOTIFY_END), NULL, NULL, TRUE);
+    usleep(100000); /* let the notification leave before a process exit */
+}
+
+static void sensor_yield_begin(void) {
+    if (g_sensor_yielded) return;
+    /* Swipe to Lock off (flag file absent) means the daemon is not holding the sensor. */
+    struct stat yield_st;
+    if (stat("/Library/Application Support/VFS5011/lockswipe_enabled", &yield_st) != 0) return;
+    CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
+    g_yield_ready_seen = false;
+    CFNotificationCenterAddObserver(center, &g_yield_ready_seen, yield_ready_callback,
+                                    CFSTR(YIELD_NOTIFY_READY), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterPostNotification(center, CFSTR(YIELD_NOTIFY_BEGIN), NULL, NULL, TRUE);
+    g_sensor_yielded = true;
+
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + YIELD_WAIT_SEC;
+    while (!g_yield_ready_seen && CFAbsoluteTimeGetCurrent() < until) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    }
+    CFNotificationCenterRemoveObserver(center, &g_yield_ready_seen, CFSTR(YIELD_NOTIFY_READY), NULL);
+    /* No answer just means no daemon (or Swipe to Lock off): the sensor is free. */
+    usleep(300000); /* let macOS settle the device before we open it */
+}
+
 int main(int argc, char **argv) {
     /* Checked in its own pass, before anything else (including the
      * sudo re-exec below) -- seeing -h/--help should never require a
@@ -6031,6 +6085,8 @@ int main(int argc, char **argv) {
 
     printf("%sWelcome to HTID Client!%s\n\n", VFSC_BOLD, VFSC_RESET);
 
+    atexit(sensor_yield_end); /* hand the sensor back even if an action exits the process */
+
     char line[64];
     for (;;) {
         print_menu();
@@ -6051,8 +6107,8 @@ int main(int argc, char **argv) {
         printf("\n");
         bool ran_action = true;
         switch (cmd) {
-            case '1': do_enroll(); break;
-            case '2': do_verify(); break;
+            case '1': sensor_yield_begin(); do_enroll(); sensor_yield_end(); break;
+            case '2': sensor_yield_begin(); do_verify(); sensor_yield_end(); break;
             case '3': do_deploy(); break;
             case 'P': case 'p':
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
@@ -6080,7 +6136,9 @@ int main(int argc, char **argv) {
                 break;
             case 'C': case 'c':
                 if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+                    sensor_yield_begin();
                     do_view_fingerprint();
+                    sensor_yield_end();
                 } else {
                     printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
