@@ -614,6 +614,7 @@ static void play_success_sound(void) {
  * handle across multiple swipes. */
 static int capture_quality_template(struct xyt_struct *out_tmpl) {
     for (int attempt = 1; attempt <= MAX_SWIPE_RETRIES; attempt++) {
+        if (atomic_load(&g_capture_abort)) return -1; /* yield requested between attempts */
         if (open_device() != 0) {
             close_device();
             fprintf(stderr, "Could not open device (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
@@ -625,6 +626,9 @@ static int capture_quality_template(struct xyt_struct *out_tmpl) {
         unsigned char *image = capture_fingerprint_image(g_handle, &height);
         if (!image) {
             close_device();
+            /* A client yield aborted this capture on purpose: let go of the
+             * sensor now instead of retrying, so the client is not kept waiting. */
+            if (atomic_load(&g_capture_abort)) return -1;
             fprintf(stderr, "Capture failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
             usleep(500000);
             continue;
