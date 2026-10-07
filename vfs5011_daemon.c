@@ -327,6 +327,11 @@ out:
  * alignment. Returns a malloc'd VFS5011_IMAGE_WIDTH x *out_height
  * grayscale buffer, or NULL on failure. Caller must libusb_init/open
  * the device and pass a claimed handle. */
+/* Set by the client yield request while a Swipe to Lock capture is
+ * waiting for a finger, so the capture lets go of the sensor within
+ * one read timeout instead of blocking until the next swipe. */
+static atomic_bool g_capture_abort = false;
+
 static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
     if (run_sequence(handle, vfs5011_initialization,
                       sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
@@ -347,9 +352,15 @@ static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, in
     int finished = 0, r;
 
     while (!finished) {
+        if (atomic_load(&g_capture_abort) && lines_captured == 0) {
+            free(chunk_buf);
+            free(recorded);
+            return NULL; /* yielded to the client before any finger touched the sensor */
+        }
         int transferred = 0;
         r = libusb_bulk_transfer(handle, VFS5011_IN_ENDPOINT_DATA, chunk_buf,
-                                  CAPTURE_LINES * VFS5011_LINE_SIZE, &transferred, 0);
+                                  CAPTURE_LINES * VFS5011_LINE_SIZE, &transferred,
+                                  lines_captured == 0 ? 250 : 0 /* only the wait for a finger can be interrupted */);
         if (r != 0 && r != LIBUSB_ERROR_TIMEOUT) {
             fprintf(stderr, "Capture read failed: %s\n", libusb_error_name(r));
             break;
@@ -946,6 +957,15 @@ static void type_password_and_enter(const char *password) {
  * hardware by reading the "lock swipe height" log line. */
 #define LOCKSWIPE_MIN_HEIGHT 60
 
+/* The client (Enroll, Verify, sensor tests) asks the daemon to let go of
+ * the sensor while it runs. Swipe to Lock stays "on" as a setting; it is
+ * just not armed until the client says it is done. If the client dies
+ * without saying so, the yield expires on its own. */
+#define YIELD_TIMEOUT_SEC 300
+static atomic_bool g_yield_active = false;
+static atomic_bool g_yield_ack_pending = false;
+static _Atomic long long g_yield_deadline = 0;
+
 /* IDLE -> LOCK_ARMED, only if the feature is on and a sensor is there.
  * Compare-and-swap so it can never clobber STATE_POLLING being set by
  * the main run loop at the same moment. */
@@ -974,6 +994,13 @@ static void lockswipe_note_skip(const char *why) {
 
 static void lockswipe_try_arm(void) {
     if (!vfs5011_lockswipe_is_enabled()) return;
+    if (atomic_load(&g_yield_active)) {
+        if ((long long)time(NULL) < atomic_load(&g_yield_deadline)) return; /* the client has the sensor */
+        atomic_store(&g_yield_active, false);
+        atomic_store(&g_capture_abort, false);
+        print_timestamp();
+        printf("Sensor yield timed out, taking the sensor back.\n");
+    }
     if (!os_is_tahoe_or_newer()) { lockswipe_note_skip("not macOS Tahoe or newer"); return; }
     if (!vfs5011_scanning_is_enabled()) { lockswipe_note_skip("scanning is paused"); return; } /* don't wake the sensor */
     if (screen_is_locked_now()) { lockswipe_note_skip("screen is locked"); return; }
@@ -1007,6 +1034,27 @@ static void settle_to_idle(void) {
 /* Called from the menu bar IPC (main run loop) on enable/disable. */
 static void on_lockswipe_setting_changed(bool enabled) {
     if (enabled) lockswipe_try_arm(); else lockswipe_disarm();
+}
+
+/* Called from the menu bar IPC (main run loop) when the client starts or
+ * finishes using the sensor. */
+static void on_yield_request(bool begin) {
+    if (begin) {
+        atomic_store(&g_yield_deadline, (long long)time(NULL) + YIELD_TIMEOUT_SEC);
+        atomic_store(&g_yield_active, true);
+        atomic_store(&g_yield_ack_pending, true);
+        if (atomic_load(&g_state) == STATE_LOCK_ARMED) atomic_store(&g_capture_abort, true);
+        print_timestamp();
+        printf("Sensor yielded to the client.\n");
+        lockswipe_disarm();
+    } else {
+        if (!atomic_exchange(&g_yield_active, false)) return;
+        atomic_store(&g_yield_ack_pending, false);
+        atomic_store(&g_capture_abort, false);
+        print_timestamp();
+        printf("Client finished, taking the sensor back.\n");
+        lockswipe_try_arm(); /* only re-arms if Swipe to Lock was on */
+    }
 }
 
 static bool screen_is_locked_now(void) {
@@ -1763,6 +1811,12 @@ static void *polling_thread_main(void *arg) {
     (void)arg;
     unsigned idle_ticks = 0;
     while (atomic_load(&g_running)) {
+        /* Back at the top of the loop means no capture is holding the
+         * sensor, so a pending client yield can be confirmed. */
+        if (atomic_exchange(&g_yield_ack_pending, false)) {
+            atomic_store(&g_capture_abort, false);
+            vfs5011_notify_yield_ready();
+        }
         int loop_state = atomic_load(&g_state);
         if (loop_state != STATE_POLLING && loop_state != STATE_LOCK_ARMED) {
             usleep(200000);
@@ -2145,6 +2199,7 @@ int main(int argc, char **argv) {
     printf("Auth-prompt watcher registered (padlock, polling every 300ms).\n");
 
     vfs5011_set_lockswipe_handler(on_lockswipe_setting_changed);
+    vfs5011_set_yield_handler(on_yield_request);
     vfs5011_menubar_ipc_init();
     lockswipe_try_arm(); /* restore swipe-to-lock after a daemon restart */
 
