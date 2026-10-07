@@ -349,11 +349,17 @@ static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, in
     int lines_recorded = 0, lines_captured = 0, empty_lines = 0;
     unsigned char *lastline = NULL;
     unsigned char *chunk_buf = malloc((size_t)CAPTURE_LINES * VFS5011_LINE_SIZE);
+    /* A read that times out can still hand back part of a chunk. Those bytes
+     * are kept here and joined to the next read, so a timeout never shifts
+     * the line boundaries of the image. */
+    unsigned char *acc_buf = malloc((size_t)2 * CAPTURE_LINES * VFS5011_LINE_SIZE);
+    int acc_len = 0;
     int finished = 0, r;
 
     while (!finished) {
         if (atomic_load(&g_capture_abort) && lines_captured == 0) {
             free(chunk_buf);
+            free(acc_buf);
             free(recorded);
             return NULL; /* yielded to the client before any finger touched the sensor */
         }
@@ -366,9 +372,11 @@ static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, in
             break;
         }
         if (transferred <= 0) continue;
-        int lines_in_chunk = transferred / VFS5011_LINE_SIZE;
+        memcpy(acc_buf + acc_len, chunk_buf, (size_t)transferred);
+        acc_len += transferred;
+        int lines_in_chunk = acc_len / VFS5011_LINE_SIZE;
         for (int i = 0; i < lines_in_chunk; i++) {
-            unsigned char *line = chunk_buf + i * VFS5011_LINE_SIZE;
+            unsigned char *line = acc_buf + i * VFS5011_LINE_SIZE;
             if (get_deviation(line + 8, VFS5011_IMAGE_WIDTH) < DEVIATION_THRESHOLD) {
                 if (lines_captured == 0) continue;
                 empty_lines++;
@@ -383,8 +391,12 @@ static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, in
                 lines_recorded++;
             }
         }
+        int used = lines_in_chunk * VFS5011_LINE_SIZE;
+        memmove(acc_buf, acc_buf + used, (size_t)(acc_len - used));
+        acc_len -= used;
     }
     free(chunk_buf);
+    free(acc_buf);
 
     if (lines_recorded < 2) {
         fprintf(stderr, "Not enough lines captured (%d) — try a slower, fuller swipe.\n", lines_recorded);
