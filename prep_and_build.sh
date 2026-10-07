@@ -90,11 +90,26 @@ if [ "$LIST_ONLY" = "1" ]; then
     exit 0
 fi
 
+# Output is not a terminal: the in-app updater runs this script with its
+# output captured, so a prompt would be invisible and the update would hang
+# forever (older clients also leave stdin attached to the terminal). Never
+# ask in that case: install what is missing, and build everything if no
+# sensor can be detected, which matches how updates behaved before the
+# sensor-driven build.
+INTERACTIVE=1
+if [ ! -t 1 ]; then
+    INTERACTIVE=0
+    ASSUME_YES=1
+fi
+
 if [ -z "$SENSORS" ]; then
     DETECTED="$(ioreg -p IOUSB -l -w0 2>/dev/null | "$HT_TOOL" detect | paste -sd, -)"
     if [ -n "$DETECTED" ]; then
         echo "Detected a supported sensor on USB: $DETECTED"
         SENSORS="$DETECTED"
+    elif [ "$INTERACTIVE" = "0" ]; then
+        echo "No supported sensor detected on USB. Not interactive, so building for all families."
+        SENSORS="all"
     elif [ -t 0 ]; then
         echo "No supported sensor detected on USB. Which one do you have?"
         "$HT_TOOL" families | while IFS='|' read -r fam name ids; do
