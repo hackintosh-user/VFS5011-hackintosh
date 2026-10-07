@@ -34,6 +34,7 @@ static volatile bool g_scanning_enabled = true;
  * run loop, so it needs no locking either. */
 static volatile bool g_lockswipe_enabled = false;
 static void (*g_lockswipe_handler)(bool enabled) = NULL;
+static void (*g_yield_handler)(bool begin) = NULL;
 
 /* --- Flag file persistence --- */
 
@@ -103,6 +104,16 @@ bool vfs5011_lockswipe_is_enabled(void) {
 
 void vfs5011_set_lockswipe_handler(void (*handler)(bool enabled)) {
     g_lockswipe_handler = handler;
+}
+
+void vfs5011_set_yield_handler(void (*handler)(bool begin)) {
+    g_yield_handler = handler;
+}
+
+void vfs5011_notify_yield_ready(void) {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                          CFSTR(VFS5011_NOTIFY_YIELD_READY),
+                                          NULL, NULL, TRUE);
 }
 
 bool vfs5011_scanning_is_enabled(void) {
@@ -225,6 +236,10 @@ static void menubar_ipc_callback(CFNotificationCenterRef center,
         set_lockswipe_enabled(true);
     } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE), 0) == kCFCompareEqualTo) {
         set_lockswipe_enabled(false);
+    } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_YIELD_BEGIN), 0) == kCFCompareEqualTo) {
+        if (g_yield_handler) g_yield_handler(true);
+    } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_YIELD_END), 0) == kCFCompareEqualTo) {
+        if (g_yield_handler) g_yield_handler(false);
     }
 }
 
@@ -250,6 +265,13 @@ void vfs5011_menubar_ipc_init(void) {
                                      CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
                                      CFSTR(VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
+                                     CFSTR(VFS5011_NOTIFY_REQUEST_YIELD_BEGIN), NULL,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
+                                     CFSTR(VFS5011_NOTIFY_REQUEST_YIELD_END), NULL,
                                      CFNotificationSuspensionBehaviorDeliverImmediately);
 
     announce_lockswipe_state(); /* a menu bar app that launched first still learns the state */

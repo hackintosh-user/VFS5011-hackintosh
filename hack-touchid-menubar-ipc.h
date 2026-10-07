@@ -46,6 +46,9 @@
 #define VFS5011_NOTIFY_LOCKSWIPE_ENABLED  VFS5011_NOTIFY_PREFIX ".lockswipe_enabled"
 #define VFS5011_NOTIFY_LOCKSWIPE_DISABLED VFS5011_NOTIFY_PREFIX ".lockswipe_disabled"
 
+/* Daemon -> client (the sensor has been released after a yield request) */
+#define VFS5011_NOTIFY_YIELD_READY       VFS5011_NOTIFY_PREFIX ".yield_ready"
+
 /* Menu bar app (or the Control Center control) -> daemon (requests) */
 #define VFS5011_NOTIFY_REQUEST_ENABLE    VFS5011_NOTIFY_PREFIX ".request_enable"
 #define VFS5011_NOTIFY_REQUEST_DISABLE   VFS5011_NOTIFY_PREFIX ".request_disable"
@@ -53,6 +56,10 @@
 #define VFS5011_NOTIFY_REQUEST_STATE     VFS5011_NOTIFY_PREFIX ".request_state_announce"
 #define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_ENABLE  VFS5011_NOTIFY_PREFIX ".request_lockswipe_enable"
 #define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE VFS5011_NOTIFY_PREFIX ".request_lockswipe_disable"
+
+/* Client -> daemon: free the sensor for the duration of an Enroll/Verify/test, then hand it back */
+#define VFS5011_NOTIFY_REQUEST_YIELD_BEGIN VFS5011_NOTIFY_PREFIX ".request_yield_begin"
+#define VFS5011_NOTIFY_REQUEST_YIELD_END   VFS5011_NOTIFY_PREFIX ".request_yield_end"
 
 /*
  * Path to the persisted pause/resume flag. Presence of this file means
@@ -102,6 +109,16 @@ bool vfs5011_lockswipe_is_enabled(void);
  * Call before vfs5011_menubar_ipc_init().
  */
 void vfs5011_set_lockswipe_handler(void (*handler)(bool enabled));
+
+/*
+ * Registers a callback that runs on the main run loop when the client asks
+ * the daemon to yield the sensor (begin == true) or take it back
+ * (begin == false). Call before vfs5011_menubar_ipc_init().
+ */
+void vfs5011_set_yield_handler(void (*handler)(bool begin));
+
+/* Tells the client the sensor is released and safe to open. */
+void vfs5011_notify_yield_ready(void);
 
 /* Fire-and-forget event posts. */
 void vfs5011_notify_swipe_requested(void); /* after successfully entering STATE_POLLING */
