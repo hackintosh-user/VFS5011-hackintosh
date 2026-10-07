@@ -4548,9 +4548,18 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
         return false;
     }
 
+    /* prep_and_build.sh has two interactive prompts: "Which sensor do you
+     * have?" when it cannot auto-detect one, and "Install them now with
+     * Homebrew? [y/N]" when a dependency is missing. Its output is captured
+     * below, so either prompt was invisible and the update sat at
+     * "Building [0/3]" forever. So: name the sensor family we already
+     * detected (or "all"), say yes to installs, and close stdin so
+     * nothing can ever wait on an answer. */
+    const char *build_family = (g_detected_sensor && g_detected_sensor->family)
+                                   ? g_detected_sensor->family : "all";
     snprintf(cmd, sizeof(cmd),
-             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh 2>&1",
-             src_dir);
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes 2>&1 </dev/null",
+             src_dir, build_family);
     FILE *bp = popen(cmd, "r");
     if (!bp) {
         fclose(log_fp);
@@ -4577,6 +4586,11 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
     fflush(stdout);
     while (fgets(bline, sizeof(bline), bp)) {
         fputs(bline, log_fp); /* full output still preserved for debugging */
+        if (strstr(bline, "Missing for your sensor")) {
+            printf("\nInstalling the Homebrew packages your sensor needs (this can take a few minutes)...\n");
+            printf("Building [%d/%d]...", step, total_steps);
+            fflush(stdout);
+        }
         for (int i = step; i < total_steps; i++) {
             if (strstr(bline, build_steps[i])) {
                 step = i + 1;
