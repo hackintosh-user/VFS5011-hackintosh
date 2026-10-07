@@ -331,11 +331,17 @@ out:
  * waiting for a finger, so the capture lets go of the sensor within
  * one read timeout instead of blocking until the next swipe. */
 static atomic_bool g_capture_abort = false;
+/* Set when the sensor's init sequence fails (the first arm after a daemon
+ * start sometimes stalls with LIBUSB_ERROR_PIPE), so the caller can reopen
+ * the device and try once more instead of waiting for the next cycle. */
+static atomic_bool g_capture_init_failed = false;
 
 static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    atomic_store(&g_capture_init_failed, false);
     if (run_sequence(handle, vfs5011_initialization,
                       sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
         fprintf(stderr, "Init sequence failed\n");
+        atomic_store(&g_capture_init_failed, true);
         return NULL;
     }
     if (run_sequence(handle, vfs5011_initiate_capture,
@@ -971,7 +977,22 @@ static void type_password_and_enter(const char *password) {
 /* Minimum aligned image height (rows) for a swipe to count as a lock
  * swipe. Rejects grazes and resting palms. UNTUNED: confirm on real
  * hardware by reading the "lock swipe height" log line. */
-#define LOCKSWIPE_MIN_HEIGHT 60
+#define LOCKSWIPE_MIN_HEIGHT 60 /* default; the client's sensitivity setting can override it */
+#define LOCKSWIPE_HEIGHT_CONF_PATH "/usr/local/libexec/hack-touchid/lockswipe_min_height.conf"
+#define LOCKSWIPE_HEIGHT_LIMIT_MIN 20
+#define LOCKSWIPE_HEIGHT_LIMIT_MAX 400
+
+/* Read on every lock swipe, so a new value from the client takes effect
+ * on the very next swipe with no daemon restart. */
+static int load_lockswipe_min_height(void) {
+    FILE *f = fopen(LOCKSWIPE_HEIGHT_CONF_PATH, "r");
+    if (!f) return LOCKSWIPE_MIN_HEIGHT;
+    int val = LOCKSWIPE_MIN_HEIGHT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < LOCKSWIPE_HEIGHT_LIMIT_MIN || val > LOCKSWIPE_HEIGHT_LIMIT_MAX) return LOCKSWIPE_MIN_HEIGHT;
+    return val;
+}
 
 /* The client (Enroll, Verify, sensor tests) asks the daemon to let go of
  * the sensor while it runs. Swipe to Lock stays "on" as a setting; it is
@@ -1140,6 +1161,17 @@ static int capture_swipe_adaptive(struct xyt_struct *out_tmpl, bool *template_va
     int height = 0;
     unsigned char *image = capture_fingerprint_image(g_handle, &height);
     close_device();
+    if (!image && atomic_load(&g_capture_init_failed) && !atomic_load(&g_capture_abort)) {
+        /* One immediate retry on a fresh open: the stall clears once the
+         * device is released and reopened. */
+        print_timestamp();
+        printf("Sensor init stalled, reopening and retrying once.\n");
+        usleep(300000);
+        if (open_device() == 0) {
+            image = capture_fingerprint_image(g_handle, &height);
+        }
+        close_device();
+    }
     if (!image) {
         usleep(500000);
         return -1;
@@ -1860,8 +1892,9 @@ static void *polling_thread_main(void *arg) {
             int now = atomic_load(&g_state);
             if (now == STATE_LOCK_ARMED) {
                 print_timestamp();
-                printf("Swipe-to-lock: lock swipe height %d (need %d)\n", lock_height, LOCKSWIPE_MIN_HEIGHT);
-                if (lock_height >= LOCKSWIPE_MIN_HEIGHT) trigger_lockswipe();
+                int need_height = load_lockswipe_min_height();
+                printf("Swipe-to-lock: lock swipe height %d (need %d)\n", lock_height, need_height);
+                if (lock_height >= need_height) trigger_lockswipe();
                 continue;
             }
             if (now == STATE_POLLING && lock_template_valid) {
