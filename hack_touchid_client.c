@@ -1916,6 +1916,7 @@ static void print_menu(void) {
     }
     if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
         printf("%s[C]%s View Fingerprint (capture preview, nothing saved)\n", VFSC_BOLD, VFSC_RESET);
+        printf("%s[T]%s Sensor Test (swipe heights, tune Swipe to Lock)\n", VFSC_BOLD, VFSC_RESET);
     }
     printf("%s[FP]%s Fpbootd, Pre-Login Auth %s(coming soon)%s\n",
            VFSC_BOLD, VFSC_RESET, VFSC_DIM, VFSC_RESET);
@@ -3724,6 +3725,192 @@ static void do_settings_adjust_threshold(void) {
             new_threshold);
 }
 
+/* ------------------------------------------------------------------ *
+ * Swipe to Lock sensitivity + sensor test
+ *
+ * The daemon requires a lock swipe to be at least this many rows tall.
+ * It re-reads the file on every lock swipe, so a change here applies on
+ * the next swipe with no daemon restart. Keep the path and limits in
+ * sync with vfs5011_daemon.c.
+ * ------------------------------------------------------------------ */
+#define LOCKSWIPE_HEIGHT_CONF_PATH "/usr/local/libexec/hack-touchid/lockswipe_min_height.conf"
+#define LOCKSWIPE_HEIGHT_DEFAULT 60
+#define LOCKSWIPE_HEIGHT_LIMIT_MIN 20
+#define LOCKSWIPE_HEIGHT_LIMIT_MAX 400
+
+static int read_lockswipe_min_height(void) {
+    FILE *f = fopen(LOCKSWIPE_HEIGHT_CONF_PATH, "r");
+    if (!f) return LOCKSWIPE_HEIGHT_DEFAULT;
+    int val = LOCKSWIPE_HEIGHT_DEFAULT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < LOCKSWIPE_HEIGHT_LIMIT_MIN || val > LOCKSWIPE_HEIGHT_LIMIT_MAX) {
+        return LOCKSWIPE_HEIGHT_DEFAULT;
+    }
+    return val;
+}
+
+static bool write_lockswipe_min_height(int value) {
+    system("mkdir -p /usr/local/libexec/hack-touchid");
+    FILE *f = fopen(LOCKSWIPE_HEIGHT_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", LOCKSWIPE_HEIGHT_CONF_PATH, strerror(errno));
+        return false;
+    }
+    fprintf(f, "%d\n", value);
+    fclose(f);
+    chmod(LOCKSWIPE_HEIGHT_CONF_PATH, 0644);
+    return true;
+}
+
+static void do_settings_lockswipe_sensitivity(void) {
+    int cur = read_lockswipe_min_height();
+    printf("Swipe to Lock minimum swipe height: %d rows (default %d)\n\n", cur, LOCKSWIPE_HEIGHT_DEFAULT);
+    printf("A swipe has to be at least this tall to lock the screen. Higher\n");
+    printf("ignores light brushes and resting touches. Lower triggers more\n");
+    printf("easily. Use [T] Sensor Test on the main menu to see your real\n");
+    printf("swipe heights first.\n\n");
+    printf("Enter a value (%d-%d), D for the default, or press Enter to cancel: ",
+           LOCKSWIPE_HEIGHT_LIMIT_MIN, LOCKSWIPE_HEIGHT_LIMIT_MAX);
+    fflush(stdout);
+
+    char line[32];
+    if (!fgets(line, sizeof(line), stdin)) {
+        printf("\n");
+        return;
+    }
+    if (line[0] == 'd' || line[0] == 'D') {
+        if (unlink(LOCKSWIPE_HEIGHT_CONF_PATH) != 0 && errno != ENOENT) {
+            vfsc_err("Failed to reset: %s\n\n", strerror(errno));
+            return;
+        }
+        vfsc_ok("Swipe to Lock minimum height reset to %d. Applies on the next swipe.\n\n",
+                LOCKSWIPE_HEIGHT_DEFAULT);
+        return;
+    }
+    int value = atoi(line);
+    if (value < LOCKSWIPE_HEIGHT_LIMIT_MIN || value > LOCKSWIPE_HEIGHT_LIMIT_MAX) {
+        printf("Cancelled.\n\n");
+        return;
+    }
+    if (write_lockswipe_min_height(value)) {
+        vfsc_ok("Swipe to Lock minimum height set to %d. Applies on the next swipe, no restart needed.\n\n", value);
+    }
+}
+
+/* Swipes the sensor as many times as you like and shows, for each swipe,
+ * the image height (what Swipe to Lock compares) and the minutiae count
+ * (what the weak-swipe check compares). Nothing is saved. At the end it
+ * summarises your swipes and can save a suggested sensitivity. */
+#define SENSOR_TEST_MAX_SWIPES 64
+static void do_sensor_test(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected.\n\n");
+        return;
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("%s is match-in-sensor, so there is no swipe image to measure.\n\n",
+                 g_detected_sensor->display_name);
+        return;
+    }
+
+    int need = read_lockswipe_min_height();
+    int heights[SENSOR_TEST_MAX_SWIPES];
+    int n = 0, failed = 0, weak = 0, would_lock = 0;
+
+    printf("Sensor Test: nothing is saved. Swipe the way you do to lock the screen.\n");
+    printf("Swipe to Lock currently needs a height of %d rows.\n\n", need);
+
+    for (;;) {
+        printf("Press Enter for swipe #%d, or Q then Enter to finish: ", n + failed + 1);
+        fflush(stdout);
+        char line[16];
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+        if (line[0] == 'q' || line[0] == 'Q') break;
+        if (n >= SENSOR_TEST_MAX_SWIPES) {
+            printf("Reached %d swipes, finishing.\n", SENSOR_TEST_MAX_SWIPES);
+            break;
+        }
+
+        if (open_device() != 0) {
+            close_device();
+            vfsc_err("Could not open the sensor.\n\n");
+            failed++;
+            continue;
+        }
+        int height = 0;
+        unsigned char *image = capture_fingerprint_image(g_handle, &height);
+        close_device();
+        if (!image) {
+            vfsc_err("Capture failed.\n\n");
+            failed++;
+            continue;
+        }
+
+        struct xyt_struct tmpl;
+        memset(&tmpl, 0, sizeof(tmpl));
+        int r = vfs5011_extract_template(image, current_sensor_image_width(), height, &tmpl);
+        free(image);
+        int minutiae = (r == 0) ? tmpl.nrows : 0;
+        bool locks = height >= need;
+        bool is_weak = minutiae < MIN_MINUTIAE;
+
+        heights[n++] = height;
+        if (locks) would_lock++;
+        if (is_weak) weak++;
+        printf("  Swipe %d: height %d rows, %d minutiae -> %s, %s\n\n", n, height, minutiae,
+               locks ? "would lock" : "too short to lock",
+               is_weak ? "weak for matching" : "good for matching");
+    }
+
+    if (n == 0) {
+        printf("No swipes recorded.\n\n");
+        return;
+    }
+
+    int min_h = heights[0], max_h = heights[0];
+    long sum = 0;
+    for (int i = 0; i < n; i++) {
+        if (heights[i] < min_h) min_h = heights[i];
+        if (heights[i] > max_h) max_h = heights[i];
+        sum += heights[i];
+    }
+    printf("%sSummary%s\n", VFSC_BOLD, VFSC_RESET);
+    printf("  Swipes recorded : %d (%d failed captures)\n", n, failed);
+    printf("  Height          : min %d, max %d, average %ld\n", min_h, max_h, sum / n);
+    printf("  Would lock      : %d of %d at the current setting (%d)\n", would_lock, n, need);
+    printf("  Weak for match  : %d of %d\n\n", weak, n);
+
+    if (n < 3) {
+        printf("Do at least 3 swipes to get a suggested sensitivity.\n\n");
+        return;
+    }
+
+    /* About half the shortest real swipe: well under anything you do on
+     * purpose, above grazes and resting touches. Rounded down to 5. */
+    int suggested = (min_h / 2) / 5 * 5;
+    if (suggested < 40) suggested = 40;
+    if (suggested > 200) suggested = 200;
+    printf("Suggested Swipe to Lock minimum height: %d (about half your shortest swipe).\n", suggested);
+    if (suggested == need) {
+        printf("That matches your current setting.\n\n");
+        return;
+    }
+    printf("Save %d as the Swipe to Lock minimum height? [y/N]: ", suggested);
+    fflush(stdout);
+    char ans[16];
+    if (!fgets(ans, sizeof(ans), stdin) || (ans[0] != 'y' && ans[0] != 'Y')) {
+        printf("Left unchanged.\n\n");
+        return;
+    }
+    if (write_lockswipe_min_height(suggested)) {
+        vfsc_ok("Swipe to Lock minimum height set to %d. Applies on the next swipe.\n\n", suggested);
+    }
+}
+
 /* Flips VERSION.txt's BRANCH= between "active-development" (beta/
  * testing builds) and "main" (stable releases) -- an explicit opt-in/
  * opt-out beta toggle rather than the branch just being whatever the
@@ -3839,6 +4026,7 @@ static void print_settings_menu(void) {
                ? g_local_version_info.branch : "unknown");
     printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[L]%s Swipe to Lock Sensitivity (current: %d rows)\n", VFSC_BOLD, VFSC_RESET, read_lockswipe_min_height());
     printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_live_update_check ? "ON" : "OFF");
     printf("%s[CU]%s Check for Updates Now\n", VFSC_BOLD, VFSC_RESET);
@@ -3886,9 +4074,10 @@ static void do_settings_menu(void) {
             case '8': do_settings_link_volume(); break;
             case '9': do_settings_setup_fpov(); break;
             case 'U': case 'u': do_settings_toggle_live_update(); break;
+            case 'L': case 'l': do_settings_lockswipe_sensitivity(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-9, U, CU or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-9, L, U, CU or B.\n\n", line);
         }
     }
 }
@@ -6138,6 +6327,16 @@ int main(int argc, char **argv) {
                 if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
                     sensor_yield_begin();
                     do_view_fingerprint();
+                    sensor_yield_end();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'T': case 't':
+                if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+                    sensor_yield_begin();
+                    do_sensor_test();
                     sensor_yield_end();
                 } else {
                     printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
