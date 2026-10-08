@@ -282,3 +282,67 @@ int mmis_db_wipe_users(metallica_mis_tls_t *tls, int *deleted_out) {
                     "after delete\n", after.user_count);
     return -1;
 }
+
+/* ---- enroll-side helpers (python db.py: lookup_user / new_user /
+ * new_user_storate / new_finger). Used by metallica_mis_enroll.c. ---- */
+
+int mmis_db_ensure_storage(metallica_mis_tls_t *tls, uint16_t *dbid_out) {
+    mmis_db_storage_t stg;
+    int rc = mmis_db_get_user_storage(tls, 0, MMIS_DB_STORAGE_NAME, &stg);
+    if (rc < 0) return -1;
+    if (rc == 1) {
+        /* python: db.new_record(1, 4, 3, b'StgWindsor\0') */
+        static const unsigned char name[] = MMIS_DB_STORAGE_NAME "\0";
+        mmis_dbg("ensure_storage: no \"%s\" storage yet, creating it", MMIS_DB_STORAGE_NAME);
+        if (mmis_db_new_record(tls, 1, 4, 3, name, sizeof(name) - 1, NULL) != 0) return -1;
+        rc = mmis_db_get_user_storage(tls, 0, MMIS_DB_STORAGE_NAME, &stg);
+        if (rc != 0) {
+            fprintf(stderr, "metallica_mis_db: storage was created but cannot be read back\n");
+            return -1;
+        }
+    }
+    if (dbid_out) *dbid_out = stg.dbid;
+    return 0;
+}
+
+int mmis_db_lookup_user(metallica_mis_tls_t *tls, const unsigned char *identity, size_t identity_len,
+                        uint16_t *dbid_out) {
+    if (identity_len > 256) return -1;
+    uint16_t stg_dbid = 0;
+    if (mmis_db_ensure_storage(tls, &stg_dbid) != 0) return -1;
+
+    unsigned char cmd[7 + 256];
+    cmd[0] = 0x4a;
+    wr16(cmd + 1, 0); wr16(cmd + 3, stg_dbid); wr16(cmd + 5, (uint16_t)identity_len);
+    memcpy(cmd + 7, identity, identity_len);
+
+    unsigned char rsp[DB_REPLY_MAX];
+    int n = db_cmd(tls, "lookup_user", cmd, 7 + identity_len, rsp, sizeof(rsp));
+    if (n < 2) return -1;
+    if (rd16(rsp) == 0x04b3) {
+        mmis_dbg("lookup_user: no user with this identity (0x04b3)");
+        return 1;
+    }
+    if (status_ok("lookup_user", rsp, n) != 0) return -1;
+    if (n < 4) { fprintf(stderr, "metallica_mis_db: lookup_user: reply missing record id\n"); return -1; }
+    if (dbid_out) *dbid_out = rd16(rsp + 2);
+    mmis_dbg("lookup_user: found user record %u", rd16(rsp + 2));
+    return 0;
+}
+
+int mmis_db_new_user(metallica_mis_tls_t *tls, const unsigned char *identity, size_t identity_len,
+                     uint16_t *dbid_out) {
+    uint16_t stg_dbid = 0;
+    if (mmis_db_ensure_storage(tls, &stg_dbid) != 0) return -1;
+    /* python: new_record(stg.dbid, 5, stg.dbid, identity bytes) */
+    return mmis_db_new_record(tls, stg_dbid, 5, stg_dbid, identity, identity_len, dbid_out);
+}
+
+int mmis_db_new_finger(metallica_mis_tls_t *tls, uint16_t user_dbid,
+                       const unsigned char *tinfo, size_t tinfo_len, uint16_t *recid_out) {
+    uint16_t stg_dbid = 0;
+    if (mmis_db_ensure_storage(tls, &stg_dbid) != 0) return -1;
+    /* python: new_record(userid, 0xb, stg.dbid, template). We ask for type
+     * 0xb; the sensor's db_write_enable blob turns it into 0x6. */
+    return mmis_db_new_record(tls, user_dbid, 0xb, stg_dbid, tinfo, tinfo_len, recid_out);
+}

@@ -323,6 +323,56 @@ int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size) {
 }
 
 /*
+ * metallica_mis_wait_interrupt() -- port of python-validity's
+ * Usb.wait_int(): read the sensor's interrupt endpoint (EP 0x83) in
+ * 100 ms slices until something arrives. Capture and enroll are driven
+ * by these interrupts (type 0 = started, 2 = finger on the sensor,
+ * 3 = capture progress/complete, see Sensor.capture() upstream).
+ *
+ * Unlike upstream (which loops until the user cancels) this takes an
+ * overall limit so a headless run can never hang forever:
+ *   total_timeout_ms > 0  give up after about that long
+ *   total_timeout_ms <= 0 wait without a limit
+ * Returns the number of bytes received (> 0), 0 if the limit expired
+ * with nothing received, or -1 on a USB error (device not open, etc).
+ */
+int metallica_mis_wait_interrupt(unsigned char *out_buf, size_t out_buf_size, int total_timeout_ms) {
+    if (!g_handle) {
+        fprintf(stderr, "metallica_mis_wait_interrupt: device not open\n");
+        return -1;
+    }
+    int waited = 0;
+    int stalls = 0;
+    for (;;) {
+        int transferred = 0;
+        int r = libusb_interrupt_transfer(g_handle, METALLICA_MIS_IN_ENDPOINT_INT,
+                                          out_buf, (int)out_buf_size, &transferred, 100);
+        if (r == 0 && transferred > 0) {
+            mmis_dbg("usb: interrupt on 0x%02x got %d bytes", METALLICA_MIS_IN_ENDPOINT_INT, transferred);
+            mmis_dbg_hex("usb: interrupt data", out_buf, (size_t)transferred);
+            return transferred;
+        }
+        if (r == LIBUSB_ERROR_TIMEOUT || r == 0) {
+            waited += 100;
+            if (total_timeout_ms > 0 && waited >= total_timeout_ms) {
+                mmis_dbg("usb: interrupt wait on 0x%02x gave up after %d ms", METALLICA_MIS_IN_ENDPOINT_INT, waited);
+                return 0;
+            }
+            continue;
+        }
+        if (r == LIBUSB_ERROR_PIPE && stalls++ < 3) {
+            mmis_dbg("usb: interrupt endpoint 0x%02x stalled, clear_halt + retry", METALLICA_MIS_IN_ENDPOINT_INT);
+            libusb_clear_halt(g_handle, METALLICA_MIS_IN_ENDPOINT_INT);
+            continue;
+        }
+        fprintf(stderr, "metallica_mis_wait_interrupt: interrupt read failed (libusb error %d: %s)\n",
+                r, libusb_error_name(r));
+        mmis_dbg("usb: interrupt read on 0x%02x FAILED: %s", METALLICA_MIS_IN_ENDPOINT_INT, libusb_error_name(r));
+        return -1;
+    }
+}
+
+/*
  * cmd() -- the plaintext-stage equivalent of python-validity's
  * Usb.cmd(): write `out` (out_len bytes) to the OUT endpoint, then
  * read a reply into `in_buf` (up to in_buf_size bytes) from the
@@ -1013,7 +1063,9 @@ int metallica_mis_send_init(void) {
  * Returns 0 on success, -1 on any failure (transport, malformed reply,
  * or flash persist failure -- diagnostics are printed as they occur).
  */
-int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
+int metallica_mis_do_calibrate_ex(metallica_mis_tls_t *tls,
+                                  uint8_t *calib_out, size_t calib_out_max, size_t *calib_len_out) {
+    if (calib_len_out) *calib_len_out = 0;
     /* ---- one-time setup: hardcoded capture program + factory bits ---- */
     uint8_t prog[METALLICA_TYPE0199_PROG_MAX_LEN];
     size_t prog_len = 0;
@@ -1208,8 +1260,27 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
      * mmis_check_clean_slate() reads the persisted flash copy, not a
      * local file, on the next run. */
 
+    /* Hand the final running calibration data (python's self.calib_data)
+     * to the caller when asked: ENROLL/IDENTIFY captures need it in
+     * build_cmd_02(), and this client keeps no on-disk cache of it. */
+    if (calib_out && calib_len_out) {
+        if (calib_cur_len > calib_out_max) {
+            fprintf(stderr, "metallica_mis_do_calibrate: calibration data (%zu bytes) does not fit the "
+                             "caller's buffer (%zu bytes)\n", calib_cur_len, calib_out_max);
+            return -1;
+        }
+        memcpy(calib_out, calib_cur, calib_cur_len);
+        *calib_len_out = calib_cur_len;
+    }
+
     fprintf(stderr, "metallica_mis: calibration complete, clean-slate blob persisted to flash.\n");
     return 0;
+}
+
+/* Original entry point, unchanged behaviour: calibrate and discard the
+ * in-memory calibration data. */
+int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
+    return metallica_mis_do_calibrate_ex(tls, NULL, 0, NULL);
 }
 
 /*

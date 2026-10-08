@@ -31,6 +31,7 @@ int metallica_mis_do_pairing(void);
 int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out);
 int metallica_mis_do_calibrate(metallica_mis_tls_t *tls);
 int metallica_mis_do_records(bool wipe);
+int metallica_mis_do_enroll_test(void);
 
 bool metallica_mis_firmware_is_present(void);
 bool metallica_mis_firmware_fetch(void);

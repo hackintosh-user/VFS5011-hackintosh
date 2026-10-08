@@ -65,7 +65,7 @@ case ",$FAMILIES," in
         SENSOR_SRC="metallica_mis_firmware.c metallica_mis_daemon.c metallica_mis_tls.c \
             metallica_mis_init_flash.c metallica_mis_flash.c metallica_mis_blobs_9a.c \
             metallica_mis_upload_fwext.c mmis_rom_info.c mmis_timeslot.c mmis_calibrate.c \
-            mmis_factory_bits.c metallica_mis_debug.c metallica_mis_db.c"
+            mmis_factory_bits.c metallica_mis_debug.c metallica_mis_db.c metallica_mis_enroll.c"
         CFLAGS="-DHACK_TOUCHID_CLIENT_BUILD $CFLAGS -I$HT_OPENSSL_PREFIX/include"
         LDFLAGS="$LDFLAGS -L$HT_OPENSSL_PREFIX/lib -lssl -lcrypto"
         ;;

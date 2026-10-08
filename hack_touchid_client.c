@@ -65,6 +65,7 @@
 #include "metallica_mis_daemon.h"
 #include "metallica_mis_debug.h"
 #include "metallica_mis_db.h"
+#include "metallica_mis_enroll.h"
 #include "mmis_calibrate.h"
 #endif
 #include "upek_proto.h"
@@ -764,6 +765,14 @@ static bool g_diag_pid_mode = false;
  * flags. */
 static bool g_records_list_mode = false;
 static bool g_records_wipe_mode = false;
+
+/* Set by argv parsing in main() when "--enroll-test" is passed. Headless,
+ * same pattern as --list-records: runs one native enrollment on a
+ * Metallica MIS sensor (calibrate, touch the sensor several times, save
+ * the print ON the sensor) via metallica_mis_do_enroll_test(). A tester
+ * tool for now: it saves nothing on the Mac and there is no verify yet.
+ * Survives the sudo re-exec like the other flags. */
+static bool g_enroll_test_mode = false;
 
 /* Set by argv parsing in main() when "--check-updates" is passed.
  * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
@@ -2000,6 +2009,8 @@ static void print_usage(void) {
     printf("  --debug-full        Same as --debug, but never truncates large payloads\n");
     printf("  --list-records      List the prints stored on a Metallica MIS sensor and exit\n");
     printf("  --wipe-records      Delete ALL prints stored on a Metallica MIS sensor and exit\n");
+    printf("  --enroll-test       Metallica MIS: calibrate, enroll one finger on the sensor and exit\n");
+    printf("                      (experimental, tester tool, run with --debug)\n");
     printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
     printf("  --host-serial X     Metallica MIS: use X as the host serial instead of this Mac's\n");
     printf("                      (for a sensor paired on Linux/Windows: pass the laptop's real\n");
@@ -2535,6 +2546,28 @@ static void run_records_mode(void) {
     if (metallica_mis_do_records(g_records_wipe_mode) != 0) {
         vfsc_err("\nRecord %s failed. Re-run with --debug and send the full output.\n\n",
                  g_records_wipe_mode ? "wipe" : "listing");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
+}
+
+/* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS
+ * sensors: the first native enrollment (see metallica_mis_enroll.h). It
+ * saves the print on the sensor, so it needs the sensor to be paired
+ * already; if an older print blocks the save, --wipe-records fixes that. */
+static void run_enroll_test_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --enroll-test only applies to that sensor family.\n\n");
+        return;
+    }
+    vfsc_warn(
+        "\nExperimental: this runs a real enrollment on %s {0x%04X:0x%04X}.\n"
+        "It calibrates first (keep your finger OFF the sensor), then asks you to touch\n"
+        "the sensor several times with the SAME finger, and saves the print on the sensor.\n"
+        "Nothing is saved on this Mac. Run it with --debug and send the whole output.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+    if (metallica_mis_do_enroll_test() != 0) {
+        vfsc_err("\nEnroll test failed. Re-run with --debug and send the full output.\n\n");
         return;
     }
     vfsc_ok("\nDone.\n\n");
@@ -6066,6 +6099,10 @@ int main(int argc, char **argv) {
             g_records_wipe_mode = true;
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--enroll-test") == 0) {
+            g_enroll_test_mode = true;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
@@ -6111,6 +6148,7 @@ int main(int argc, char **argv) {
         else if (g_metallica_mis_debug == 1) sudo_argv[ai++] = "--debug";
         if (g_records_list_mode) sudo_argv[ai++] = "--list-records";
         if (g_records_wipe_mode) sudo_argv[ai++] = "--wipe-records";
+        if (g_enroll_test_mode) sudo_argv[ai++] = "--enroll-test";
         if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
         if (g_metallica_mis_host_product_override) {
             sudo_argv[ai++] = "--host-product";
@@ -6195,6 +6233,14 @@ int main(int argc, char **argv) {
     if (g_records_list_mode || g_records_wipe_mode) {
         g_detected_sensor = detect_supported_sensor();
         run_records_mode();
+        return 0;
+    }
+
+    /* --enroll-test: headless Metallica MIS enrollment test, same
+     * before-the-banner dispatch and own sensor probe as above. */
+    if (g_enroll_test_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_enroll_test_mode();
         return 0;
     }
 

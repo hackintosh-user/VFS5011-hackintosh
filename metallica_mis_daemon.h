@@ -22,6 +22,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 #include "metallica_mis_tls.h"
@@ -114,6 +115,22 @@ int metallica_mis_read_bulk_data(unsigned char *out_buf, size_t out_buf_size);
  * it does not skip on its own if valid calibration data already exists.
  * Returns 0 on success, -1 on any failure. */
 int metallica_mis_do_calibrate(metallica_mis_tls_t *tls);
+
+/* Same as metallica_mis_do_calibrate(), but also hands back the final
+ * in-memory calibration data (python's self.calib_data) in calib_out /
+ * *calib_len_out. ENROLL and IDENTIFY captures need that data to build
+ * their cmd_02, and this client keeps no on-disk cache of it, so the
+ * enroll test calibrates in the same session and uses what comes back.
+ * calib_out may be NULL (then this behaves exactly like
+ * metallica_mis_do_calibrate()). Returns 0 on success, -1 on failure. */
+int metallica_mis_do_calibrate_ex(metallica_mis_tls_t *tls,
+                                  uint8_t *calib_out, size_t calib_out_max, size_t *calib_len_out);
+
+/* Reads the sensor's interrupt endpoint (EP 0x83), python-validity's
+ * Usb.wait_int(). Capture and enroll are driven by these interrupts.
+ * total_timeout_ms > 0 bounds the wait, <= 0 waits without a limit.
+ * Returns bytes received (> 0), 0 on timeout, -1 on a USB error. */
+int metallica_mis_wait_interrupt(unsigned char *out_buf, size_t out_buf_size, int total_timeout_ms);
 
 /* Lists (wipe=false) or wipes (wipe=true) the fingerprint records stored
  * ON the sensor, via metallica_mis_db.c. Opens/closes the device itself.

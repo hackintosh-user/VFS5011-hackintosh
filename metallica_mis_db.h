@@ -119,4 +119,22 @@ int mmis_db_list(metallica_mis_tls_t *tls, int *user_count_out);
  * shows zero users left. */
 int mmis_db_wipe_users(metallica_mis_tls_t *tls, int *deleted_out);
 
+/* ---- enroll-side helpers (used by metallica_mis_enroll.c) ----
+ * mmis_db_ensure_storage(): returns the dbid of the "StgWindsor" storage,
+ *   creating it first if the sensor has none. 0 = ok, -1 = failure.
+ * mmis_db_lookup_user(): finds the user record for an identity blob.
+ *   0 = found (*dbid_out set), 1 = no such user, -1 = failure.
+ * mmis_db_new_user(): creates a user record for the identity blob.
+ * mmis_db_new_finger(): saves a finger (the make_finger_data() blob) under
+ *   a user. This is the step that fails with 0x04c3 when an older print is
+ *   still stored, which is why enroll starts by listing the records.
+ * Each returns 0 on success, -1 on failure and logs under --debug. */
+int mmis_db_ensure_storage(metallica_mis_tls_t *tls, uint16_t *dbid_out);
+int mmis_db_lookup_user(metallica_mis_tls_t *tls, const unsigned char *identity, size_t identity_len,
+                        uint16_t *dbid_out);
+int mmis_db_new_user(metallica_mis_tls_t *tls, const unsigned char *identity, size_t identity_len,
+                     uint16_t *dbid_out);
+int mmis_db_new_finger(metallica_mis_tls_t *tls, uint16_t user_dbid,
+                       const unsigned char *tinfo, size_t tinfo_len, uint16_t *recid_out);
+
 #endif /* __METALLICA_MIS_DB_H */

@@ -1310,18 +1310,28 @@ int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, si
         return n;
     }
 
-    unsigned char in_buf[8192];
+    /* 128 KB, like python-validity's Usb.cmd() read size. It was 8192, which is
+     * fine for the small replies of calibrate/db commands but not for the
+     * enrollment update replies (they carry the whole template, tens of KB):
+     * a bulk read into a too-small buffer fails with LIBUSB_ERROR_OVERFLOW. */
+    const size_t in_cap = 128 * 1024;
+    unsigned char *in_buf = (unsigned char *)malloc(in_cap);
     int in_len;
     bb_t frame; bb_init(&frame);
     bb_t app_out; bb_init(&app_out);
     int rc = -1;
+
+    if (!in_buf) {
+        mmis_dbg("tls_cmd: could not allocate the %zu byte reply buffer", in_cap);
+        goto done;
+    }
 
     if (make_app_data(tls, cmd, cmd_len, &frame) != 0) {
         mmis_dbg("tls_cmd: make_app_data() failed (could not encrypt/sign the command)");
         goto done;
     }
 
-    in_len = tls->transport(tls->transport_ctx, frame.data, frame.len, in_buf, sizeof(in_buf));
+    in_len = tls->transport(tls->transport_ctx, frame.data, frame.len, in_buf, (int)in_cap);
     if (in_len < 0) {
         mmis_dbg("tls_cmd: transport failed (%d) sending/receiving the encrypted record", in_len);
         goto done;
@@ -1344,6 +1354,7 @@ int metallica_mis_tls_cmd(metallica_mis_tls_t *tls, const unsigned char *cmd, si
     mmis_dbg_status("tls_cmd", out_buf, app_out.len);
 
 done:
+    free(in_buf);
     bb_free(&frame);
     bb_free(&app_out);
     return rc;
