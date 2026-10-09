@@ -4047,28 +4047,50 @@ static void do_settings_check_updates(void) {
     snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
 }
 
+/* One group heading: bold cyan title, then a dim underline. */
+static void print_settings_group(const char *title) {
+    printf("%s%s%s\n", VFSC_BCYAN, title, VFSC_RESET);
+    printf("%s--------------------------------%s\n", VFSC_DIM, VFSC_RESET);
+}
+
+/* The options are grouped by purpose. The keys did not change, only the
+ * order and the headings, so the dispatch in do_settings_menu() is the
+ * same. */
 static void print_settings_menu(void) {
-    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
-    printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
-    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
-    printf("%s[1]%s Delete Fingerprint Templates\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[2]%s Clear Password Cache\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[3]%s Set/Update Auto-Type Password\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[4]%s Set Up / Repair Template Volume\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[5]%s Grant/Verify Accessibility Permission\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[6]%s Adjust Match Threshold (current: %d)\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
     if (!g_local_version_loaded) {
         g_local_version_loaded = read_local_version_file(&g_local_version_info);
     }
+
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+
+    print_settings_group("FINGERPRINT & AUTHENTICATION");
+    printf("%s[1]%s Delete Fingerprint Templates\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[2]%s Clear Password Cache\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[3]%s Set/Update Auto-Type Password\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[6]%s Adjust Match Threshold (current: %d)\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
+    printf("\n");
+
+    print_settings_group("STORAGE & SYSTEM INTEGRATION");
+    printf("%s[4]%s Set Up / Repair Template Volume\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[5]%s Grant/Verify Accessibility Permission\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
+    printf("\n");
+
+    print_settings_group("SWIPE TO LOCK");
+    printf("%s[L]%s Swipe to Lock Sensitivity (current: %d rows)\n", VFSC_BOLD, VFSC_RESET, read_lockswipe_min_height());
+    printf("\n");
+
+    print_settings_group("UPDATES & NOTIFICATIONS");
     printf("%s[7]%s Toggle Beta Updates (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_local_version_loaded && g_local_version_info.branch[0] != '\0'
                ? g_local_version_info.branch : "unknown");
-    printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
-    printf("%s[L]%s Swipe to Lock Sensitivity (current: %d rows)\n", VFSC_BOLD, VFSC_RESET, read_lockswipe_min_height());
     printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_live_update_check ? "ON" : "OFF");
     printf("%s[CU]%s Check for Updates Now\n", VFSC_BOLD, VFSC_RESET);
+
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
     printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
