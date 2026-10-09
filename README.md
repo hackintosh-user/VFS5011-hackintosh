@@ -11,7 +11,7 @@
   a real fingerprint sensor instead of a password.
   
   * Current version: ```v1.1.0```
-  * Current Menubar app version: ```v1.3.1```
+  * Current Menubar app version: ```v1.4.0```
   * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/CHANGELOG.md)
   * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development#supported-sensors)
   * Current Set ETA: **Mid October 2026**: Please keep in mind that this is only an ETA and not confirmed release date. Stuff could happen, it could release earlier or later on!
@@ -241,7 +241,8 @@ password automatically.
 * ```--quiet```: same like the one before, launches the client without presenting the Verbose logs.
 * ```--deploy-agent```: Runs the [3] Deploy authentication services without entering the client. This is also used when the Menubar detects the Daemon isn't installed / after a macOS update
 * ```--diag-pid```: Runs the [D] Diagnostic steps but without launching the client.
-* ```--check-updates```: checks for updates without launching the client. And prompts if there is.
+* ```--check-updates```: checks for updates without launching the client. If there is one, shows the [A] Show changelog / [Y] Download and install / [N] Cancel prompt.
+* ```--menu-updater```: checks for updates and installs one right away, with no prompts. The menu bar app's "Update Client" notification button runs this in a terminal.
 * ```--debug```: Makes the client print every log for better debugging.
 * ```--list-records```: Read-only. Lists the storage, users and enrolled fingers stored on the sensor, plus database size and free space.
 * ```--wipe-records```: Deletes all enrolled prints stored on the sensor. Destructive, cannot be undone.
