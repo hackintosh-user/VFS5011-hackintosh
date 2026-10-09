@@ -52,6 +52,7 @@ SENSORS=""
 ASSUME_YES=0
 NO_INSTALL=0
 LIST_ONLY=0
+FALLBACK_ALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --sensor)     SENSORS="$2"; shift 2 ;;
@@ -110,6 +111,7 @@ if [ -z "$SENSORS" ]; then
     elif [ "$INTERACTIVE" = "0" ]; then
         echo "No supported sensor detected on USB. Not interactive, so building for all families."
         SENSORS="all"
+        FALLBACK_ALL=1
     elif [ -t 0 ]; then
         echo "No supported sensor detected on USB. Which one do you have?"
         "$HT_TOOL" families | while IFS='|' read -r fam name ids; do
@@ -125,6 +127,26 @@ fi
 
 FAMILIES="$("$HT_TOOL" resolve "$SENSORS" | paste -sd, -)" || exit 1
 [ -n "$FAMILIES" ] || { echo "error: nothing matched '$SENSORS' (try --list)" >&2; exit 1; }
+
+# The "all" fallback (updater with no sensor detected) must never install
+# anything: on Intel Macs Homebrew compiles from source, which can take
+# very long, and the missing packages may belong to a sensor the user does
+# not have. Keep only the families whose dependencies are already present.
+if [ "$FALLBACK_ALL" = "1" ]; then
+    KEEP=""
+    SKIPPED=""
+    for fam in $(echo "$FAMILIES" | tr ',' ' '); do
+        if [ -z "$("$HT_TOOL" deps all "$fam" | ht_filter_missing | paste -sd' ' -)" ]; then
+            KEEP="${KEEP:+$KEEP,}$fam"
+        else
+            SKIPPED="${SKIPPED:+$SKIPPED }$fam"
+        fi
+    done
+    if [ -n "$KEEP" ]; then
+        [ -z "$SKIPPED" ] || echo "Skipping $SKIPPED: its Homebrew packages are not installed and no sensor of that kind was detected."
+        FAMILIES="$KEEP"
+    fi
+fi
 echo "Building for: $FAMILIES"
 
 echo
