@@ -6,6 +6,8 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 ## v1.1.0 - Current Development Target
 **CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
+- **Oct 9** - The client's Settings menu is now grouped by purpose: Fingerprint & Authentication, Storage & System Integration, Swipe to Lock, and Updates & Notifications. The keys and what they do are unchanged.
+- **Oct 9** - Metallica MIS: fixed `--enroll-test` stopping at calibration. The sensor answers the calibration command with about 2 KB (1966 bytes seen on a 06cb:009a) and the reply buffer only held 256 bytes. It is now 16 KB.
 - **Oct 9** - Menu bar app v1.4.0: it now checks for client updates. About 15 seconds after launch, then every hour and after waking from sleep, it compares your client's `VERSION.txt` with the same branch on GitHub. When a newer version or build exists it posts a notification with an **Update Client** button, once per published build. The button opens your default terminal and runs `hack-touchid --menu-updater`. If the client has not been run yet (no `hack-touchid` in your PATH) the check stays quiet.
 - **Oct 9** - New launch argument `--menu-updater`: checks for a client update and installs it right away, with no prompts. It is what the menu bar app's Update Client button runs. If the build fails, the current install is left untouched.
 - **Oct 9** - `--check-updates` no longer installs on its own. When an update exists it now shows the same `[A]` Show changelog / `[Y]` Download and install / `[N]` Cancel prompt as the launch check, and `[Y]` installs it and tells you to run the client again.
