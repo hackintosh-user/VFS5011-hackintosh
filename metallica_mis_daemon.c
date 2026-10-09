@@ -1096,7 +1096,10 @@ int metallica_mis_do_calibrate_ex(metallica_mis_tls_t *tls,
     /* ---- scratch space for the per-iteration capture round trip ---- */
     static uint8_t cmd_buf[4096];
     static uint8_t scratch[8192];
-    static uint8_t reply[256];
+    /* Real hardware answers cmd_02 with ~2 KB (1966 bytes seen on a
+     * 06cb:009a), not just a status word, and metallica_mis_tls_cmd()
+     * refuses a reply that does not fit. Leave plenty of headroom. */
+    static uint8_t reply[16384];
     static uint8_t raw_buf[262144];   /* generous vs. the ~80KB a real
                                         * 3-frame/224-line/120-byte capture
                                         * actually produces; upstream's
