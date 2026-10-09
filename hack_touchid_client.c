@@ -4630,35 +4630,43 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
         return false;
     }
 
-    /* build.sh echoes exactly these 3 "==>" lines, one per binary, in
-     * this fixed order -- a real, discrete step count rather than a
-     * guessed percentage, since compiler output has no natural
-     * "% done" signal to parse. */
-    static const char *build_steps[] = {
+    /* build.sh echoes one "==>" line per binary it builds, in this fixed
+     * order. Compiler output has no natural "% done" signal, so the bar
+     * is driven by those discrete steps: it counts only the binaries
+     * this build actually makes (hack-touchid always, vfs5011_daemon for
+     * the VFS5011 family, metallica_mis_daemon for Metallica), and a step
+     * that has started counts as half done, so with 2 steps the bar goes
+     * 0% -> 25% -> 75% -> 100% at "Build complete". It is an estimate,
+     * not a measurement. */
+    static const char *const all_steps[] = {
         "Building hack-touchid...",
         "Building vfs5011_daemon...",
         "Building metallica_mis_daemon"
     };
-    const int total_steps = 3;
-    int step = 0;
+    const bool fam_all = strcmp(build_family, "all") == 0;
+    const char *build_steps[3];
+    int total_steps = 0;
+    build_steps[total_steps++] = all_steps[0];
+    if (fam_all || strstr(build_family, "vfs5011")) build_steps[total_steps++] = all_steps[1];
+    if (fam_all || strstr(build_family, "metallica")) build_steps[total_steps++] = all_steps[2];
+    int step = 0;   /* how many of build_steps have started */
+    int percent = 0;
 
     char bline[1024];
-    printf("Building [0/%d]...", total_steps);
-    fflush(stdout);
+    draw_progress_bar(percent, "Building");
     while (fgets(bline, sizeof(bline), bp)) {
         fputs(bline, log_fp); /* full output still preserved for debugging */
         if (strstr(bline, "Missing for your sensor")) {
             printf("\nInstalling the Homebrew packages your sensor needs (this can take a few minutes)...\n");
-            printf("Building [%d/%d]...", step, total_steps);
-            fflush(stdout);
+            draw_progress_bar(percent, "Building");
         }
-        for (int i = step; i < total_steps; i++) {
-            if (strstr(bline, build_steps[i])) {
-                step = i + 1;
-                printf("\rBuilding [%d/%d]...", step, total_steps);
-                fflush(stdout);
-                break;
-            }
+        if (step < total_steps && strstr(bline, build_steps[step])) {
+            step++;
+            percent = ((2 * step - 1) * 100) / (2 * total_steps);
+            draw_progress_bar(percent, "Building");
+        } else if (strstr(bline, "Build complete (sensor family")) {
+            percent = 100;
+            draw_progress_bar(percent, "Building");
         }
     }
     printf("\n");
