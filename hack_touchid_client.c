@@ -777,15 +777,20 @@ static bool g_enroll_test_mode = false;
 /* Set by argv parsing in main() when "--check-updates" is passed.
  * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
  * above -- routes into run_check_updates_mode() instead of the
- * interactive menu, before the verbose boot flood. Unlike the normal
- * boot-time check_for_client_update(), this never prompts: it checks,
- * and if an update exists downloads+builds+installs it immediately,
- * then tells the user to relaunch manually rather than auto-execv'ing
- * into the new binary -- this mode is meant to be run head-down from
- * a script/menu bar app, not to hand control to an interactive client
- * session on its own. Survives the sudo re-exec the same way the
- * other flags do. */
+ * interactive menu, before the verbose boot flood. It checks the
+ * branch's VERSION.txt and, when an update exists, shows the same
+ * [A] Show changelog / [Y] Download and install / [N] Cancel prompt as
+ * the boot-time check. [Y] installs it and tells the user to relaunch
+ * manually rather than auto-execv'ing into the new binary. Survives the
+ * sudo re-exec the same way the other flags do. */
 static bool g_check_updates_mode = false;
+
+/* Set by argv parsing in main() when "--menu-updater" is passed. The
+ * same check as --check-updates, but without the prompt: when an update
+ * exists it downloads, builds and installs it immediately. The menu bar
+ * app's "Update Client" notification button opens a terminal running
+ * this. Survives the sudo re-exec like the other flags. */
+static bool g_menu_updater_mode = false;
 
 /* Live update notifications: while the client sits at the main menu it
  * re-checks the remote VERSION.txt every UPDATE_WATCH_INTERVAL_SEC and,
@@ -2002,7 +2007,8 @@ static void print_usage(void) {
     printf("  --q, --quiet        Skip the verbose boot log\n");
     printf("  --deploy-agent      Headless (re)install of the daemon, no menu\n");
     printf("  --diag-pid          Print a diagnostic report and exit\n");
-    printf("  --check-updates     Check for a client update and exit\n");
+    printf("  --check-updates     Check for a client update, offer [A] changelog / [Y] install / [N] cancel\n");
+    printf("  --menu-updater      Check for a client update and install it right away, no prompts\n");
     printf("  --force-pair        Metallica MIS: force a fresh pairing (refused by a sensor that is\n");
     printf("                      already paired, see --host-product / --host-serial below)\n");
     printf("  --debug             Verbose protocol log (every USB transfer, TLS command, DB call)\n");
@@ -4008,7 +4014,7 @@ static void do_settings_toggle_live_update(void) {
 /* Defined further down in the updater section. */
 static bool fetch_remote_version_file(const char *branch, client_version_info_t *out);
 static void run_update_prompt(const client_version_info_t *local,
-                              const client_version_info_t *remote, bool live);
+                              const client_version_info_t *remote, bool live, bool relaunch);
 static bool remote_is_newer(const client_version_info_t *local, const client_version_info_t *remote);
 
 /* Settings [CU]: manual "check for updates now". Same comparison and
@@ -4035,7 +4041,7 @@ static void do_settings_check_updates(void) {
         vfsc_ok("You are up to date: v%s (%s).\n\n", local.version, local.build);
         return;
     }
-    run_update_prompt(&local, &remote, false);
+    run_update_prompt(&local, &remote, false, true);
     /* Declined or failed: don't let the live watcher re-announce this build. */
     snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
     snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
@@ -4862,13 +4868,15 @@ static bool show_update_changelog(const char *branch, const char *local_version)
     return true;
 }
 
-/* Shared [A]/[Y]/[N] update prompt, used by the boot-time check and by
- * the live watcher. `live` only changes the wording (the update was
- * published while the client was already open). Returns only if the
- * user declined or the update attempt failed; a successful update
- * relaunches the client and never comes back. */
+/* Shared [A]/[Y]/[N] update prompt, used by the boot-time check, the
+ * live watcher, Settings [CU] and --check-updates. `live` only changes
+ * the wording (the update was published while the client was already
+ * open). With relaunch=true a successful update relaunches the client
+ * and never comes back; with relaunch=false (--check-updates) it
+ * installs, tells the user to run the client again, and returns. Also
+ * returns if the user declined or the update attempt failed. */
 static void run_update_prompt(const client_version_info_t *local,
-                              const client_version_info_t *remote, bool live) {
+                              const client_version_info_t *remote, bool live, bool relaunch) {
     printf("\n");
     if (remote->critical) {
         printf("%s[NEW | CRITICAL]%s Update for Hackintosh TouchID was found!!!\n",
@@ -4906,7 +4914,7 @@ static void run_update_prompt(const client_version_info_t *local,
         return;
     }
 
-    download_build_and_swap_update(local->branch, true, remote->version, remote->build);
+    download_build_and_swap_update(local->branch, relaunch, remote->version, remote->build);
 }
 
 /* True if `remote` is a newer version, or the same version with a
@@ -4963,7 +4971,7 @@ static void check_for_client_update(void) {
     }
     if (!is_newer) return;
 
-    run_update_prompt(&local, &remote, false);
+    run_update_prompt(&local, &remote, false, true);
     /* Declined (or failed): remember this build so the live watcher
      * doesn't announce the same one again a minute later. */
     snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
@@ -4973,58 +4981,66 @@ static void check_for_client_update(void) {
      * current version. */
 }
 
-/* run_check_updates_mode() -- headless "hack-touchid --check-updates".
- * Same version-fetch/compare logic as check_for_client_update() above,
- * but never prompts and never lands in the interactive client:
- *   - no internet / remote version unreachable -> "Unable to check
- *     for updates."
- *   - no newer version -> "You are on the current release for this
- *     branch."
- *   - newer version -> downloads, builds, and installs it immediately
- *     (download_build_and_swap_update(..., relaunch=false)), which
- *     prints its own "Update was complete, please run sudo
- *     hack-touchid to launch the client." on success rather than
- *     execv'ing into the new binary itself. */
-static void run_check_updates_mode(void) {
+/* Shared by the two headless update modes below: reads the local
+ * VERSION.txt, fetches the branch's remote one, and compares them.
+ * Prints its own message and returns false when there is nothing to do
+ * (no internet, unreadable version, already current). Returns true with
+ * *local and *remote filled in when a newer version or build exists. */
+static bool headless_find_update(client_version_info_t *local, client_version_info_t *remote) {
     if (!g_local_version_loaded) {
         g_local_version_loaded = read_local_version_file(&g_local_version_info);
     }
     if (!g_local_version_loaded) {
         printf("Unable to check for updates.\n");
-        return;
+        return false;
     }
-    const client_version_info_t local = g_local_version_info;
+    *local = g_local_version_info;
 
-    client_version_info_t remote;
-    if (!fetch_remote_version_file(local.branch, &remote)) {
+    if (!fetch_remote_version_file(local->branch, remote)) {
         printf("Unable to check for updates.\n");
-        return;
+        return false;
     }
 
-    int local_code = parse_version_code(local.version);
-    int remote_code = parse_version_code(remote.version);
-    if (local_code < 0 || remote_code < 0) {
+    if (parse_version_code(local->version) < 0 || parse_version_code(remote->version) < 0) {
         printf("Unable to check for updates.\n");
-        return;
+        return false;
     }
 
-    bool is_newer = remote_code > local_code;
-    if (!is_newer && remote_code == local_code) {
-        long local_build = parse_build_code(local.build);
-        long remote_build = parse_build_code(remote.build);
-        if (local_build >= 0 && remote_build >= 0 && remote_build > local_build) {
-            is_newer = true;
-        }
-    }
-    if (!is_newer) {
+    if (!remote_is_newer(local, remote)) {
         printf("You are on the current release for this branch.\n");
-        return;
+        return false;
     }
+    return true;
+}
 
+/* run_check_updates_mode() -- headless "hack-touchid --check-updates".
+ * Same version-fetch/compare logic as check_for_client_update() above,
+ * but never lands in the interactive client:
+ *   - no internet / remote version unreachable -> "Unable to check
+ *     for updates."
+ *   - no newer version -> "You are on the current release for this
+ *     branch."
+ *   - newer version -> shows the usual [A] Show changelog / [Y]
+ *     Download and install / [N] Cancel prompt. [Y] downloads, builds
+ *     and installs it (relaunch=false), which prints its own "Update
+ *     was complete, please run sudo hack-touchid to launch the client."
+ *     on success rather than execv'ing into the new binary itself. */
+static void run_check_updates_mode(void) {
+    client_version_info_t local, remote;
+    if (!headless_find_update(&local, &remote)) return;
+    run_update_prompt(&local, &remote, false, false);
+}
+
+/* run_menu_updater_mode() -- headless "hack-touchid --menu-updater".
+ * What the menu bar app's "Update Client" button runs in a terminal.
+ * The same check as --check-updates, but with no prompt: a newer
+ * version or build is downloaded, built and installed immediately
+ * (relaunch=false, so it ends with the "please run sudo hack-touchid"
+ * line). If the update fails, the current install is left untouched. */
+static void run_menu_updater_mode(void) {
+    client_version_info_t local, remote;
+    if (!headless_find_update(&local, &remote)) return;
     download_build_and_swap_update(local.branch, false, remote.version, remote.build);
-    /* Only reachable if the update attempt itself failed -- its own
-     * error path already printed why and left the current install
-     * untouched. */
 }
 
 /* ------------------------------------------------------------------ *
@@ -5965,7 +5981,7 @@ static bool update_watch_check_now(void) {
     /* Drop anything the user had half-typed at the menu prompt so it
      * doesn't leak into the A/Y/N answer. */
     tcflush(STDIN_FILENO, TCIFLUSH);
-    run_update_prompt(&local, &remote, true);
+    run_update_prompt(&local, &remote, true, true);
     return true;
 }
 
@@ -6076,6 +6092,10 @@ int main(int argc, char **argv) {
             g_check_updates_mode = true;
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--menu-updater") == 0) {
+            g_menu_updater_mode = true;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--post-update") == 0) {
             g_post_update_mode = true;
         }
@@ -6129,7 +6149,7 @@ int main(int argc, char **argv) {
      *
      * Counter-based instead of the old fixed 4-slot array -- now that
      * --q/--quiet, --deploy-agent, --diag-pid, --check-updates,
-     * --force-pair, and --fpbootd-daemon can all be present at once,
+     * --menu-updater, --force-pair, and --fpbootd-daemon can all be present at once,
      * the old hardcoded "sudo_argv[2] = flag or NULL" approach could
      * only carry one flag through the re-exec. This builds the argv up
      * to however many flags actually apply. */
@@ -6143,6 +6163,7 @@ int main(int argc, char **argv) {
         if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
         if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
+        if (g_menu_updater_mode) sudo_argv[ai++] = "--menu-updater";
         if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
         if (g_metallica_mis_debug >= 2) sudo_argv[ai++] = "--debug-full";
         else if (g_metallica_mis_debug == 1) sudo_argv[ai++] = "--debug";
@@ -6220,6 +6241,14 @@ int main(int argc, char **argv) {
     if (g_check_updates_mode) {
         g_detected_sensor = detect_supported_sensor();
         run_check_updates_mode();
+        return 0;
+    }
+
+    /* --menu-updater: same dispatch and sensor probe as --check-updates,
+     * but installs without asking. */
+    if (g_menu_updater_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_menu_updater_mode();
         return 0;
     }
 
