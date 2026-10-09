@@ -46,6 +46,71 @@ private let daemonLaunchdLabel = "com.hackintosh.vfs5011agent"
 private let daemonReinstallActionID = "com.vfs5011.hackintosh.reinstall_daemon"
 private let daemonMissingCategoryID = "com.vfs5011.hackintosh.daemon_missing"
 
+// MARK: - Client update check constants
+//
+// The client (hack-touchid) is updated by its own updater. This app only
+// notices that a newer build exists and offers to run
+// `hack-touchid --menu-updater` in a terminal. The branch to compare
+// against is read from the client's own VERSION.txt, the same rule the
+// client uses, so someone on active-development is only told about newer
+// active-development builds.
+private let clientUpdateActionID = "com.vfs5011.hackintosh.update_client"
+private let clientUpdateCategoryID = "com.vfs5011.hackintosh.client_update"
+private let clientSymlinkPath = "/usr/local/bin/hack-touchid"
+private let clientRawVersionBaseURL = "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
+private let clientUpdateCheckInterval: TimeInterval = 60 * 60
+private let clientUpdateFirstCheckDelay: TimeInterval = 15
+// UserDefaults key: the last "version|build" we already notified about,
+// so one published build produces one notification, not one per hour.
+private let clientUpdateNotifiedKey = "lastNotifiedClientUpdate"
+
+private struct ClientVersionInfo {
+    var version = ""
+    var build = ""
+    var branch = ""
+    var critical = false
+
+    // Parses VERSION.txt's KEY=value lines. Returns nil without VERSION=.
+    init?(text: String) {
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("VERSION=") { version = String(line.dropFirst(8)) }
+            else if line.hasPrefix("BUILD=") { build = String(line.dropFirst(6)) }
+            else if line.hasPrefix("BRANCH=") { branch = String(line.dropFirst(7)) }
+            else if line.hasPrefix("CRITICAL=") { critical = line.dropFirst(9).hasPrefix("true") }
+        }
+        if version.isEmpty { return nil }
+    }
+
+    // Same comparison as parse_version_code() in hack_touchid_client.c.
+    var versionCode: Int? {
+        let trimmed = version.hasPrefix("v") || version.hasPrefix("V") ? String(version.dropFirst()) : version
+        let parts = trimmed.split(separator: ".").map { Int($0) }
+        guard let major = parts.first ?? nil else { return nil }
+        let minor = parts.count > 1 ? (parts[1] ?? 0) : 0
+        let patch = parts.count > 2 ? (parts[2] ?? 0) : 0
+        return major * 10000 + minor * 100 + patch
+    }
+
+    // Same comparison as parse_build_code(): "26B254" = year, letter, number.
+    var buildCode: Int? {
+        let chars = Array(build)
+        guard chars.count >= 4,
+              let y1 = chars[0].wholeNumberValue, let y2 = chars[1].wholeNumberValue,
+              chars[2].isASCII, chars[2].isUppercase,
+              let number = Int(String(chars[3...])),
+              let letter = chars[2].asciiValue else { return nil }
+        return (y1 * 10 + y2) * 1_000_000 + Int(letter - 65) * 10_000 + number
+    }
+
+    func isNewer(than local: ClientVersionInfo) -> Bool {
+        guard let remoteCode = versionCode, let localCode = local.versionCode else { return false }
+        if remoteCode != localCode { return remoteCode > localCode }
+        guard let remoteBuild = buildCode, let localBuild = local.buildCode else { return false }
+        return remoteBuild > localBuild
+    }
+}
+
 // MARK: - Notification names (must match hack-touchid-menubar-ipc.h exactly)
 // NOTE: kept as "VFS5011Notification"/"com.vfs5011.hackintosh" even
 // after the user-facing rename to "Hackintosh Touch-ID" -- this is a
@@ -136,6 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private var statusItem: NSStatusItem!
+    private var clientUpdateTimer: Timer?
     private var aboutWindow: NSWindow?
     private var scanningEnabled: Bool = true {
         didSet { updateMenuForCurrentState() }
@@ -169,6 +235,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // through it"), since neither is guaranteed to relaunch this
         // app on its own.
         checkDaemonHealth()
+        scheduleClientUpdateChecks()
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(handleWake),
@@ -179,6 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     @objc private func handleWake() {
         checkDaemonHealth()
+        checkForClientUpdate()
     }
 
     // MARK: - Login item
@@ -434,7 +502,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             intentIdentifiers: [],
             options: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+        let updateAction = UNNotificationAction(
+            identifier: clientUpdateActionID,
+            title: "Update Client",
+            options: [.foreground]
+        )
+        let updateCategory = UNNotificationCategory(
+            identifier: clientUpdateCategoryID,
+            actions: [updateAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([category, updateCategory])
         UNUserNotificationCenter.current().delegate = self
     }
 
@@ -565,6 +644,98 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // MARK: - Client update check
+
+    // First check shortly after launch (so it does not compete with the
+    // daemon health check and the login-time rush), then hourly. Wake from
+    // sleep also checks, see handleWake().
+    private func scheduleClientUpdateChecks() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + clientUpdateFirstCheckDelay) { [weak self] in
+            self?.checkForClientUpdate()
+        }
+        clientUpdateTimer = Timer.scheduledTimer(withTimeInterval: clientUpdateCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkForClientUpdate()
+        }
+    }
+
+    // The client's VERSION.txt sits next to the real binary, which
+    // /usr/local/bin/hack-touchid points at. Missing or unreadable just
+    // means "can't check", never an error: the client may not have been
+    // run yet.
+    private func readLocalClientVersion() -> ClientVersionInfo? {
+        let link = URL(fileURLWithPath: clientSymlinkPath).resolvingSymlinksInPath()
+        let versionFile = link.deletingLastPathComponent().appendingPathComponent("VERSION.txt")
+        guard let text = try? String(contentsOf: versionFile, encoding: .utf8) else { return nil }
+        return ClientVersionInfo(text: text)
+    }
+
+    private func checkForClientUpdate() {
+        guard let local = readLocalClientVersion(), !local.branch.isEmpty,
+              let url = URL(string: "\(clientRawVersionBaseURL)/\(local.branch)/VERSION.txt") else { return }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            // Offline, GitHub down, bad branch: stay quiet, try again next time.
+            guard let self = self,
+                  let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let data = data, let text = String(data: data, encoding: .utf8),
+                  let remote = ClientVersionInfo(text: text),
+                  remote.isNewer(than: local) else { return }
+
+            let marker = "\(remote.version)|\(remote.build)"
+            DispatchQueue.main.async {
+                if UserDefaults.standard.string(forKey: clientUpdateNotifiedKey) == marker { return }
+                UserDefaults.standard.set(marker, forKey: clientUpdateNotifiedKey)
+                self.fireClientUpdateNotification(local: local, remote: remote)
+            }
+        }.resume()
+    }
+
+    private func fireClientUpdateNotification(local: ClientVersionInfo, remote: ClientVersionInfo) {
+        let content = UNMutableNotificationContent()
+        content.title = remote.critical ? "Hackintosh Touch-ID: critical update" : "Hackintosh Touch-ID update"
+        content.body = "Client v\(remote.version) (\(remote.build)) is available. You are on v\(local.version) (\(local.build))."
+        content.sound = .default
+        content.categoryIdentifier = clientUpdateCategoryID
+
+        let request = UNNotificationRequest(
+            identifier: "client-update-\(UUID().uuidString)",
+            content: content,
+            trigger: nil // deliver immediately
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                NSLog("VFS5011MenuBar: failed to post client-update notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // Opens a terminal running `hack-touchid --menu-updater`. A small
+    // .command file is opened with the system default handler, so it
+    // lands in whatever terminal app the person has set as default
+    // (Terminal.app unless they changed it). The client asks for sudo
+    // itself, so the password prompt appears in that window.
+    private func launchClientUpdaterInTerminal() {
+        let script = """
+        #!/bin/zsh
+        export PATH="/usr/local/bin:$PATH"
+        hack-touchid --menu-updater
+        echo
+        echo "Press Return to close this window."
+        read
+        """
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("HTID-Update-Client.command")
+        do {
+            try script.write(to: fileURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fileURL.path)
+            NSWorkspace.shared.open(fileURL)
+        } catch {
+            NSLog("VFS5011MenuBar: failed to launch the client updater: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - UNUserNotificationCenterDelegate
 
     // Handles the "Reinstall Daemon" action button tap. Also shows
@@ -589,6 +760,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         if response.notification.request.content.categoryIdentifier == daemonMissingCategoryID,
            response.actionIdentifier == daemonReinstallActionID {
             launchDeployAgentInTerminal()
+        }
+        if response.notification.request.content.categoryIdentifier == clientUpdateCategoryID,
+           response.actionIdentifier == clientUpdateActionID {
+            launchClientUpdaterInTerminal()
         }
         completionHandler()
     }
