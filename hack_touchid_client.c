@@ -6212,9 +6212,13 @@ int main(int argc, char **argv) {
 
     /* --check-updates short-circuits straight to run_check_updates_mode(),
      * same before-the-banner dispatch as --diag-pid/--deploy-agent above.
-     * No sensor probing needed here -- unlike diag/deploy-agent this
-     * never touches g_detected_sensor at all. */
+     * It DOES need its own sensor probe: the updater passes the detected
+     * family to prep_and_build.sh, and with g_detected_sensor left NULL it
+     * fell back to "all", which pulled in the Metallica-only Homebrew
+     * packages (openssl@3, innoextract) and compiled them from source on
+     * Intel Macs. */
     if (g_check_updates_mode) {
+        g_detected_sensor = detect_supported_sensor();
         run_check_updates_mode();
         return 0;
     }
