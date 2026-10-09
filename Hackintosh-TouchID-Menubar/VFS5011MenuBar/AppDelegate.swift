@@ -554,7 +554,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             let center = UNUserNotificationCenter.current()
             center.getDeliveredNotifications { delivered in
                 let ids = delivered
-                    .filter { $0.request.content.categoryIdentifier != daemonMissingCategoryID }
+                    .filter { $0.request.content.categoryIdentifier != daemonMissingCategoryID
+                           && $0.request.content.categoryIdentifier != clientUpdateCategoryID }
                     .map { $0.request.identifier }
                 if !ids.isEmpty {
                     center.removeDeliveredNotifications(withIdentifiers: ids)
