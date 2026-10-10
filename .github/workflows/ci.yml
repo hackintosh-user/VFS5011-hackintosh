@@ -7,7 +7,7 @@ name: CI
 # scripts pass shellcheck, and do the matcher's pure-logic unit tests
 # (serialization + fingers/ directory scanning) still pass.
 #
-# What this deliberately does NOT cover (needs the real DV6):
+# What this deliberately does NOT cover (needs a real sensor VID:PID detcted):
 #   - libusb capture from the actual sensor
 #   - CFNotificationCenter IPC across the root/user boundary
 #   - Passwords.app / Keychain Access AX-prompt integration
@@ -51,7 +51,8 @@ jobs:
             hack-touchid-menubar-ipc.c metallica_mis_daemon.c metallica_mis_firmware.c \
             metallica_mis_tls.c metallica_mis_init_flash.c metallica_mis_flash.c \
             metallica_mis_blobs_9a.c metallica_mis_upload_fwext.c \
-            mmis_timeslot.c mmis_calibrate.c mmis_rom_info.c
+            mmis_timeslot.c mmis_calibrate.c mmis_rom_info.c mmis_factory_bits.c \
+            metallica_mis_debug.c metallica_mis_db.c
           # NOTE (Aug 2026): metallica_mis_tls.c/init_flash.c had been sitting in
           # the tree since Aug 19-20 without appearing in this list at all --
           # meaning cppcheck (and the build jobs below, which also don't
@@ -101,9 +102,10 @@ jobs:
           ./build.sh
       - name: Verify binaries were produced
         run: |
-          test -x ./vfs_client
+          test -x ./hack-touchid
           test -x ./vfs5011_daemon
-          echo "Both binaries built successfully."
+          test -x ./metallica_mis_daemon
+          echo "All three binaries built successfully."
 
   matcher-unit-tests:
     name: Matcher unit tests (macOS)
@@ -122,10 +124,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          chmod +x Vfs5011-menubar/build_menubar_app.sh
-          ./Vfs5011-menubar/build_menubar_app.sh
+          chmod +x Hackintosh-TouchID-Menubar/build_menubar_app.sh
+          ./Hackintosh-TouchID-Menubar/build_menubar_app.sh
       - name: Verify app bundle was produced
         run: |
-          test -d "Vfs5011-menubar/build/VFS5011 Menu Bar.app"
-          test -x "Vfs5011-menubar/build/VFS5011 Menu Bar.app/Contents/MacOS/VFS5011MenuBar"
+          test -d "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app"
+          test -x "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
           echo "Menu bar app built successfully."
