@@ -1094,8 +1094,8 @@ int metallica_mis_do_calibrate_ex(metallica_mis_tls_t *tls,
                  factory_calibration_values, factory_len);
 
     /* ---- scratch space for the per-iteration capture round trip ---- */
-    static uint8_t cmd_buf[4096];
-    static uint8_t scratch[8192];
+    static uint8_t cmd_buf[32768];   /* cmd_02 with prior calib data is ~16 KB */
+    static uint8_t scratch[65536];
     /* Real hardware answers cmd_02 with ~2 KB (1966 bytes seen on a
      * 06cb:009a), not just a status word, and metallica_mis_tls_cmd()
      * refuses a reply that does not fit. Leave plenty of headroom. */
