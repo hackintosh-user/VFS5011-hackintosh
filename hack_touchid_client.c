@@ -1,0 +1,6571 @@
+/*
+ * vfs5011_enroll_verify.c
+ *
+ * Step 5: full pipeline. Two modes:
+ *
+ *   ./vfs5011_enroll_verify enroll
+ *       Captures a swipe, extracts minutiae, saves as template.dat
+ *
+ *   ./vfs5011_enroll_verify verify
+ *       Captures a swipe, extracts minutiae, compares against
+ *       template.dat, and prints:
+ *           checkmark + "Success!"              on match
+ *           X + "Incorrect fingerprint"          on no match
+ *
+ * Build (macOS) — compiles the capture/init code, the matcher
+ * wrapper, and every mindtct + bozorth3 source file together:
+ *
+ *   clang vfs5011_enroll_verify.c hack-touchid-matcher.c \
+ *       nbis/mindtct/*.c nbis/bozorth3/*.c \
+ *       -o vfs5011_enroll_verify \
+ *       -I. -Inbis/include \
+ *       -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0 \
+ *       -lm
+ *
+ * (A build.sh with this exact command is provided alongside this file.)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <libgen.h>
+#include <limits.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <sys/stat.h>
+#include <sys/utsname.h>
+#include <sys/sysctl.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <poll.h>
+#include <stdarg.h>
+#include <ctype.h>
+#include <stdbool.h>
+#include <time.h>
+#include <libusb.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <mach-o/dyld.h>
+
+#include "vfs5011_proto.h"
+#include "hack-touchid-matcher.h"
+#include "supported_sensors.h"
+#ifdef HT_NO_METALLICA
+/* Built for a non-Metallica sensor: no OpenSSL, no innoextract. The
+ * Metallica entry points are do-nothing stubs, see ht_sensor_stubs.c. */
+#include "ht_sensor_stubs.h"
+#else
+#include "metallica_mis_firmware.h"
+#include "metallica_mis_daemon.h"
+#include "metallica_mis_debug.h"
+#include "metallica_mis_db.h"
+#include "metallica_mis_enroll.h"
+#include "mmis_calibrate.h"
+#endif
+#include "upek_proto.h"
+#include "upek_daemon.h"
+
+#define VFS5011_VID 0x138a
+#define VFS5011_PID 0x0018
+
+enum action_type { ACTION_SEND, ACTION_RECEIVE };
+struct usb_action {
+    enum action_type type;
+    const char *name;
+    int endpoint;
+    int size;
+    unsigned char *data;
+    int correct_reply_size;
+};
+
+#define SEND(ENDPOINT, COMMAND) \
+    { ACTION_SEND, #COMMAND, ENDPOINT, sizeof(COMMAND), COMMAND, 0 },
+#define RECV(ENDPOINT, SIZE) \
+    { ACTION_RECEIVE, "recv", ENDPOINT, SIZE, NULL, 0 },
+#define RECV_CHECK(ENDPOINT, SIZE, EXPECTED) \
+    { ACTION_RECEIVE, "recv_check", ENDPOINT, SIZE, EXPECTED, sizeof(EXPECTED) },
+
+static struct usb_action vfs5011_initialization[] = {
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_19)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_00)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_02)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_04)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 256)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_05)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_01)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_06)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 17216)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 32)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_07)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 45056)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_08)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 16896)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_09)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4928)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_10)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 5632)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_11)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 5632)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_12)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 3328)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_13)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_14)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_02)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_27)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_15)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_16)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 2368)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_17)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_init_18)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+};
+
+static struct usb_action vfs5011_initiate_capture[] = {
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_04)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 84032)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_00)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_cmd_1A)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_01)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_02)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 2368)
+    RECV(VFS5011_IN_ENDPOINT_CTRL, 64)
+    RECV(VFS5011_IN_ENDPOINT_DATA, 4800)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_03)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
+    SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_04)
+    RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 2368, VFS5011_NORMAL_CONTROL_REPLY)
+};
+
+/* Set (briefly) by capture_quality_template() when called with
+ * quiet=1 (do_enroll()'s case) -- gates the low-level USB retry/stall
+ * noise and the "Detected N minutiae"/"Swipe your finger..." prompts
+ * below, none of which took a quiet param of their own since they're
+ * several calls deep from capture_quality_template() and threading a
+ * parameter through all of them would touch far more call sites than
+ * this is worth. Restored to 0 right after each
+ * capture_quality_template() call returns, so it's never left quiet
+ * outside of that one call's duration. do_verify() never sets this,
+ * so its output is unaffected.
+ *
+ * ACTUALLY DEFINED in hack-touchid-matcher.c, not here -- that file
+ * is linked into both this client AND the older standalone
+ * vfs5011_daemon binary, while this file is client-only. Defining it
+ * here broke vfs5011_daemon's link step (Sep 15 build log, undefined
+ * symbol) since it never links this file in. Don't move it back. */
+extern int g_capture_quiet;
+
+/* Attempts a bulk transfer; on LIBUSB_ERROR_PIPE (stall left over from a
+ * previous run, or a transient firmware hiccup), clears the halt on that
+ * endpoint and retries exactly once before giving up. This is what lets
+ * the program recover on its own instead of needing a manual rerun. */
+static int bulk_transfer_with_pipe_retry(libusb_device_handle *handle, int endpoint,
+                                          unsigned char *data, int size, int *transferred,
+                                          unsigned int timeout) {
+    int r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    if (r == LIBUSB_ERROR_PIPE) {
+        if (!g_capture_quiet) fprintf(stderr, "  (stall on endpoint 0x%02x, clearing halt and retrying)\n", endpoint);
+        libusb_clear_halt(handle, endpoint);
+        r = libusb_bulk_transfer(handle, endpoint, data, size, transferred, timeout);
+    }
+    return r;
+}
+
+static int run_sequence(libusb_device_handle *handle, struct usb_action *seq, int count) {
+    unsigned char recv_buf[VFS5011_RECEIVE_BUF_SIZE];
+    int r, transferred, i;
+    for (i = 0; i < count; i++) {
+        struct usb_action *a = &seq[i];
+        if (a->type == ACTION_SEND) {
+            r = bulk_transfer_with_pipe_retry(handle, a->endpoint, a->data, a->size,
+                                               &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
+            if (r != 0 || transferred != a->size) {
+                if (!g_capture_quiet) fprintf(stderr, "SEND failed at step %d (%s): %s\n", i + 1, a->name, libusb_error_name(r));
+                return -1;
+            }
+        } else {
+            r = bulk_transfer_with_pipe_retry(handle, a->endpoint, recv_buf, a->size,
+                                               &transferred, VFS5011_DEFAULT_WAIT_TIMEOUT);
+            if (r != 0) {
+                if (!g_capture_quiet) fprintf(stderr, "RECV failed at step %d: %s\n", i + 1, libusb_error_name(r));
+                return -1;
+            }
+            if (a->data != NULL) {
+                if (transferred != a->correct_reply_size ||
+                    memcmp(recv_buf, a->data, a->correct_reply_size) != 0) {
+                    if (!g_capture_quiet) fprintf(stderr, "RECV_CHECK mismatch at step %d\n", i + 1);
+                    return -1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+#define CAPTURE_LINES   256
+#define MAX_LINES_TOTAL 2000
+#define MAX_LINES_READ  100000
+#define DEVIATION_THRESHOLD (15*15)
+#define DIFFERENCE_THRESHOLD 600
+#define STOP_CHECK_LINES 50
+#define ASM_RESOLUTION 10
+#define ASM_MEDIAN_FILTER_SIZE 25
+#define ASM_MAX_SEARCH_OFFSET 30
+
+static int get_deviation(unsigned char *buf, int size) {
+    int mean = 0, res = 0, i;
+    for (i = 0; i < size; i++) mean += buf[i];
+    mean /= size;
+    for (i = 0; i < size; i++) { int d = (int)buf[i] - mean; res += d * d; }
+    return res / size;
+}
+static int get_diff_norm(unsigned char *a, unsigned char *b, int size) {
+    int res = 0, i;
+    for (i = 0; i < size; i++) { int d = (int)a[i] - (int)b[i]; res += d * d; }
+    return res / size;
+}
+static unsigned char get_pixel(unsigned char *line, int x) { return line[8 + x]; }
+static int get_deviation2(unsigned char *row1, unsigned char *row2) {
+    unsigned char *buf1 = row1 + 56;
+    unsigned char *buf2 = row2 + 168;
+    const int size = 64;
+    int mean = 0, res = 0, i;
+    for (i = 0; i < size; i++) mean += (int)buf1[i] + (int)buf2[i];
+    mean /= size;
+    for (i = 0; i < size; i++) { int d = (int)buf1[i] + (int)buf2[i] - mean; res += d * d; }
+    return res / size;
+}
+static int cmpint(const void *a, const void *b) { return (*(const int *)a) - (*(const int *)b); }
+static void median_filter(int *data, int size, int filtersize) {
+    int *result = calloc(size, sizeof(int));
+    int *sortbuf = calloc(filtersize, sizeof(int));
+    for (int i = 0; i < size; i++) {
+        int i1 = i - (filtersize - 1) / 2, i2 = i + (filtersize - 1) / 2;
+        if (i1 < 0) i1 = 0;
+        if (i2 >= size) i2 = size - 1;
+        memmove(sortbuf, data + i1, (size_t)(i2 - i1 + 1) * sizeof(int));
+        qsort(sortbuf, i2 - i1 + 1, sizeof(int), cmpint);
+        result[i] = sortbuf[(i2 - i1 + 1) / 2];
+    }
+    memmove(data, result, (size_t)size * sizeof(int));
+    free(result); free(sortbuf);
+}
+static void interpolate_lines(unsigned char *line1, float y1, unsigned char *line2,
+                               float y2, unsigned char *output, float yi, int size) {
+    if (!line1 || !line2) return;
+    for (int i = 0; i < size; i++) {
+        unsigned char p1 = get_pixel(line1, i), p2 = get_pixel(line2, i);
+        output[i] = (unsigned char)((float)p1 + (yi - y1) / (y2 - y1) * ((float)p2 - (float)p1));
+    }
+}
+static unsigned char *assemble_lines(unsigned char *lines, int lines_len, int max_height, int *out_height) {
+    int line_stride = VFS5011_LINE_SIZE, width = VFS5011_IMAGE_WIDTH;
+    int *offsets = calloc((size_t)(lines_len / 2), sizeof(int));
+    unsigned char *output = calloc((size_t)width * max_height, 1);
+    float y = 0.0f; int line_ind = 0;
+    for (int i = 0; i < lines_len - 1; i += 2) {
+        int bestmatch = i, bestdiff = 0;
+        int firstrow = i + 1;
+        int lastrow = (i + ASM_MAX_SEARCH_OFFSET < lines_len - 1) ? i + ASM_MAX_SEARCH_OFFSET : lines_len - 1;
+        for (int j = firstrow; j <= lastrow; j++) {
+            int diff = get_deviation2(lines + (size_t)i * line_stride, lines + (size_t)j * line_stride);
+            if (j == firstrow || diff < bestdiff) { bestdiff = diff; bestmatch = j; }
+        }
+        offsets[i / 2] = bestmatch - i;
+    }
+    int off_count = (lines_len / 2) - 1;
+    if (off_count > 0) median_filter(offsets, off_count, ASM_MEDIAN_FILTER_SIZE);
+    for (int i = 0; i < lines_len - 1; i++) {
+        int offset = offsets[i / 2];
+        unsigned char *row1 = lines + (size_t)i * line_stride;
+        unsigned char *row2 = lines + (size_t)(i + 1) * line_stride;
+        if (offset > 0) {
+            float ynext = y + (float)ASM_RESOLUTION / (float)offset;
+            while ((float)line_ind < ynext) {
+                if (line_ind > max_height - 1) goto out;
+                interpolate_lines(row1, y, row2, ynext, output + (size_t)line_ind * width, (float)line_ind, width);
+                line_ind++;
+            }
+            y = ynext;
+        }
+    }
+out:
+    free(offsets);
+    *out_height = line_ind;
+    return output;
+}
+
+/* Runs the full pipeline: init -> initiate-capture -> swipe capture ->
+ * alignment. Returns a malloc'd VFS5011_IMAGE_WIDTH x *out_height
+ * grayscale buffer, or NULL on failure. Caller must libusb_init/open
+ * the device and pass a claimed handle.
+ *
+ * Renamed from capture_fingerprint_image() (Aug 29) when this became
+ * one of two capture backends behind a dispatch wrapper of that name
+ * further below -- this function itself is unchanged, VFS5011-only,
+ * same as it always was. */
+static unsigned char *vfs5011_capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    if (run_sequence(handle, vfs5011_initialization,
+                      sizeof(vfs5011_initialization)/sizeof(vfs5011_initialization[0])) != 0) {
+        if (!g_capture_quiet) fprintf(stderr, "Init sequence failed\n");
+        return NULL;
+    }
+    if (run_sequence(handle, vfs5011_initiate_capture,
+                      sizeof(vfs5011_initiate_capture)/sizeof(vfs5011_initiate_capture[0])) != 0) {
+        if (!g_capture_quiet) fprintf(stderr, "Initiate-capture sequence failed\n");
+        return NULL;
+    }
+    if (!g_capture_quiet) printf("Swipe your finger across the sensor now...\n");
+
+    unsigned char *recorded = malloc((size_t)MAX_LINES_TOTAL * VFS5011_LINE_SIZE);
+    int lines_recorded = 0, lines_captured = 0, empty_lines = 0;
+    unsigned char *lastline = NULL;
+    unsigned char *chunk_buf = malloc((size_t)CAPTURE_LINES * VFS5011_LINE_SIZE);
+    int finished = 0, r;
+
+    while (!finished) {
+        int transferred = 0;
+        r = libusb_bulk_transfer(handle, VFS5011_IN_ENDPOINT_DATA, chunk_buf,
+                                  CAPTURE_LINES * VFS5011_LINE_SIZE, &transferred, 0);
+        if (r != 0 && r != LIBUSB_ERROR_TIMEOUT) {
+            if (!g_capture_quiet) fprintf(stderr, "Capture read failed: %s\n", libusb_error_name(r));
+            break;
+        }
+        if (transferred <= 0) continue;
+        int lines_in_chunk = transferred / VFS5011_LINE_SIZE;
+        for (int i = 0; i < lines_in_chunk; i++) {
+            unsigned char *line = chunk_buf + i * VFS5011_LINE_SIZE;
+            if (get_deviation(line + 8, VFS5011_IMAGE_WIDTH) < DEVIATION_THRESHOLD) {
+                if (lines_captured == 0) continue;
+                empty_lines++;
+            } else empty_lines = 0;
+            if (empty_lines >= STOP_CHECK_LINES) { finished = 1; break; }
+            lines_captured++;
+            if (lines_captured > MAX_LINES_READ) { finished = 1; break; }
+            if (lastline == NULL || get_diff_norm(lastline + 8, line + 8, VFS5011_IMAGE_WIDTH) >= DIFFERENCE_THRESHOLD) {
+                if (lines_recorded >= MAX_LINES_TOTAL) { finished = 1; break; }
+                lastline = recorded + (size_t)lines_recorded * VFS5011_LINE_SIZE;
+                memcpy(lastline, line, VFS5011_LINE_SIZE);
+                lines_recorded++;
+            }
+        }
+    }
+    free(chunk_buf);
+
+    if (lines_recorded < 2) {
+        if (!g_capture_quiet) fprintf(stderr, "Not enough lines captured (%d) — try a slower, fuller swipe.\n", lines_recorded);
+        free(recorded);
+        return NULL;
+    }
+
+    int height = 0;
+    unsigned char *aligned = assemble_lines(recorded, lines_recorded, MAX_LINES_TOTAL, &height);
+    free(recorded);
+
+    if (height <= 0) {
+        if (!g_capture_quiet) fprintf(stderr, "Alignment produced no output rows.\n");
+        free(aligned);
+        return NULL;
+    }
+    *out_height = height;
+    return aligned;
+}
+
+static libusb_context *g_ctx = NULL;
+static libusb_device_handle *g_handle = NULL;
+
+/* Set once by detect_supported_sensor() at startup (defined further
+ * below) and reused for the rest of the session -- everything
+ * downstream (status line, gates, Enroll/Verify/Deploy dispatch, and
+ * the capture dispatch immediately below) reads this instead of
+ * re-probing or hardcoding one sensor's VID:PID. NULL means nothing
+ * in supported_sensors.h was found on the bus. Moved up here (Aug
+ * 29) from its original spot right before detect_supported_sensor()
+ * so the capture dispatch helpers below -- which need to read it --
+ * can come before that function without a forward declaration. */
+static const hack_touchid_sensor_t *g_detected_sensor = NULL;
+
+/* True for the UPEK/AuthenTec TouchStrip identity (147e:2016). Used
+ * to pick the right capture backend and image width below, same
+ * shape as is_metallica_mis_sensor() further down for that family. */
+static int is_upek_sensor(const hack_touchid_sensor_t *s) {
+    return s && s->vid == UPEK_VID && s->pid == UPEK_PID;
+}
+
+/* Image width varies by sensor; height is always however many rows
+ * that sensor's capture produced this swipe. vfs5011_extract_template()
+ * (despite its name) is genuinely sensor-generic -- any width*height
+ * 8-bit grayscale buffer works, see hack-touchid-matcher.c's own
+ * header comment -- so no extraction changes are needed, only the
+ * width fed into it. */
+static int current_sensor_image_width(void) {
+    if (is_upek_sensor(g_detected_sensor)) return UPEK_IMG_WIDTH;
+    return VFS5011_IMAGE_WIDTH;
+}
+
+/* Capture dispatch (Aug 29) -- picks the real capture backend based
+ * on g_detected_sensor instead of the old hardcoded-to-VFS5011 call.
+ * UPEK's backend_available is still 0 in supported_sensors.h (no
+ * real-hardware pass yet -- see do_test_upek_capture() below, which
+ * is how that first pass is meant to happen), so this dispatch is
+ * reachable today only through that experimental menu item, not
+ * through Enroll/Verify. VFS5011 remains the default/fallback so
+ * existing behavior for that sensor is completely unchanged. */
+static unsigned char *capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    if (is_upek_sensor(g_detected_sensor)) {
+        return upek_capture_fingerprint_image(handle, out_height);
+    }
+    return vfs5011_capture_fingerprint_image(handle, out_height);
+}
+
+static int open_device(void) {
+    if (libusb_init(&g_ctx) < 0) return -1;
+    libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    /* Aug 29: opens whichever sensor was actually detected instead of
+     * a hardcoded VFS5011 VID:PID, so this works for UPEK too. Falls
+     * back to VFS5011's constants if somehow called with no sensor
+     * detected yet (shouldn't happen in practice -- detection always
+     * runs first at startup -- but keeps this safe rather than
+     * dereferencing a NULL g_detected_sensor). */
+    unsigned short vid = g_detected_sensor ? g_detected_sensor->vid : VFS5011_VID;
+    unsigned short pid = g_detected_sensor ? g_detected_sensor->pid : VFS5011_PID;
+
+    /* Right after a close_device() from a previous attempt, macOS
+     * sometimes hasn't finished settling the device back into a
+     * re-openable state yet — libusb_open_device_with_vid_pid can
+     * transiently return NULL even though the device is still
+     * physically present. Retry a few times with backoff before
+     * treating it as a genuine "device not found". */
+    for (int i = 0; i < 5; i++) {
+        g_handle = libusb_open_device_with_vid_pid(g_ctx, vid, pid);
+        if (g_handle) break;
+        usleep(300000); /* 300ms between open attempts */
+    }
+    if (!g_handle) { if (!g_capture_quiet) fprintf(stderr, "Device not found\n"); return -1; }
+
+    /* Tell libusb to forcibly detach whatever kernel driver has grabbed
+     * this interface (common on macOS for HID-ish USB devices) BEFORE we
+     * try to claim it. Without this, claim_interface loses the race
+     * against the OS almost every time, and we were papering over that
+     * with a full device reset on every single run — which was hurting
+     * capture quality (device never fully settled before the swipe). */
+    libusb_set_auto_detach_kernel_driver(g_handle, 1);
+
+    if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+
+    /* Before resorting to a full device reset (which is known to hurt
+     * capture quality on the next swipe), try a few quick re-claims —
+     * a lot of "Claim failed" cases on macOS are IOKit holding the
+     * interface exclusively for a brief moment right after enumeration
+     * or after a previous close, and that clears on its own within a
+     * few hundred ms without needing a disruptive reset. */
+    for (int i = 0; i < 3; i++) {
+        usleep(150000);
+        if (libusb_claim_interface(g_handle, 0) == 0) return 0;
+    }
+
+    /* Still failed after quick retries — now fall back to reset. This
+     * should be the rare case, not the common one. */
+    if (!g_capture_quiet) fprintf(stderr, "Claim failed, resetting device and retrying...\n");
+    int reset_r = libusb_reset_device(g_handle);
+    if (reset_r != 0) {
+        if (!g_capture_quiet) fprintf(stderr, "Device reset failed: %s\n", libusb_error_name(reset_r));
+    }
+    usleep(500000);
+
+    if (libusb_claim_interface(g_handle, 0) != 0) {
+        if (!g_capture_quiet) fprintf(stderr, "Claim failed again after reset\n");
+        return -1;
+    }
+    return 0;
+}
+static void close_device(void) {
+    if (g_handle) {
+        /* Proactively clear any halt on the endpoints we use before
+         * releasing, so the *next* run doesn't inherit a stalled pipe
+         * from this session (this is what caused the PIPE error /
+         * cascading Claim failed seen after a previous run). Aug 29:
+         * which endpoints to clear now depends on which sensor is
+         * actually open -- UPEK doesn't have a VFS5011-style bulk OUT
+         * endpoint, it has a bulk IN + a separate interrupt IN. */
+        if (is_upek_sensor(g_detected_sensor)) {
+            libusb_clear_halt(g_handle, UPEK_IN_ENDPOINT_BULK);
+            libusb_clear_halt(g_handle, UPEK_IN_ENDPOINT_INTR);
+        } else {
+            libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_CTRL);
+            libusb_clear_halt(g_handle, VFS5011_IN_ENDPOINT_DATA);
+            libusb_clear_halt(g_handle, VFS5011_OUT_ENDPOINT);
+        }
+        libusb_release_interface(g_handle, 0);
+        libusb_close(g_handle);
+    }
+    if (g_ctx) libusb_exit(g_ctx);
+}
+
+#define MATCH_THRESHOLD_MIN 20
+#define MATCH_THRESHOLD_MAX 40
+#define MATCH_THRESHOLD_DEFAULT 20
+/* Shared with vfs5011_daemon.c -- see that file's copy of this
+ * constant/function for the full explanation. g_match_threshold is
+ * loaded once at startup (see main()) and updated immediately by
+ * Settings [6] Adjust Match Threshold when the user changes it, so
+ * this session reflects a change right away without needing a
+ * relaunch. The daemon (a separate process) re-reads the same file
+ * once per swipe attempt, so it doesn't need restarting either. */
+#define MATCH_THRESHOLD_CONF_PATH "/usr/local/libexec/hack-touchid/match_threshold.conf"
+
+static int g_match_threshold = MATCH_THRESHOLD_DEFAULT;
+
+static int load_match_threshold(void) {
+    FILE *f = fopen(MATCH_THRESHOLD_CONF_PATH, "r");
+    if (!f) return MATCH_THRESHOLD_DEFAULT;
+    int val = MATCH_THRESHOLD_DEFAULT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < MATCH_THRESHOLD_MIN || val > MATCH_THRESHOLD_MAX) {
+        return MATCH_THRESHOLD_DEFAULT;
+    }
+    return val;
+}
+
+/* Built-in macOS system sound (no bundled asset -- keeps the repo
+ * asset-free for open sourcing). Same cue as vfs5011_daemon.c's
+ * background polling loop, so a rejected swipe sounds the same
+ * whether it happened via the lock screen or this interactive menu. */
+#define FAILURE_SOUND_PATH "/System/Library/Sounds/Basso.aiff"
+#define SUCCESS_SOUND_PATH "/System/Library/Sounds/Glass.aiff"
+
+/* Best-effort, backgrounded so it never blocks -- a missing sound
+ * file or no afplay shouldn't affect matching, just skip the cue. */
+static void play_failure_sound(void) {
+    int status = system("afplay " FAILURE_SOUND_PATH " > /dev/null 2>&1 &");
+    (void)status;
+}
+
+static void play_success_sound(void) {
+    int status = system("afplay " SUCCESS_SOUND_PATH " > /dev/null 2>&1 &");
+    (void)status;
+}
+#define ENROLL_SWIPES 5          /* how many good swipes make up one enrollment */
+#define MAX_STORED_TEMPLATES 8   /* array bound for save/load */
+#define MIN_MINUTIAE 20          /* below this, a capture is too weak to trust */
+#define MAX_SWIPE_RETRIES 3      /* re-prompt this many times before giving up on one swipe */
+#define MIN_SELF_CONSISTENCY 15  /* a new enroll swipe must score at least this well against
+                                    at least one already-saved swipe from this same session,
+                                    or it's treated as an outlier capture and re-prompted */
+
+/* Captures one swipe and extracts its template, re-prompting the user
+ * up to MAX_SWIPE_RETRIES times if the capture comes back too weak
+ * (too few minutiae) to be worth keeping.
+ *
+ * IMPORTANT: this opens and closes the device fresh for EVERY attempt.
+ * Testing showed the sensor's internal state doesn't tolerate two
+ * initiate-capture sequences back-to-back on the same open handle —
+ * the second swipe stalls both endpoints and never recovers, even
+ * with clear_halt. A full close+reopen between swipes is what was
+ * actually working in the separate-process-per-swipe testing, so we
+ * do that here automatically instead of relying on one long-lived
+ * handle across multiple swipes.
+ *
+ * quiet: when true, suppresses the per-attempt fprintf noise below --
+ * do_enroll() passes true and renders its own single-line status via
+ * draw_enroll_bar() instead; do_verify() passes false and keeps the
+ * original scrolling messages, since a single verify swipe doesn't
+ * have the same "5+ retries stacking up" clutter problem enroll does. */
+static int capture_quality_template(struct xyt_struct *out_tmpl, int quiet) {
+    g_capture_quiet = quiet;
+    for (int attempt = 1; attempt <= MAX_SWIPE_RETRIES; attempt++) {
+        if (open_device() != 0) {
+            close_device();
+            if (!quiet) fprintf(stderr, "Could not open device (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+
+        int height = 0;
+        unsigned char *image = capture_fingerprint_image(g_handle, &height);
+        if (!image) {
+            close_device();
+            if (!quiet) fprintf(stderr, "Capture failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+
+        memset(out_tmpl, 0, sizeof(*out_tmpl));
+        int r = vfs5011_extract_template(image, current_sensor_image_width(), height, out_tmpl);
+        free(image);
+        close_device();
+
+        if (r != 0) {
+            if (!quiet) fprintf(stderr, "Minutiae extraction failed (attempt %d/%d)\n", attempt, MAX_SWIPE_RETRIES);
+            usleep(500000);
+            continue;
+        }
+        if (out_tmpl->nrows < MIN_MINUTIAE) {
+            if (!quiet) fprintf(stderr, "Swipe too weak (%d minutiae, need %d) — swipe again, slower and fuller.\n",
+                    out_tmpl->nrows, MIN_MINUTIAE);
+            usleep(500000);
+            continue;
+        }
+        g_capture_quiet = 0;
+        return 0;
+    }
+    if (!quiet) fprintf(stderr, "Gave up after %d weak/failed swipes.\n", MAX_SWIPE_RETRIES);
+    g_capture_quiet = 0;
+    return -1;
+}
+
+/* ------------------------------------------------------------------ *
+ * VFS CLIENT — interactive menu shell
+ *
+ * Everything above this point is the untouched enroll/verify pipeline
+ * from vfs5011_enroll_verify.c. Below is the menu wrapper: it calls
+ * straight into capture_quality_template(), vfs5011_save_templates(),
+ * vfs5011_load_templates(), and vfs5011_match_score() — no duplicated
+ * capture logic, no reinvented constants.
+ * ------------------------------------------------------------------ */
+
+#define VFSC_RULE "--------------------------------------------------------------------"
+#define MOUNT_SCRIPT_NAME "hack-touchid-volume-mount.sh"
+#define UNMOUNT_SCRIPT_NAME "hack-touchid-volume-unmount.sh"
+#define SETUP_VOLUME_SCRIPT_NAME "hack-touchid-setup-volume.sh"
+#define GRANT_ACCESSIBILITY_SCRIPT_NAME "hack-touchid-grant-accessibility.sh"
+#define AGENT_LABEL "com.hackintosh.vfs5011agent"
+#define VOLUME_NAME "HackTouchIDStore"
+#define TCC_DB_PATH "/Library/Application Support/com.apple.TCC/TCC.db"
+
+/* ------------------------------------------------------------------ *
+ * Color / style. isatty()-gated so piping the client's output to a
+ * file or another program doesn't fill it with raw escape codes --
+ * colors are a terminal nicety, not something a log parser should
+ * ever have to deal with. g_color_enabled is decided once at startup
+ * and every VFSC_* macro below reads through it, so the rest of the
+ * file never needs its own isatty() checks. */
+static int g_color_enabled = 1;
+
+#define VFSC_RESET   (g_color_enabled ? "\033[0m"    : "")
+#define VFSC_BOLD    (g_color_enabled ? "\033[1m"    : "")
+#define VFSC_DIM     (g_color_enabled ? "\033[2m"    : "")
+#define VFSC_RED     (g_color_enabled ? "\033[31m"   : "")
+#define VFSC_GREEN   (g_color_enabled ? "\033[32m"   : "")
+#define VFSC_YELLOW  (g_color_enabled ? "\033[33m"   : "")
+#define VFSC_BLUE    (g_color_enabled ? "\033[34m"   : "")
+#define VFSC_MAGENTA (g_color_enabled ? "\033[35m"   : "")
+#define VFSC_CYAN    (g_color_enabled ? "\033[36m"   : "")
+#define VFSC_BCYAN   (g_color_enabled ? "\033[1;36m" : "")
+#define VFSC_BGREEN  (g_color_enabled ? "\033[1;32m" : "")
+#define VFSC_BRED    (g_color_enabled ? "\033[1;31m" : "")
+#define VFSC_BYELLOW (g_color_enabled ? "\033[1;33m" : "")
+
+/* Verbose boot log, default ON -- prints a scrolling kernel-log-style
+ * flavor line before/around the real startup checks, mirroring a
+ * Hackintosh verbose boot (-v). Purely decorative timestamp/prefix
+ * text wrapped around REAL check results -- it never replaces or
+ * hides the actual pass/fail output those checks already print,
+ * only adds atmosphere around it. Pass --q (or --quiet) to skip the
+ * flavor lines entirely and get the older, plain startup output.
+ * Intentionally kept non-denominational/purely-technical flavor
+ * text only (no "gods"/mythology framing) -- this ships to a mixed
+ * audience and there's no upside to picking that fight. */
+static bool g_verbose_boot = true;
+static double g_boot_fake_time = 0.000031;
+
+/* Set by argv parsing in main() when "--deploy-agent" is passed.
+ * Routes into run_deploy_agent_mode() (defined further down, right
+ * before main()) instead of the interactive menu -- a headless mode
+ * so the menu bar app's "reinstall the daemon" notification button
+ * can run `sudo hack-touchid --deploy-agent` from Terminal without
+ * ever landing in the interactive prompt. Survives the sudo re-exec
+ * below alongside --q/--quiet (see sudo_argv construction in main()). */
+static bool g_deploy_agent_mode = false;
+
+/* Set by argv parsing in main() when "--fpbootd-daemon" is passed.
+ * Routes into run_fpbootd_daemon() instead of the interactive menu --
+ * same headless-dispatch pattern as the other mode flags. Meant to be
+ * invoked by a LaunchDaemon plist, always as root from the start, so
+ * unlike the other modes it doesn't strictly need to survive the sudo
+ * re-exec below -- included anyway for consistency and so it can be
+ * tested by hand as a non-root user too. */
+static bool g_fpbootd_daemon_mode = false;
+
+/* Set by argv parsing in main() when "--diag-pid" is passed. Routes
+ * into run_diagnose_mode() instead of the interactive menu -- same
+ * headless-dispatch pattern as g_deploy_agent_mode above, just for
+ * generating a diagnostic report non-interactively (e.g. scripted,
+ * or from a support request where "run this exact command and paste
+ * the output" is easier than walking someone through the [D] menu
+ * item). Name's arbitrary -- Mohammad's pick, not short for anything
+ * -- but survives the sudo re-exec the same way the other flags do. */
+static bool g_diag_pid_mode = false;
+
+/* Set by argv parsing in main() when "--list-records" / "--wipe-records"
+ * is passed. Headless, same pattern as --diag-pid: lists (or wipes) the
+ * fingerprint records stored ON a Metallica MIS sensor itself, via
+ * metallica_mis_do_records(). The wipe is the manual fix for the 0x04c3
+ * "record save rejected" enroll failure (a print from an earlier enroll
+ * is still on the sensor). Survives the sudo re-exec like the other
+ * flags. */
+static bool g_records_list_mode = false;
+static bool g_records_wipe_mode = false;
+
+/* Set by argv parsing in main() when "--enroll-test" is passed. Headless,
+ * same pattern as --list-records: runs one native enrollment on a
+ * Metallica MIS sensor (calibrate, touch the sensor several times, save
+ * the print ON the sensor) via metallica_mis_do_enroll_test(). A tester
+ * tool for now: it saves nothing on the Mac and there is no verify yet.
+ * Survives the sudo re-exec like the other flags. */
+static bool g_enroll_test_mode = false;
+
+/* Set by argv parsing in main() when "--verify-test" is passed. Same
+ * headless pattern as --enroll-test: calibrate, one touch, and the sensor
+ * says whether it matches a print saved by --enroll-test
+ * (metallica_mis_do_verify_test()). Survives the sudo re-exec. */
+static bool g_verify_test_mode = false;
+
+/* Set by argv parsing in main() when "--check-updates" is passed.
+ * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
+ * above -- routes into run_check_updates_mode() instead of the
+ * interactive menu, before the verbose boot flood. It checks the
+ * branch's VERSION.txt and, when an update exists, shows the same
+ * [A] Show changelog / [Y] Download and install / [N] Cancel prompt as
+ * the boot-time check. [Y] installs it and tells the user to relaunch
+ * manually rather than auto-execv'ing into the new binary. Survives the
+ * sudo re-exec the same way the other flags do. */
+static bool g_check_updates_mode = false;
+
+/* Set by argv parsing in main() when "--menu-updater" is passed. The
+ * same check as --check-updates, but without the prompt: when an update
+ * exists it downloads, builds and installs it immediately. The menu bar
+ * app's "Update Client" notification button opens a terminal running
+ * this. Survives the sudo re-exec like the other flags. */
+static bool g_menu_updater_mode = false;
+
+/* Live update notifications: while the client sits at the main menu it
+ * re-checks the remote VERSION.txt every UPDATE_WATCH_INTERVAL_SEC and,
+ * if the branch got a newer version/build since launch, shows the same
+ * [A]/[Y]/[N] prompt as the boot-time updater. On by default; Settings
+ * [U] flips it and the choice is saved in LIVE_UPDATE_CONF_PATH. */
+#define LIVE_UPDATE_CONF_PATH "/usr/local/libexec/hack-touchid/live_update_check.conf"
+#define UPDATE_WATCH_INTERVAL_SEC 60
+static bool g_live_update_check = true;
+static time_t g_update_watch_next = 0;
+static char g_update_watch_seen_version[32] = "";
+static char g_update_watch_seen_build[32] = "";
+
+static bool load_live_update_setting(void) {
+    FILE *f = fopen(LIVE_UPDATE_CONF_PATH, "r");
+    if (!f) return true;
+    int v = 1;
+    if (fscanf(f, "%d", &v) != 1) v = 1;
+    fclose(f);
+    return v != 0;
+}
+
+/* Set by argv parsing in main() when "--post-update" is passed. Only
+ * ever passed by download_build_and_swap_update()'s own relaunch
+ * execv() below -- never something a user types. Triggers a one-time
+ * "update installed" confirmation line right before the normal
+ * "Welcome to HTID Client!" banner, then does nothing further; there's
+ * no persistent state to clear since this flag only exists for the
+ * single relaunched process's lifetime. */
+static bool g_post_update_mode = false;
+
+/* Set when the updater just removed the installed daemon (see
+ * remove_daemon_for_update()). Carried across the post-update relaunch
+ * with the internal "--daemon-removed" flag so the new process can repeat
+ * the "run [3] again" reminder next to the menu. */
+static bool g_daemon_removed_by_update = false;
+
+static void vfsc_boot_line(const char *fmt, ...) {
+    if (!g_verbose_boot) return;
+
+    /* Fake-but-monotonic timestamp, small pseudo-random-ish increment
+     * each call so it reads like a real dmesg/kernel log scroll
+     * rather than a suspiciously round counter. */
+    g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+
+    printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+/* Like vfsc_boot_line(), but for the REAL check functions' own
+ * routine status lines (e.g. "OpenCore v1.0.7 detected: continue.")
+ * rather than pure decorative flavor. Unlike vfsc_boot_line(), this
+ * ALWAYS prints -- quiet mode (--q) still needs to see real check
+ * results, it just drops the timestamp prefix and goes back to the
+ * older plain output exactly. Verbose mode gets the same timestamp
+ * treatment as the flavor lines around it, so the whole boot reads
+ * as one continuous log instead of some lines having timestamps and
+ * others not. */
+static void vfsc_status_line(const char *fmt, ...) {
+    if (g_verbose_boot) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+/* Same as vfsc_status_line(), but for the specific handful of call
+ * sites that represent a REAL check actually passing (OpenCore
+ * version accepted, sensor found, daemon version matched, init
+ * fully complete) -- appends a systemd/OpenRC-style colored
+ * "[ OK ]" tag instead of a bare newline. Deliberately NOT used for
+ * the "Checking X..." in-progress lines that precede these (those
+ * stay plain vfsc_status_line calls, same as before) or for the
+ * pure-flavor flood/boot lines above -- this tag means "a real gate
+ * just passed", not "here's some atmosphere". */
+static void vfsc_status_line_ok(const char *fmt, ...) {
+    if (g_verbose_boot) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s ", VFSC_DIM, g_boot_fake_time, VFSC_RESET);
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf(" %s[ %sOK%s ]%s\n", VFSC_DIM, VFSC_BGREEN, VFSC_DIM, VFSC_RESET);
+}
+
+/* Pure fun -- a real -v boot's whole appeal is watching a dense wall
+ * of kernel/IOKit log lines fly by for several seconds before the
+ * desktop shows up, and the handful of vfsc_boot_line() calls tied
+ * to real startup checks above don't produce that: there just aren't
+ * enough of them, and they print instantly with no delay between
+ * lines. This is a purely decorative flood of extra flavor lines
+ * with a small per-line delay, run once before the real checks
+ * start, so the client's own startup gets that same "-v" feeling.
+ * Every line here is 100% fake flavor text -- none of it is a real
+ * check result, and it never blocks or gates anything (same
+ * philosophy as vfsc_boot_line() above). Respects --q like the rest
+ * of verbose mode, since it's the same off switch.
+ *
+ * Runtime is intentionally randomized per-line rather than a single
+ * sleep(10) -- (rand() % (MAX-MIN)) + MIN microseconds between each
+ * of ~70 lines averages out to roughly 10 real seconds, but reads
+ * as an organic, uneven scroll the way a real kernel log does
+ * (bursts of fast lines, occasional pauses) rather than a
+ * metronome. */
+static void vfsc_verbose_boot_flood(void) {
+    if (!g_verbose_boot) return;
+
+    static const char *FLOOD_LINES[] = {
+        "AppleACPIPlatformExpert: ACPI tables validated",
+        "AppleACPICPU: Processor 0 (P0) initialized",
+        "IOPCIBridge: matching PCI device tree...",
+        "AppleIntelCPUPowerManagement: matched, PState table loaded",
+        "IOKit: Kext com.apple.driver.AppleUSBXHCIPCI, 1 personalities",
+        "IOKit: Kext com.apple.iokit.IOUSBHostFamily loaded",
+        "IOUSBHostDevice: enumerating downstream ports...",
+        "USBMSC Identifier (non-unique): match found",
+        "AppleUSBHub: hub @ 0x14200000, 4 ports powered",
+        "IOHIDFamily: matching HID device tree...",
+        "AppleHIDKeyboard: keyboard interface claimed",
+        "IOPlatformPluginFamily: [ACPI_SMC_PlatformPlugin] loaded",
+        "AppleSMC: SMC-KEYS successfully loaded (rev 1.3f0)",
+        "AppleGraphicsDevicePolicy: none found matching key IOGVA",
+        "IOGraphicsFamily: display framebuffer registered",
+        "AppleIntelFramebufferAzul: mobile platform, 1 display",
+        "AppleBacklightFixup: applying panel PWM patch",
+        "AppleALC: layout-id 0x0000000b applied",
+        "IOAudioFamily: HDA codec driver matched",
+        "AppleIntelPCHPowerManagement: matched",
+        "IOACPIPlatformDevice: SLPB button device registered",
+        "AppleRTC: RTC region 0x0-0x1000 mapped",
+        "AppleEFINVRAM: NVRAM region mapped, 0x10000 bytes",
+        "IODeviceTree: /options node populated",
+        "OpenCore: config.plist checksum verified",
+        "OpenCore: booter quirk RequestBootVarRouting active",
+        "kext cache: prelinkedkernel signature OK",
+        "AppleKeyStore: garbage collection pass complete",
+        "IOStorageFamily: probing block storage tree...",
+        "IOAHCIBlockStorageDevice: matched, 1 device",
+        "AppleAPFSContainer: scanning for containers...",
+        "apfs_module_start: com.apple.filesystems.apfs, 1677.100.5",
+        "AppleFSCompressionTypeZlib: kext loaded",
+        "AppleUSBMultitouchDriver: no matching personality (expected)",
+        "IOBluetoothHCIController: no controller present (expected)",
+        "AppleThunderboltNHI: no NHI hardware present (expected)",
+        "AppleUSBVHCIBCE: virtual hub attached",
+        "IOUSBHostFamily: composite driver matched interface 0",
+        "libusb-1.0: context refcount incremented",
+        "libusb-1.0: hotplug callback registered",
+        "IOKit: probing supported_sensors.h identity table...",
+        "IOUSBHostDevice: idVendor/idProduct match candidate found",
+        "IOUSBHostInterface: claiming interface 0, alt setting 0",
+        "IOUSBHostPipe: control endpoint 0x00 opened",
+        "IOUSBHostPipe: bulk endpoint 0x81 opened",
+        "IOUSBHostPipe: bulk endpoint 0x02 opened",
+        "AppleUSBHostBillboardDevice: no alternate mode present",
+        "kauth: credential resolved for calling process",
+        "sudo: session opened for user root",
+        "launchd: bootstrap namespace populated",
+        "launchd: querying com.hack-touchid.agent state...",
+        "diskutil: APFS container list refreshed",
+        "diskutil: HackTouchIDStore volume descriptor cached",
+        "SecurityAgent: TCC database opened read-only",
+        "AX: accessibility server handshake OK",
+        "CoreFoundation: preferences daemon reachable",
+        "IOReporting: power telemetry channel opened",
+        "AppleSMBIOS: DmiSystemFamily string decoded",
+        "AppleACPIPlatform: \\_SB.PCI0 device tree walk complete",
+        "OpenCore: SMBIOS spoof active, model string masked",
+        "IOKit: matching complete, 214 personalities probed",
+        "kextd: no orphaned kext bundles found",
+        "mds: metadata server idle",
+        "notifyd: watcher table primed",
+        "hack-touchid: capture pipeline symbols resolved",
+        "hack-touchid: NBIS mindtct/bozorth3 linked OK",
+        "hack-touchid: matcher self-test passed",
+    };
+    size_t n = sizeof(FLOOD_LINES) / sizeof(FLOOD_LINES[0]);
+
+    for (size_t i = 0; i < n; i++) {
+        g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+        printf("%s[%9.6f]%s %s\n", VFSC_DIM, g_boot_fake_time, VFSC_RESET, FLOOD_LINES[i]);
+        fflush(stdout);
+
+        /* 60ms-220ms per line, ~70 lines -> averages out to roughly
+         * 10 real seconds with an uneven, organic scroll speed. */
+        usleep(60000 + (useconds_t)(rand() % 160000));
+    }
+
+    /* One last line with the real sensor-table count, printed
+     * separately (not via the flood array above) so nothing here
+     * uses a non-literal printf format string. */
+    g_boot_fake_time += 0.000037 + (double)(rand() % 419) / 1000000.0;
+    printf("%s[%9.6f]%s hack-touchid: reading supported_sensors.h (%zu entries)\n",
+           VFSC_DIM, g_boot_fake_time, VFSC_RESET, (size_t)HACK_TOUCHID_SENSOR_COUNT);
+    fflush(stdout);
+    usleep(60000 + (useconds_t)(rand() % 160000));
+}
+
+/* Small printf-style helpers so success/error/warning lines look the
+ * same everywhere instead of every call site hand-rolling its own
+ * color codes. Errors go to stderr (matching the rest of the file's
+ * existing convention), success/info/warn go to stdout. */
+static void vfsc_ok(const char *fmt, ...) {
+    va_list ap;
+    printf("%s", VFSC_GREEN);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("%s", VFSC_RESET);
+}
+static void vfsc_err(const char *fmt, ...) {
+    va_list ap;
+    fprintf(stderr, "%s", VFSC_BRED);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "%s", VFSC_RESET);
+}
+static void vfsc_warn(const char *fmt, ...) {
+    va_list ap;
+    printf("%s", VFSC_YELLOW);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("%s", VFSC_RESET);
+}
+
+/* ASCII banner shown once at startup, above the interactive menu loop
+ * -- a stylized fingertip next to a "VFS CLIENT" wordmark. Kept to 70
+ * columns so it doesn't wrap in a standard 80-column terminal. The
+ * fingertip glyph is printed in one color, the wordmark in another,
+ * so it reads as a proper logo rather than a wall of one-color ASCII. */
+/* Disable color when stdout isn't a real terminal (piped/redirected)
+ * or when the caller opts out via the NO_COLOR convention
+ * (https://no-color.org/) -- both are standard courtesies for a CLI
+ * tool that other scripts or logs might capture output from. */
+static void init_color_support(void) {
+    if (!isatty(STDOUT_FILENO)) {
+        g_color_enabled = 0;
+        return;
+    }
+    const char *no_color = getenv("NO_COLOR");
+    if (no_color && no_color[0] != '\0') {
+        g_color_enabled = 0;
+    }
+}
+
+/* Directory this binary is running from, resolved once at startup, so
+ * the mount/unmount scripts (and VERSION.txt, below) can be found by
+ * absolute path regardless of the caller's current working directory.
+ * Moved up here (used to live right before the finger-list globals,
+ * much later in the file) specifically so print_banner() -- which
+ * needs g_exec_dir to find VERSION.txt for the build number -- can
+ * see it without a forward declaration. */
+static char g_exec_dir[PATH_MAX];
+
+/* Resolves g_exec_dir to the directory the ACTUAL running binary lives
+ * in, regardless of how it was invoked -- "./hack-touchid",
+ * "sudo ./hack-touchid", an absolute path, or (since ensure_path_symlink()
+ * below) a bare "hack-touchid" found via PATH.
+ *
+ * That last case is exactly why this can't just be realpath(argv0) like
+ * it used to be: when a command is found via PATH, argv[0] is typically
+ * still just the literal string the user typed ("hack-touchid", no
+ * slash) -- realpath() on a bare filename resolves it relative to the
+ * CURRENT directory, not a PATH search, so g_exec_dir would silently end
+ * up wherever the terminal happened to be sitting instead of the real
+ * install directory. That would break VERSION.txt reads, the mount/
+ * unmount scripts, everything downstream of g_exec_dir -- exactly the
+ * scenario ensure_path_symlink() exists to make possible in the first
+ * place, so this has to be fixed for that feature to actually work.
+ *
+ * _NSGetExecutablePath() (macOS-specific, <mach-o/dyld.h>) gives the
+ * path actually used to exec() this process, independent of argv[0] --
+ * still possibly containing a symlink (e.g. /usr/local/bin/hack-touchid
+ * itself, per ensure_path_symlink()), so it's run through realpath()
+ * too, which resolves that symlink down to where the real binary (and
+ * VERSION.txt, the mount scripts, etc. alongside it) actually live. */
+static void init_exec_dir(const char *argv0) {
+    char resolved[PATH_MAX];
+    bool got_path = false;
+
+    char exe_path[PATH_MAX];
+    uint32_t exe_path_size = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &exe_path_size) == 0 &&
+        realpath(exe_path, resolved) != NULL) {
+        got_path = true;
+    }
+
+    if (!got_path && realpath(argv0, resolved) != NULL) {
+        got_path = true;
+    }
+
+    if (!got_path) {
+        /* Last resort -- don't crash the whole menu over a cosmetic
+         * path lookup, but this won't correctly resolve a bare PATH
+         * invocation; only expected to matter if _NSGetExecutablePath()
+         * itself somehow fails, which the man page notes can happen if
+         * exe_path_size was too small (PATH_MAX should always be
+         * plenty) or on unusual/sandboxed environments. */
+        strncpy(resolved, argv0, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
+
+    char *dir = dirname(resolved); /* may alias into `resolved` — copy immediately */
+    strncpy(g_exec_dir, dir, sizeof(g_exec_dir) - 1);
+    g_exec_dir[sizeof(g_exec_dir) - 1] = '\0';
+}
+
+#define PATH_SYMLINK_TARGET "/usr/local/bin/hack-touchid"
+
+/* Ensures /usr/local/bin/hack-touchid symlinks to wherever THIS binary
+ * actually is (g_exec_dir), so "hack-touchid" works from any directory
+ * once it's on PATH, instead of needing "sudo ./hack-touchid" from
+ * inside the project folder every time.
+ *
+ * Called once per launch, right after init_exec_dir() -- cheap to just
+ * always check since it's a no-op the moment nothing needs to change.
+ * Deliberately silent when there's nothing to do, or when it's just
+ * silently refreshing a stale symlink after a rebuild/update-swap moved
+ * the real binary to a new path -- only prints the first time it
+ * actually creates the symlink, so the user knows it happened without
+ * a confirmation prompt getting in the way of every single launch.
+ * "sudo ./hack-touchid" from the project folder keeps working exactly
+ * the same regardless of any of this.
+ *
+ * Never touches /usr/local/bin/hack-touchid if it already exists as
+ * something OTHER than a symlink (a real file some other tool/install
+ * put there) -- that's not this client's to overwrite. Also never
+ * fails boot over this -- if /usr/local/bin doesn't exist or isn't
+ * writable for some unusual reason, this just silently does nothing. */
+static void ensure_path_symlink(void) {
+    char self_path[PATH_MAX];
+    snprintf(self_path, sizeof(self_path), "%s/hack-touchid", g_exec_dir);
+
+    struct stat lst;
+    bool target_exists = (lstat(PATH_SYMLINK_TARGET, &lst) == 0);
+
+    if (target_exists && !S_ISLNK(lst.st_mode)) {
+        return; /* something else lives there -- leave it alone */
+    }
+
+    if (target_exists) {
+        char existing[PATH_MAX];
+        ssize_t len = readlink(PATH_SYMLINK_TARGET, existing, sizeof(existing) - 1);
+        if (len >= 0) {
+            existing[len] = '\0';
+            if (strcmp(existing, self_path) == 0) return; /* already correct */
+        }
+        unlink(PATH_SYMLINK_TARGET); /* stale -- was pointing at an old build path */
+    }
+
+    if (symlink(self_path, PATH_SYMLINK_TARGET) == 0) {
+        vfsc_ok("Linked hack-touchid into your PATH (%s) -- you can now just run "
+                "\"hack-touchid\" from anywhere.\n", PATH_SYMLINK_TARGET);
+    }
+}
+
+#define VERSION_FILE_NAME "VERSION.txt"
+
+typedef struct {
+    char version[32];  /* e.g. "1.1.0" */
+    char build[32];    /* e.g. "26B126" -- YY + revision letter + build number */
+    char branch[64];   /* e.g. "active-development" or "main" */
+    bool critical;
+} client_version_info_t;
+
+/* Parses "vX.Y.Z" or "X.Y.Z" into a single comparable int
+ * (MAJOR*10000 + MINOR*100 + PATCH). Returns -1 if it doesn't look
+ * like a version string at all (couldn't parse a major number) --
+ * callers must treat -1 as "not a real version" rather than a valid
+ * (if unlikely) code, so a malformed value can't accidentally sort
+ * higher/lower than a real one. */
+static int parse_version_code(const char *v) {
+    if (v == NULL) return -1;
+    if (*v == 'v' || *v == 'V') v++;
+
+    int major = 0, minor = 0, patch = 0;
+    int n = sscanf(v, "%d.%d.%d", &major, &minor, &patch);
+    if (n < 1) return -1;
+
+    return major * 10000 + minor * 100 + patch;
+}
+
+/* Parses a build string like "26B126" (2-digit year, one revision
+ * letter, then a build number) into a single comparable long. Used
+ * only as a tiebreaker when two builds share the same VERSION= --
+ * e.g. a same-day hotfix, or the beta cycle this was built for where
+ * VERSION= doesn't move but BUILD= does on every push. Returns -1 if
+ * it doesn't match that shape at all, same "don't compare against
+ * garbage" rule as parse_version_code(). */
+static long parse_build_code(const char *b) {
+    if (b == NULL) return -1;
+    size_t len = strlen(b);
+    if (len < 4) return -1;
+    if (!isdigit((unsigned char)b[0]) || !isdigit((unsigned char)b[1])) return -1;
+    if (!isupper((unsigned char)b[2])) return -1;
+    for (size_t i = 3; i < len; i++) {
+        if (!isdigit((unsigned char)b[i])) return -1;
+    }
+
+    int year = (b[0] - '0') * 10 + (b[1] - '0');
+    int letter = b[2] - 'A';
+    long num = atol(b + 3);
+
+    return (long)year * 1000000L + (long)letter * 10000L + num;
+}
+
+/* Parses VERSION.txt's simple KEY=value line format (VERSION=, BUILD=,
+ * BRANCH=, CRITICAL=) out of an in-memory buffer -- used for both the
+ * local file and the curl'd remote copy, since they're the same
+ * format. Tolerates trailing \r (GitHub serves raw files with plain
+ * \n, but this costs nothing to handle in case that ever changes).
+ * Returns false only if VERSION= itself was never found -- BUILD=/
+ * BRANCH=/CRITICAL= missing just leaves those fields at their zeroed
+ * defaults rather than failing the whole parse. */
+static bool parse_version_file(const char *buf, client_version_info_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    bool got_version = false;
+    const char *p = buf;
+
+    while (*p != '\0') {
+        char line[128];
+        size_t i = 0;
+        while (*p != '\0' && *p != '\n' && i < sizeof(line) - 1) {
+            line[i++] = *p++;
+        }
+        line[i] = '\0';
+        if (*p == '\n') p++;
+        if (i > 0 && line[i - 1] == '\r') line[i - 1] = '\0';
+
+        if (strncmp(line, "VERSION=", 8) == 0) {
+            snprintf(out->version, sizeof(out->version), "%s", line + 8);
+            got_version = true;
+        } else if (strncmp(line, "BUILD=", 6) == 0) {
+            snprintf(out->build, sizeof(out->build), "%s", line + 6);
+        } else if (strncmp(line, "BRANCH=", 7) == 0) {
+            snprintf(out->branch, sizeof(out->branch), "%s", line + 7);
+        } else if (strncmp(line, "CRITICAL=", 9) == 0) {
+            out->critical = (strncmp(line + 9, "true", 4) == 0);
+        }
+    }
+
+    return got_version;
+}
+
+/* Reads VERSION.txt from the same directory hack-touchid itself is
+ * running from (g_exec_dir), NOT from GitHub -- this is "what version
+ * am I right now," the baseline everything else compares against.
+ * Missing file (e.g. a build from before this feature existed) just
+ * returns false -- not an error, this whole feature quietly opts
+ * itself out rather than nagging about something it can't check. */
+static bool read_local_version_file(client_version_info_t *out) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    buf[n] = '\0';
+    fclose(fp);
+
+    return parse_version_file(buf, out);
+}
+
+/* Writes VERSION.txt back out in the same KEY=value format
+ * parse_version_file() reads, next to the binary (g_exec_dir) same as
+ * read_local_version_file() reads from. Used by the Settings [7] beta
+ * toggle below to persist a BRANCH= change -- always writes every
+ * field (not just the one that changed), so the caller is responsible
+ * for filling in the rest of *info from the existing cached copy
+ * first rather than passing a half-empty struct. */
+static bool write_local_version_file(const client_version_info_t *info) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", g_exec_dir, VERSION_FILE_NAME);
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) return false;
+
+    fprintf(fp, "VERSION=%s\nBUILD=%s\nBRANCH=%s\nCRITICAL=%s\n",
+            info->version, info->build, info->branch, info->critical ? "true" : "false");
+    fclose(fp);
+    return true;
+}
+
+/* Loaded once, lazily, on the first call to print_banner() (the
+ * earliest point in every boot path where g_exec_dir is already
+ * populated) -- both print_banner() itself (build number in the
+ * ASCII banner) and check_for_client_update() (the whole update
+ * check) read from this cache instead of hitting VERSION.txt on disk
+ * twice per run. */
+static client_version_info_t g_local_version_info;
+static bool g_local_version_loaded = false;
+
+static void print_banner(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+
+    printf("%s", VFSC_CYAN);
+    printf("        ,ad8888ba,             %s█   █ █████ █████ ████ %s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("      ,8P'  \"Y8\"  `Y8,         %s█   █   █     █   █   █%s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("     ,8'   .-\"\"-.   `8,        %s█████   █     █   █   █%s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("     8)   /  ()  \\   (8        %s█   █   █     █   █   █%s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("     8   |  ()()  |   8        %s█   █   █   █████ ████ %s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("     8)   \\  ()  /   (8          %sCLIENT%s\n", VFSC_BCYAN, VFSC_CYAN);
+    printf("      `8,   `-..-'   ,8'\n");
+    printf("       `8a,        ,a8'   %sMulti-Sensor Fingerprint Auth%s\n", VFSC_DIM, VFSC_CYAN);
+    if (g_local_version_loaded && g_local_version_info.build[0] != '\0') {
+        printf("         `\"Y8888P\"'%s                              %sv%s (%s)%s\n",
+               VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, g_local_version_info.build, VFSC_RESET);
+    } else {
+        printf("         `\"Y8888P\"'%s                              %sv%s%s\n",
+               VFSC_RESET, VFSC_DIM, VFS5011_PROJECT_VERSION, VFSC_RESET);
+    }
+}
+
+/* Clears the terminal and homes the cursor, then redraws the banner --
+ * used when returning to the main menu after an action completes, so
+ * the screen doesn't accumulate every enroll/verify/settings output
+ * from the whole session. Gated on g_color_enabled (same isatty()
+ * check used for color) since clearing a piped/redirected output
+ * stream makes no sense and would just inject garbage escape codes
+ * into a log file. */
+static void clear_screen_and_redraw_banner(void) {
+    if (!g_color_enabled) return;
+    printf("\033[2J\033[H");
+    fflush(stdout);
+    print_banner();
+}
+
+/* Multi-finger storage: each enrolled finger gets its own file of
+ * ENROLL_SWIPES templates, named "<label>.dat", inside a "fingers/"
+ * subdirectory on the encrypted volume. This replaces the old single
+ * template.dat (which only ever supported one finger — the multiple
+ * templates in that file were multiple swipes of that ONE finger, for
+ * robustness, not multiple distinct fingers). */
+#define FINGERS_DIRNAME "fingers"
+#define MAX_FINGER_LABEL 40
+#define MAX_ENROLLED_FINGERS 10
+#define PASSWORD_FILENAME "password.txt" /* must match hack-touchid-store-password.sh / vfs5011_daemon.c */
+
+/* FPOV (Fingerprint Operating Verification) -- opt-in check for
+ * dual/triple-boot setups sharing one HackTouchIDStore volume across
+ * more than one macOS install. FPOV-base.txt lives ON the shared
+ * store (the version every install must match); one FPOV-OS<N>.txt
+ * per install lives LOCALLY at FPOV_SUPPORT_DIR on that install's own
+ * boot volume, written during setup. A single-boot install never gets
+ * FPOV_SUPPORT_DIR created at all, so the startup check below finds
+ * nothing and silently does nothing -- this is opt-in, not a default
+ * gate on everyone.
+ *
+ * FPOV_SCHEMA_VERSION is deliberately NOT the same thing as
+ * VFS5011_PROJECT_VERSION/VERSION.txt's BUILD -- that changes on
+ * basically every push, which would make FPOV nag on every single
+ * update even when nothing about the store's actual on-disk format
+ * changed. Bump this by hand only when something FPOV genuinely needs
+ * to care about changes (template/password format, directory layout,
+ * etc.) -- same idea as an iBoot version not moving on every OS
+ * update. */
+#define FPOV_SUPPORT_DIR "/Library/Application Support/HTID-Support Backend"
+#define FPOV_BASE_FILENAME "FPOV-base.txt"
+#define FPOV_SCHEMA_VERSION "26B216"
+
+/* Reads one line of input with terminal echo turned off (like a
+ * normal sudo password prompt), stripping the trailing newline.
+ * Restores the terminal's original echo setting before returning,
+ * including on Ctrl+D/EOF. Returns 0 on success, -1 on EOF/error. */
+static int read_hidden_line(char *buf, size_t buf_size) {
+    struct termios old_term, new_term;
+    int have_term = (tcgetattr(STDIN_FILENO, &old_term) == 0);
+    if (have_term) {
+        new_term = old_term;
+        new_term.c_lflag &= ~ECHO;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term);
+    }
+
+    int ok = (fgets(buf, buf_size, stdin) != NULL);
+
+    if (have_term) tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+    printf("\n");
+
+    if (!ok) return -1;
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
+    return 0;
+}
+
+/* Prompts for and stores the password the daemon auto-types on a
+ * fingerprint match, directly onto the already-mounted HackTouchIDStore
+ * volume at mount_path — same file, same permissions (root:wheel,
+ * 600) as hack-touchid-store-password.sh, just inline in the client so
+ * Deploy can offer this as part of the same flow instead of requiring
+ * a separate manual script run. Does NOT mount/unmount the volume
+ * itself — the caller is expected to already have it mounted, since
+ * both call sites (Deploy, Settings) need to check for an existing
+ * password.txt first anyway. Returns 0 if a password ends up stored
+ * (either just now, or already present when only_if_missing is set),
+ * -1 on cancel/mismatch/error. */
+static int prompt_and_store_password(const char *mount_path, int only_if_missing) {
+    char password_path[PATH_MAX];
+    snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+
+    if (only_if_missing && access(password_path, F_OK) == 0) {
+        return 0; /* already set — nothing to do */
+    }
+
+    printf("No stored password found — this is what the daemon types on a successful\n");
+    printf("fingerprint match, so it needs to be your actual macOS login password.\n\n");
+
+    char password[256], confirm[256];
+    printf("Password: ");
+    fflush(stdout);
+    if (read_hidden_line(password, sizeof(password)) != 0) {
+        printf("Cancelled.\n\n");
+        return -1;
+    }
+    printf("Confirm:  ");
+    fflush(stdout);
+    if (read_hidden_line(confirm, sizeof(confirm)) != 0) {
+        memset(password, 0, sizeof(password));
+        printf("Cancelled.\n\n");
+        return -1;
+    }
+
+    if (strcmp(password, confirm) != 0) {
+        memset(password, 0, sizeof(password));
+        memset(confirm, 0, sizeof(confirm));
+        vfsc_err("Passwords did not match — nothing was saved.\n\n");
+        return -1;
+    }
+
+    FILE *f = fopen(password_path, "w");
+    if (!f) {
+        memset(password, 0, sizeof(password));
+        memset(confirm, 0, sizeof(confirm));
+        vfsc_err("Could not write password file: %s\n\n", strerror(errno));
+        return -1;
+    }
+    fputs(password, f); /* no trailing newline — it would get typed too */
+    fclose(f);
+    chmod(password_path, 0600); /* chown to root:wheel happens for free — we're already root here */
+
+    memset(password, 0, sizeof(password));
+    memset(confirm, 0, sizeof(confirm));
+    printf("Password stored.\n\n");
+    return 0;
+}
+
+/* Cached enrolled-finger list for the status line and for Enroll's
+ * duplicate-name / capacity checks. NOT re-checked on every menu
+ * redraw on purpose — the templates volume is unmounted at rest, and
+ * mounting it just to paint a status line would mean mounting
+ * constantly while someone sits at the menu, defeating the point of
+ * per-operation mounting. Enroll/Verify/Manage refresh this for free
+ * as a side effect since they already have the volume mounted anyway.
+ * -1 = not checked yet this session. */
+static int g_finger_count = -1;
+static char g_finger_labels[MAX_ENROLLED_FINGERS][MAX_FINGER_LABEL + 1];
+
+/* Trims whitespace/newline off a raw line of input and rejects
+ * anything that would be unsafe or ambiguous as a filename. Path
+ * separators are mapped to underscores rather than rejected outright,
+ * so a fat-fingered "Right/Index" doesn't just fail with no
+ * explanation. Returns 0 on success, -1 if the result would be empty. */
+static int sanitize_finger_label(const char *input, char *out, size_t out_size) {
+    while (*input == ' ' || *input == '\t') input++;
+    size_t len = strlen(input);
+    while (len > 0 && (input[len - 1] == ' '  || input[len - 1] == '\t' ||
+                        input[len - 1] == '\n' || input[len - 1] == '\r')) {
+        len--;
+    }
+    if (len == 0) return -1;
+    if (len > out_size - 1) len = out_size - 1;
+    for (size_t i = 0; i < len; i++) {
+        char c = input[i];
+        if (c == '/' || c == '\\') c = '_';
+        out[i] = c;
+    }
+    out[len] = '\0';
+    return 0;
+}
+
+/* Lists every enrolled finger by scanning fingers_dir for "*.dat"
+ * files and stripping the extension to recover the label. A missing
+ * directory (nothing enrolled yet) is reported as zero fingers, not
+ * an error — callers shouldn't need to special-case first-run. */
+static int list_enrolled_fingers(const char *fingers_dir,
+                                  char labels[][MAX_FINGER_LABEL + 1],
+                                  int max_count) {
+    DIR *d = opendir(fingers_dir);
+    if (!d) return 0;
+
+    struct dirent *entry;
+    int count = 0;
+    while (count < max_count && (entry = readdir(d)) != NULL) {
+        size_t len = strlen(entry->d_name);
+        if (len > 4 && strcmp(entry->d_name + len - 4, ".dat") == 0) {
+            size_t label_len = len - 4;
+            if (label_len > MAX_FINGER_LABEL) label_len = MAX_FINGER_LABEL;
+            memcpy(labels[count], entry->d_name, label_len);
+            labels[count][label_len] = '\0';
+            count++;
+        }
+    }
+    closedir(d);
+    return count;
+}
+
+/* Forward declaration -- defined further below, but needed here so
+ * confirm_shared_store_if_needed() can check it before mounting. */
+static int is_volume_configured(void);
+
+/* Counts distinct macOS installs (System-role volumes) inside the same
+ * APFS container as the HackTouchIDStore volume. A store found by
+ * name (see is_volume_configured()'s comment on universality) may be
+ * sitting in a container that hosts more than one bootable macOS --
+ * a real dual/multi-boot setup, not just "this install's own
+ * volume". Returns 0 if the container/count can't be determined
+ * (treated as "can't tell, don't gate on it"), otherwise the number
+ * of System volumes found (1 for a normal single-OS setup). */
+static int count_macos_installs_sharing_store(void) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "diskutil info \"%s\" 2>/dev/null", VOLUME_NAME);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    char container_id[64] = {0};
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "APFS Container:");
+        if (p) {
+            p += strlen("APFS Container:");
+            while (*p == ' ') p++;
+            sscanf(p, "%63s", container_id);
+            break;
+        }
+    }
+    pclose(fp);
+    if (container_id[0] == '\0') return 0;
+
+    snprintf(cmd, sizeof(cmd), "diskutil apfs list \"%s\" 2>/dev/null", container_id);
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    int system_count = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "Role:") && strstr(line, "System")) system_count++;
+    }
+    pclose(fp);
+    return system_count;
+}
+
+/* Counts every APFS volume named exactly VOLUME_NAME, system-wide
+ * (unlike count_macos_installs_sharing_store(), not scoped to one
+ * container -- a stray duplicate could be in a different container
+ * entirely). Normally 1. 0 or a popen failure both read as "can't
+ * tell" here (mirrors count_macos_installs_sharing_store()'s
+ * convention), so callers should only act on a definite >1. */
+static int count_store_volume_duplicates(void) {
+    FILE *fp = popen("diskutil apfs list 2>/dev/null", "r");
+    if (!fp) return 0;
+    char line[512];
+    int count = 0;
+    size_t name_len = strlen(VOLUME_NAME);
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "Name:");
+        if (!p) continue;
+        p += strlen("Name:");
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, VOLUME_NAME, name_len) == 0) {
+            char next = p[name_len];
+            if (next == '\0' || next == '\n' || next == '\r' || next == ' ') count++;
+        }
+    }
+    pclose(fp);
+    return count;
+}
+
+/* One-time-per-run gate in front of mounting an existing store: if
+ * its container turns out to host more than one macOS install, every
+ * one of them reads/writes the SAME templates and auto-type
+ * password, which is worth an explicit yes rather than silently
+ * sharing fingerprints across OSes. Cached via g_shared_store_prompted
+ * so a session doing several enroll/verify/deploy calls only asks
+ * once. Returns 1 if it's fine to proceed (nothing to share yet, a
+ * single-OS container, or the user allowed it), 0 if declined. */
+static int g_shared_store_prompted = 0;
+static int confirm_shared_store_if_needed(void) {
+    if (g_shared_store_prompted) return 1;
+    g_shared_store_prompted = 1;
+
+    if (!is_volume_configured()) return 1; /* nothing exists to share yet */
+
+    int dupes = count_store_volume_duplicates();
+    if (dupes > 1) {
+        vfsc_warn("%d volumes named \"%s\" found -- the mount script will pick the\n",
+                  dupes, VOLUME_NAME);
+        printf("one that actually has data, but you should clean up the rest\n");
+        printf("(diskutil apfs deleteVolume) once you've confirmed which is stale.\n\n");
+    }
+
+    int os_count = count_macos_installs_sharing_store();
+    if (os_count <= 1) return 1;
+
+    vfsc_warn("%d operating systems detected sharing this container.\n", os_count);
+    printf("Using shared volume \"%s\" -- all fingerprint templates and the\n", VOLUME_NAME);
+    printf("auto-type password are visible to every install that mounts it.\n");
+    printf("Allow this action? [y/N]: ");
+    fflush(stdout);
+    char line[8];
+    if (!fgets(line, sizeof(line), stdin) || (line[0] != 'y' && line[0] != 'Y')) {
+        printf("Cancelled.\n\n");
+        return 0;
+    }
+    printf("\n");
+    return 1;
+}
+
+/* Mounts the encrypted template volume via hack-touchid-volume-mount.sh,
+ * capturing the mount point path it prints on success. The script's
+ * own diagnostic lines are captured but only surfaced if the mount
+ * actually fails — on the success path they're just noise ahead of
+ * every enroll/verify/deploy operation. Returns 0 and fills out_path
+ * on success. */
+static int mount_template_volume(char *out_path, size_t out_path_size) {
+    if (!confirm_shared_store_if_needed()) return -1;
+
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\"", g_exec_dir, MOUNT_SCRIPT_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_err("Failed to run volume mount script: %s\n", strerror(errno));
+        return -1;
+    }
+
+    char line[PATH_MAX];
+    char last_line[PATH_MAX] = {0};
+    char captured[2048] = {0};
+    while (fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        if (len > 0) {
+            strncpy(last_line, line, sizeof(last_line) - 1);
+            last_line[sizeof(last_line) - 1] = '\0';
+            strncat(captured, line, sizeof(captured) - strlen(captured) - 2);
+            strncat(captured, "\n", sizeof(captured) - strlen(captured) - 1);
+        }
+    }
+    int status = pclose(fp);
+
+    /* The script's last printed line is the mount path on success — a
+     * plain absolute path starting with '/'. Anything else (empty, an
+     * error message, non-zero exit) means mounting failed. */
+    if (status != 0 || last_line[0] != '/') {
+        vfsc_err("Volume mount failed (exit status %d):\n%s\n", status, captured);
+        return -1;
+    }
+    strncpy(out_path, last_line, out_path_size - 1);
+    out_path[out_path_size - 1] = '\0';
+    return 0;
+}
+
+static void unmount_template_volume(void) {
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\" > /dev/null 2>&1", g_exec_dir, UNMOUNT_SCRIPT_NAME);
+    int status = system(cmd);
+    if (status != 0) {
+        vfsc_err(
+                "Warning: volume unmount script exited with status %d — the volume may "
+                "still be mounted. Run hack-touchid-volume-unmount.sh manually to check.\n",
+                status);
+    }
+}
+
+/* Mounts the volume just long enough to (re)list enrolled fingers into
+ * the g_finger_* cache, then unmounts. Used whenever the cache is
+ * stale (-1) and something needs an authoritative answer — e.g. Enroll
+ * checking for a name collision, or Manage Fingerprints. */
+static int refresh_finger_cache(void) {
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        return -1;
+    }
+    char fingers_dir[PATH_MAX];
+    snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
+    g_finger_count = list_enrolled_fingers(fingers_dir, g_finger_labels, MAX_ENROLLED_FINGERS);
+    unmount_template_volume();
+    return g_finger_count;
+}
+
+/* Scans supported_sensors.h against whatever's actually on the USB
+ * bus and returns the first match (or NULL). Deliberately does NOT
+ * claim the interface -- this is a presence check only, so it doesn't
+ * fight with (or get blocked by) whatever a real enroll/verify call
+ * is doing elsewhere. Safe to call whether or not we're root.
+ *
+ * First-match-wins: if a machine somehow has two different supported
+ * sensors attached, whichever is earlier in the table wins for this
+ * session. Good enough for v1.1 -- true multi-sensor-on-one-host
+ * support isn't a real scenario worth designing around yet. */
+static const hack_touchid_sensor_t *detect_supported_sensor(void) {
+    libusb_context *ctx = NULL;
+    if (libusb_init(&ctx) < 0) return NULL;
+    libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(ctx, &list);
+    const hack_touchid_sensor_t *match = NULL;
+    for (ssize_t i = 0; i < count && !match; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        for (size_t s = 0; s < HACK_TOUCHID_SENSOR_COUNT; s++) {
+            if (desc.idVendor == HACK_TOUCHID_SENSORS[s].vid &&
+                desc.idProduct == HACK_TOUCHID_SENSORS[s].pid) {
+                match = &HACK_TOUCHID_SENSORS[s];
+                break;
+            }
+        }
+    }
+    if (list) libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return match;
+}
+
+/* Builds the install path for whichever daemon owns g_detected_sensor,
+ * e.g. /usr/local/libexec/hack-touchid/vfs5011_daemon. Callers must
+ * have already confirmed g_detected_sensor is non-NULL. */
+static void get_daemon_install_path(char *out, size_t out_size) {
+    snprintf(out, out_size, "/usr/local/libexec/hack-touchid/%s",
+             g_detected_sensor->daemon_binary_name);
+}
+
+/* Legacy helper kept for the handful of callers that only care
+ * "is *something* supported currently plugged in" without needing to
+ * know which one -- thin wrapper over the real detector. */
+static int probe_sensor_present(void) {
+    return detect_supported_sensor() != NULL;
+}
+
+/* Deploy state is tracked by asking launchd directly whether the
+ * agent is loaded AND actually running (not just registered) in the
+ * calling user's own GUI session -- gui/<uid>, never gui/0, since
+ * the hack-touchid client re-execs itself under sudo at startup and getuid() at
+ * that point would report the invoking user, but geteuid() reports
+ * 0. Reads the true console user via $SUDO_USER (set by sudo), same
+ * as hack-touchid-agent-install.sh does, so this check targets the same
+ * domain the installer bootstraps into. */
+static int is_auth_service_deployed(void) {
+    const char *sudo_user = getenv("SUDO_USER");
+    char cmd[512];
+    if (sudo_user && strcmp(sudo_user, "root") != 0) {
+        snprintf(cmd, sizeof(cmd),
+            "uid=$(id -u \"%s\" 2>/dev/null); "
+            "[ -n \"$uid\" ] && launchctl print \"gui/$uid/" AGENT_LABEL "\" 2>/dev/null "
+            "| grep -q 'state = running'",
+            sudo_user);
+    } else {
+        snprintf(cmd, sizeof(cmd),
+            "launchctl print \"gui/%d/" AGENT_LABEL "\" 2>/dev/null | grep -q 'state = running'",
+            (int)getuid());
+    }
+    /* system() returns the child's exit status; grep -q exits 0 on a
+     * match, non-zero if not found or if the service isn't loaded at
+     * all -- either case correctly means "not deployed" here. */
+    return system(cmd) == 0;
+}
+
+/* Does the encrypted HackTouchIDStore volume exist at all yet (regardless of
+ * whether it's currently mounted)? A quick, non-mounting check --
+ * `diskutil info` on a volume name that doesn't exist exits non-zero,
+ * which is all this needs to know for the status line and for
+ * deciding whether Deploy/Settings should offer first-time setup. */
+static int is_volume_configured(void) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "diskutil info \"%s\" >/dev/null 2>&1", VOLUME_NAME);
+    return system(cmd) == 0;
+}
+
+/* Checks the system TCC database directly for an Allowed
+ * (auth_value=2) Accessibility grant tied to the daemon's installed
+ * path -- the same table hack-touchid-grant-accessibility.sh writes to.
+ * Returns 0 if the daemon isn't installed yet, the TCC db is missing,
+ * or no matching row exists. */
+static int is_accessibility_granted(void) {
+    if (access(TCC_DB_PATH, F_OK) != 0) return 0;
+    if (!g_detected_sensor) return 0;
+    char daemon_path[PATH_MAX];
+    get_daemon_install_path(daemon_path, sizeof(daemon_path));
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "sqlite3 \"%s\" \"SELECT auth_value FROM access WHERE "
+        "service='kTCCServiceAccessibility' AND client='%s';\" 2>/dev/null",
+        TCC_DB_PATH, daemon_path);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char line[16] = {0};
+    int got = fgets(line, sizeof(line), fp) != NULL;
+    pclose(fp);
+    if (!got) return 0;
+    return atoi(line) == 2;
+}
+
+/* Forward declaration -- defined further below, but needed here so
+ * print_menu() can decide whether to show [P] Pair Sensor. */
+static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s);
+
+/* Forward declaration -- real definition lives with the rest of the
+ * FPOV helpers further below (Settings [9] section), but the status
+ * line below needs it too. */
+static bool find_local_fpov_file(char *out_path, size_t out_path_size,
+                                  char *out_label, size_t out_label_size);
+
+/* Fpbootd (pre-login daemon) install path -- a separate LaunchDaemon
+ * binary from the per-sensor daemon above, installed by the
+ * standalone fpbootd-install.sh (not part of this client's own
+ * Deploy [3] yet -- see the [FP] stub menu item). Its own macro since
+ * it isn't tied to g_detected_sensor->daemon_binary_name the way
+ * get_daemon_install_path() is. */
+#define FPBOOTD_INSTALL_PATH "/usr/local/libexec/hack-touchid/hack-touchid-fpbootd"
+
+/* Best-effort status string for the Fpbootd row in print_menu()'s
+ * status section. Deliberately soft, read-only, never gates startup
+ * the way check_daemon_version_gate() does for the per-sensor daemon
+ * -- Fpbootd isn't wired into this client's version-gate flow yet. */
+static void get_fpbootd_status_line(char *out, size_t out_size) {
+    if (access(FPBOOTD_INSTALL_PATH, F_OK) != 0) {
+        snprintf(out, out_size, "Not Installed");
+        return;
+    }
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", FPBOOTD_INSTALL_PATH);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        char version[64] = {0};
+        bool got = fgets(version, sizeof(version), fp) != NULL;
+        pclose(fp);
+        if (got) {
+            size_t len = strlen(version);
+            while (len > 0 && (version[len-1] == '\n' || version[len-1] == '\r')) version[--len] = '\0';
+            if (len > 0) {
+                snprintf(out, out_size, "Installed (v%s)", version);
+                return;
+            }
+        }
+    }
+    snprintf(out, out_size, "Installed (version unknown)");
+}
+
+/* Same idea for FPOV -- whether this install ever ran Settings [9]
+ * and what schema version it's pinned to. Read-only; the real gate is
+ * check_fpov_version() at boot. */
+static void get_fpov_status_line(char *out, size_t out_size) {
+    char local_path[PATH_MAX], label[32];
+    if (!find_local_fpov_file(local_path, sizeof(local_path), label, sizeof(label))) {
+        snprintf(out, out_size, "Not Set Up (opt-in)");
+        return;
+    }
+    snprintf(out, out_size, "v%s (%s)", FPOV_SCHEMA_VERSION, label);
+}
+
+/* Fills `out` with e.g. "26.7.1 Tahoe (Darwin: 25.6.0)" for the Status
+ * section. "Reported" on purpose: both values come from the kernel, and
+ * a spoofed or compat-mode system can report something other than the
+ * real OS. The marketing name comes from the product-version major;
+ * if it is not one we know, the name is simply left out. */
+static void get_macos_version_line(char *out, size_t out_size) {
+    char product[64] = "";
+    size_t len = sizeof(product);
+    if (sysctlbyname("kern.osproductversion", product, &len, NULL, 0) != 0) {
+        product[0] = '\0';
+    }
+
+    char darwin[64] = "";
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(darwin, sizeof(darwin), "%s", uts.release);
+    }
+
+    const char *name = "";
+    int major = atoi(product);
+    switch (major) {
+        case 26: name = " Tahoe";    break;
+        case 15: name = " Sequoia";  break;
+        case 14: name = " Sonoma";   break;
+        case 13: name = " Ventura";  break;
+        case 12: name = " Monterey"; break;
+        case 11: name = " Big Sur";  break;
+        default: break;
+    }
+
+    if (product[0] == '\0' && darwin[0] == '\0') {
+        snprintf(out, out_size, "unknown");
+    } else if (product[0] == '\0') {
+        snprintf(out, out_size, "unknown (Darwin: %s)", darwin);
+    } else if (darwin[0] == '\0') {
+        snprintf(out, out_size, "%s%s", product, name);
+    } else {
+        snprintf(out, out_size, "%s%s (Darwin: %s)", product, name, darwin);
+    }
+}
+
+static void print_menu(void) {
+    int sensor_present = (g_detected_sensor != NULL);
+    int deployed = is_auth_service_deployed();
+    int volume_ready = is_volume_configured();
+    int accessibility_ready = is_accessibility_granted();
+
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    printf("%sActions%s\n", VFSC_DIM, VFSC_RESET);
+    printf("%s[1]%s Enroll a Finger\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[2]%s Verify Fingerprint Match [Score / %d]\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
+    printf("%s[3]%s Deploy for Authentication Services\n", VFSC_BOLD, VFSC_RESET);
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        printf("%s[P]%s Pair Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+        printf("%s[B]%s Calibrate Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+    }
+    if (is_upek_sensor(g_detected_sensor)) {
+        printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
+    }
+    if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+        printf("%s[C]%s View Fingerprint (capture preview, nothing saved)\n", VFSC_BOLD, VFSC_RESET);
+        printf("%s[T]%s Sensor Test (swipe heights, tune Swipe to Lock)\n", VFSC_BOLD, VFSC_RESET);
+    }
+    printf("%s[FP]%s Fpbootd, Pre-Login Auth %s(coming soon)%s\n",
+           VFSC_BOLD, VFSC_RESET, VFSC_DIM, VFSC_RESET);
+    printf("\n");
+    printf("%sUtilities%s\n", VFSC_DIM, VFSC_RESET);
+    printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[H]%s Help\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[X]%s Uninstall\n", VFSC_BRED, VFSC_RESET);
+    printf("%s[Q]%s Quit\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    {
+        char macos_line[128];
+        get_macos_version_line(macos_line, sizeof(macos_line));
+        printf("  * Reported macOS Version: %s%s%s\n", VFSC_DIM, macos_line, VFSC_RESET);
+    }
+    printf("  * Sensor Status        : %s%s%s\n",
+           sensor_present ? VFSC_GREEN : VFSC_YELLOW,
+           sensor_present ? "Ready" : "Not Detected", VFSC_RESET);
+    printf("  * Authentication Service: %s%s%s\n",
+           deployed ? VFSC_GREEN : VFSC_YELLOW,
+           deployed ? "Deployed" : "Not Deployed", VFSC_RESET);
+    printf("  * Template Volume      : %s%s%s\n",
+           volume_ready ? VFSC_GREEN : VFSC_YELLOW,
+           volume_ready ? "Configured" : "Not Set Up", VFSC_RESET);
+    printf("  * Accessibility Grant  : %s%s%s\n",
+           accessibility_ready ? VFSC_GREEN : VFSC_YELLOW,
+           accessibility_ready ? "Granted" : "Not Detected", VFSC_RESET);
+    /* Not a live check — see g_finger_count comment above. The
+     * templates volume is unmounted at rest; run Enroll, Verify, or
+     * Manage once this session to populate this. */
+    if (g_finger_count < 0) {
+        printf("  * Fingers              : %sUnknown (run Verify/Enroll to check)%s\n", VFSC_DIM, VFSC_RESET);
+    } else if (g_finger_count == 0) {
+        printf("  * Fingers              : %sNone enrolled%s\n", VFSC_YELLOW, VFSC_RESET);
+    } else {
+        printf("  * Fingers              : %s%d Enrolled%s (", VFSC_GREEN, g_finger_count, VFSC_RESET);
+        for (int i = 0; i < g_finger_count; i++) {
+            printf("%s%s", i > 0 ? ", " : "", g_finger_labels[i]);
+        }
+        printf(")\n");
+    }
+    if (g_detected_sensor) {
+        printf("  * Sensor Model         : %s {0x%04X:0x%04X}\n",
+               g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+    } else {
+        printf("  * Sensor Model         : %sNone Detected%s\n", VFSC_YELLOW, VFSC_RESET);
+    }
+    {
+        char fpbootd_status[80];
+        get_fpbootd_status_line(fpbootd_status, sizeof(fpbootd_status));
+        printf("  * Fpbootd Version      : %s%s%s\n", VFSC_DIM, fpbootd_status, VFSC_RESET);
+    }
+    {
+        char fpov_status[80];
+        get_fpov_status_line(fpov_status, sizeof(fpov_status));
+        printf("  * FPOV Version         : %s%s%s\n", VFSC_DIM, fpov_status, VFSC_RESET);
+    }
+    printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+}
+
+/* Shared by [H] in the interactive menu and -h/--help on the command
+ * line (checked first thing in main(), before the sudo re-exec, so
+ * seeing this never requires a password prompt). Keep this list in
+ * sync with the flag-parsing loop in main() below. */
+static void print_usage(void) {
+    printf("%sHack-TouchID Client%s -- multi-sensor fingerprint auth for macOS\n\n",
+           VFSC_BOLD, VFSC_RESET);
+    printf("Usage: hack-touchid [flags]\n\n");
+    printf("With no flags, launches the interactive menu.\n\n");
+    printf("Flags:\n");
+    printf("  -h, --help          Show this help and exit\n");
+    printf("  --q, --quiet        Skip the verbose boot log\n");
+    printf("  --deploy-agent      Headless (re)install of the daemon, no menu\n");
+    printf("  --diag-pid          Print a diagnostic report and exit\n");
+    printf("  --check-updates     Check for a client update, offer [A] changelog / [Y] install / [N] cancel\n");
+    printf("  --menu-updater      Check for a client update and install it right away, no prompts\n");
+    printf("  --force-pair        Metallica MIS: force a fresh pairing (refused by a sensor that is\n");
+    printf("                      already paired, see --host-product / --host-serial below)\n");
+    printf("  --debug             Verbose protocol log (every USB transfer, TLS command, DB call)\n");
+    printf("  --debug-full        Same as --debug, but never truncates large payloads\n");
+    printf("  --list-records      List the prints stored on a Metallica MIS sensor and exit\n");
+    printf("  --wipe-records      Delete ALL prints stored on a Metallica MIS sensor and exit\n");
+    printf("  --enroll-test       Metallica MIS: calibrate, enroll one finger on the sensor and exit\n");
+    printf("                      (experimental, tester tool, run with --debug)\n");
+    printf("  --verify-test       Metallica MIS: calibrate, touch once, match against a print saved by\n");
+    printf("                      --enroll-test and exit (experimental, run with --debug)\n");
+    printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
+    printf("  --host-serial X     Metallica MIS: use X as the host serial instead of this Mac's\n");
+    printf("                      (for a sensor paired on Linux/Windows: pass the laptop's real\n");
+    printf("                      DMI product_name / product_serial, not the spoofed Mac values)\n");
+    printf("  --fpbootd-daemon    Run as the Fpbootd pre-login socket server\n\n");
+    printf("From the interactive menu, [H] shows this same help.\n\n");
+}
+
+/* [FP] Fpbootd -- stub for now. The daemon + Authorization Plugin are
+ * real and already tested on hardware (see fpbootd-install.sh), just
+ * not wired into this client's own menu yet -- that's separate
+ * follow-up work. This tells anyone poking at the menu that the
+ * feature exists rather than silently doing nothing. */
+static void do_fpbootd_stub(void) {
+    vfsc_warn("Fpbootd management isn't wired into this client yet.\n"
+              "The daemon + Authorization Plugin exist and are tested on real\n"
+              "hardware (see fpbootd-install.sh), just not from this menu.\n"
+              "Coming in a follow-up update.\n\n");
+}
+
+/* [X] Uninstall -- reverses do_deploy() for whichever sensor daemon(s)
+ * are installed, natively (no per-sensor uninstall script exists).
+ * Removes: the LaunchAgent registration + plist (console user's
+ * ~/Library/LaunchAgents), the installed daemon binary for every
+ * sensor in supported_sensors.h, the daemon's Accessibility (TCC) rows,
+ * any /etc/sudoers.d rule that references the hack-touchid install
+ * dir, and the agent log (HTID_AGENT_LOG_PATH).
+ * Deliberately KEEPS the HackTouchIDStore volume, enrolled
+ * templates, and match_threshold.conf so a later re-deploy doesn't
+ * lose the user's fingers. Works even if the sensor is currently
+ * unplugged, since it walks the whole sensor table instead of relying
+ * on g_detected_sensor. */
+#define HTID_INSTALL_DIR "/usr/local/libexec/hack-touchid"
+#define HTID_AGENT_LOG_PATH "/Library/Logs/vfs5011agent.log"
+
+static void do_uninstall(void) {
+    /* Find which sensor daemons are actually installed. */
+    char installed[HACK_TOUCHID_SENSOR_COUNT][PATH_MAX];
+    size_t n_installed = 0;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const char *bin = HACK_TOUCHID_SENSORS[i].daemon_binary_name;
+        if (!bin || !*bin) continue;
+        bool dup = false;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", HTID_INSTALL_DIR, bin);
+        for (size_t j = 0; j < n_installed; j++) {
+            if (strcmp(installed[j], path) == 0) { dup = true; break; }
+        }
+        if (!dup && access(path, F_OK) == 0) {
+            strncpy(installed[n_installed], path, PATH_MAX - 1);
+            installed[n_installed][PATH_MAX - 1] = '\0';
+            n_installed++;
+        }
+    }
+
+    /* Resolve the console user (client runs as root via sudo). */
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw && getuid() != 0) pw = getpwuid(getuid());
+
+    char plist_path[PATH_MAX] = {0};
+    if (pw) {
+        snprintf(plist_path, sizeof(plist_path),
+                 "%s/Library/LaunchAgents/%s.plist", pw->pw_dir, AGENT_LABEL);
+    }
+    bool plist_present = plist_path[0] && access(plist_path, F_OK) == 0;
+    bool agent_running = is_auth_service_deployed();
+    bool log_present = access(HTID_AGENT_LOG_PATH, F_OK) == 0;
+
+    if (n_installed == 0 && !plist_present && !agent_running && !log_present) {
+        printf("Nothing to uninstall: no sensor daemon installed and no agent registered.\n\n");
+        return;
+    }
+
+    vfsc_warn("\nThis will uninstall the authentication service:\n");
+    printf("  - stop and unregister the LaunchAgent (%s)\n", AGENT_LABEL);
+    for (size_t i = 0; i < n_installed; i++) printf("  - delete daemon: %s\n", installed[i]);
+    printf("  - remove its Accessibility (TCC) grant\n");
+    printf("  - remove hack-touchid sudoers rule(s), if any\n");
+    if (log_present) printf("  - delete the agent log (%s)\n", HTID_AGENT_LOG_PATH);
+    printf("Your enrolled fingers and the %s volume are NOT touched.\n", VOLUME_NAME);
+    printf("Continue? [y/N]: ");
+    fflush(stdout);
+    char answer[16] = {0};
+    if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+        printf("Uninstall cancelled.\n\n");
+        return;
+    }
+    printf("\n");
+
+    int problems = 0;
+    char cmd[PATH_MAX * 2 + 128];
+
+    /* 1. Stop + unregister the LaunchAgent from the user's gui session. */
+    if (pw) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl bootout \"gui/%d/%s\" >/dev/null 2>&1; "
+                 "launchctl bootout \"gui/%d\" \"%s\" >/dev/null 2>&1; true",
+                 (int)pw->pw_uid, AGENT_LABEL, (int)pw->pw_uid, plist_path);
+        system(cmd);
+        if (plist_present) {
+            if (unlink(plist_path) == 0) vfsc_ok("Removed %s\n", plist_path);
+            else { vfsc_err("Couldn't remove %s: %s\n", plist_path, strerror(errno)); problems++; }
+        }
+        if (is_auth_service_deployed()) {
+            vfsc_err("Agent still reports as running after bootout.\n");
+            problems++;
+        } else {
+            vfsc_ok("LaunchAgent stopped and unregistered.\n");
+        }
+    } else {
+        vfsc_warn("Couldn't determine the console user; skipped LaunchAgent removal.\n");
+        problems++;
+    }
+
+    /* 2. Delete installed daemon binaries + their TCC rows. */
+    for (size_t i = 0; i < n_installed; i++) {
+        if (access(TCC_DB_PATH, F_OK) == 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "sqlite3 \"%s\" \"DELETE FROM access WHERE "
+                     "service='kTCCServiceAccessibility' AND client='%s';\" >/dev/null 2>&1",
+                     TCC_DB_PATH, installed[i]);
+            system(cmd);
+        }
+        if (unlink(installed[i]) == 0) vfsc_ok("Removed %s\n", installed[i]);
+        else { vfsc_err("Couldn't remove %s: %s\n", installed[i], strerror(errno)); problems++; }
+    }
+
+    /* 3. Remove sudoers rules that reference our install dir. */
+    FILE *fp = popen("grep -l '" HTID_INSTALL_DIR "' /etc/sudoers.d/* 2>/dev/null", "r");
+    if (fp) {
+        char line[PATH_MAX];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (!line[0]) continue;
+            if (unlink(line) == 0) vfsc_ok("Removed sudoers rule %s\n", line);
+            else { vfsc_err("Couldn't remove %s: %s\n", line, strerror(errno)); problems++; }
+        }
+        pclose(fp);
+    }
+
+    /* 4. Remove the agent log. */
+    if (log_present) {
+        if (unlink(HTID_AGENT_LOG_PATH) == 0) vfsc_ok("Removed %s\n", HTID_AGENT_LOG_PATH);
+        else { vfsc_err("Couldn't remove %s: %s\n", HTID_AGENT_LOG_PATH, strerror(errno)); problems++; }
+    }
+
+    /* Drop the install dir only if nothing else (config, fpbootd) lives there. */
+    rmdir(HTID_INSTALL_DIR);
+
+    if (problems == 0) vfsc_ok("Uninstall complete. Run [3] Deploy to reinstall.\n\n");
+    else vfsc_warn("Uninstall finished with %d problem(s), see above.\n\n", problems);
+}
+
+/* remove_daemon_for_update() -- called by the updater right after a new
+ * build succeeded and was copied into place. The installed daemon is a
+ * separately compiled binary that the update does NOT replace (only [3]
+ * Deploy does), so an old daemon would keep running, or trip the startup
+ * version gate, until the user deploys. Instead of leaving a stale daemon
+ * behind, this scans for the installed or running one and removes it, so
+ * the only next step is [3] Deploy.
+ *
+ * Removes: the LaunchAgent registration + plist, the installed daemon
+ * binary for every sensor in supported_sensors.h, and the daemon's
+ * Accessibility (TCC) rows. Keeps: the HackTouchIDStore volume, enrolled
+ * templates, match_threshold.conf, the sudoers rule and the agent log
+ * (Deploy rewrites the rule, the log is useful to keep).
+ * Needs no confirmation: the user already confirmed the update.
+ * Returns true if a daemon was found and removed. */
+static bool remove_daemon_for_update(void) {
+    printf("Checking for an installed daemon...\n");
+
+    char installed[HACK_TOUCHID_SENSOR_COUNT][PATH_MAX];
+    size_t n_installed = 0;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const char *bin = HACK_TOUCHID_SENSORS[i].daemon_binary_name;
+        if (!bin || !*bin) continue;
+        bool dup = false;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", HTID_INSTALL_DIR, bin);
+        for (size_t j = 0; j < n_installed; j++) {
+            if (strcmp(installed[j], path) == 0) { dup = true; break; }
+        }
+        if (!dup && access(path, F_OK) == 0) {
+            strncpy(installed[n_installed], path, PATH_MAX - 1);
+            installed[n_installed][PATH_MAX - 1] = '\0';
+            n_installed++;
+        }
+    }
+
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw && getuid() != 0) pw = getpwuid(getuid());
+
+    char plist_path[PATH_MAX] = {0};
+    if (pw) {
+        snprintf(plist_path, sizeof(plist_path),
+                 "%s/Library/LaunchAgents/%s.plist", pw->pw_dir, AGENT_LABEL);
+    }
+    bool plist_present = plist_path[0] && access(plist_path, F_OK) == 0;
+    bool agent_running = is_auth_service_deployed();
+
+    if (n_installed == 0 && !plist_present && !agent_running) {
+        printf("No daemon installed, nothing to remove.\n");
+        return false;
+    }
+
+    int problems = 0;      /* anything that didn't go cleanly */
+    int file_problems = 0; /* a file that is still on disk */
+    char cmd[PATH_MAX * 2 + 128];
+
+    /* 1. Stop + unregister the LaunchAgent so nothing holds the binary. */
+    if (pw) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl bootout \"gui/%d/%s\" >/dev/null 2>&1; "
+                 "launchctl bootout \"gui/%d\" \"%s\" >/dev/null 2>&1; true",
+                 (int)pw->pw_uid, AGENT_LABEL, (int)pw->pw_uid, plist_path);
+        system(cmd);
+        if (plist_present && unlink(plist_path) != 0) {
+            vfsc_err("Couldn't remove %s: %s\n", plist_path, strerror(errno));
+            problems++;
+            file_problems++;
+        }
+    } else {
+        vfsc_warn("Couldn't determine the console user; skipped LaunchAgent removal.\n");
+        problems++;
+    }
+
+    /* 2. Delete the installed daemon binaries + their TCC rows. */
+    for (size_t i = 0; i < n_installed; i++) {
+        if (access(TCC_DB_PATH, F_OK) == 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "sqlite3 \"%s\" \"DELETE FROM access WHERE "
+                     "service='kTCCServiceAccessibility' AND client='%s';\" >/dev/null 2>&1",
+                     TCC_DB_PATH, installed[i]);
+            system(cmd);
+        }
+        if (unlink(installed[i]) != 0) {
+            vfsc_err("Couldn't remove %s: %s\n", installed[i], strerror(errno));
+            problems++;
+            file_problems++;
+        }
+    }
+
+    if (problems == 0) {
+        printf("%sDaemon un-installed, Please run [3] Again.%s\n", VFSC_YELLOW, VFSC_RESET);
+    } else if (file_problems > 0) {
+        vfsc_warn("Daemon removal had %d problem(s), see above. Delete the files "
+                  "listed above manually, then run sudo hack-touchid and press [3].\n", problems);
+    } else {
+        vfsc_warn("The daemon file was removed, but the LaunchAgent could not be unregistered. "
+                  "Press [3] to redeploy, or [X] Uninstall first if the old daemon still runs.\n");
+    }
+    return true;
+}
+
+static void print_about(void) {
+    printf("\n%sHACK-TOUCHID CLIENT%s\n", VFSC_BCYAN, VFSC_RESET);
+    printf("Multi-sensor fingerprint authentication for macOS Sonoma+.\n");
+    printf("Currently supported: Validity VFS5011 (capture backend live);\n");
+    printf("UPEK/AuthenTec TouchStrip (detection only, capture backend pending).\n");
+    printf("Capture pipelines ported from libfprint; matching via NBIS mindtct/bozorth3.\n");
+    printf("%sMATCH_THRESHOLD=%d, ENROLL_SWIPES=%d, MIN_SELF_CONSISTENCY=%d%s\n\n",
+           VFSC_DIM, g_match_threshold, ENROLL_SWIPES, MIN_SELF_CONSISTENCY, VFSC_RESET);
+}
+
+/* Forward declaration -- defined later in this file (Settings [4]
+ * section), but now also called from do_enroll() below for the same
+ * first-run auto-setup do_deploy() already does. */
+static int do_run_volume_setup(void);
+
+/* Forward declaration -- defined alongside draw_progress_bar() further
+ * below (Update-checker section), but needed here for do_enroll()'s
+ * minimal single-line swipe status. */
+static void draw_enroll_bar(int good, int total, const char *status, const char *color);
+
+/* True for any of the three Metallica MIS USB identities (same
+ * underlying Synaptics chip under different OEM VID:PIDs -- see
+ * METALLICA_MIS_IDENTITIES in metallica_mis_daemon.c). Used to gate
+ * the [P] Pair Sensor menu item so it only appears for a sensor
+ * family that actually has a pairing routine, and to decide which
+ * concrete pairing function to call. */
+static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s) {
+    if (!s) return 0;
+    return (s->vid == 0x06cb && s->pid == 0x009a) ||
+           (s->vid == 0x138a && s->pid == 0x0097) ||
+           (s->vid == 0x138a && s->pid == 0x009d);
+}
+
+/* Runs the Metallica MIS plaintext-bootstrap + pairing + firmware-
+ * upload sequence directly from the client, reusing
+ * metallica_mis_open_device()/metallica_mis_send_init()/
+ * metallica_mis_do_pairing() from metallica_mis_daemon.c (Aug 28 --
+ * see metallica_mis_daemon.h) instead of requiring the tester to
+ * separately build and run the standalone metallica_mis_daemon test
+ * harness. Mirrors that harness's exact flow and warnings; keep the
+ * two in sync if either changes.
+ *
+ * This is deliberately its own menu action, NOT part of do_enroll()
+ * -- pairing is a one-time, destructive-to-existing-templates flash
+ * write with no capture step after it (capture_quality_template()
+ * for this sensor family isn't built yet), so it doesn't belong in
+ * the Enroll/Verify/Deploy flow that assumes a working capture
+ * backend. backend_available stays 0 in supported_sensors.h until
+ * capture actually exists -- this menu item only covers pairing. */
+static void do_pair_metallica_mis(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. Nothing to pair.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis will attempt REAL pairing against %s {0x%04X:0x%04X}.\n"
+        "Pairing writes a new partition table + cert material to the\n"
+        "sensor's flash, uploads the Metallica MIS firmware blob\n"
+        "(downloading it from Lenovo first if not already cached), and\n"
+        "ends with a real reboot command sent to the device.\n\n"
+        "This is NOT reversible by just running this again, and it WILL\n"
+        "make any existing Windows Hello (or other OS) fingerprint\n"
+        "enrollments on this sensor unreadable -- pairing swaps the\n"
+        "sensor's trusted host identity, which orphans templates\n"
+        "enrolled under the previous pairing rather than deleting them\n"
+        "individually. This has only been exercised against real\n"
+        "hardware in the plaintext-bootstrap stage so far -- the actual\n"
+        "flash write + firmware upload has NOT been tested on real\n"
+        "hardware yet.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    if (g_metallica_mis_force_pair) {
+        vfsc_warn(
+            "--force-pair is active: pairing will try to rewrite the identity\n"
+            "partitions even if this device already looks paired.\n"
+            "A sensor that is already paired refuses unauthenticated flash\n"
+            "writes (status 0x0404), so this normally fails on a sensor that\n"
+            "Windows or Linux paired first. If that happens, run again with\n"
+            "--host-product and --host-serial set to the laptop's real values\n"
+            "(see --help). There is no way to get the old identity back if\n"
+            "the write does go through.\n\n");
+    }
+
+    printf("Type PAIR (all caps) to proceed, anything else to cancel: ");
+    fflush(stdout);
+    char confirm[16];
+    if (!fgets(confirm, sizeof(confirm), stdin)) {
+        printf("\nPairing cancelled.\n\n");
+        return;
+    }
+    size_t clen = strlen(confirm);
+    while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+    if (strcmp(confirm, "PAIR") != 0) {
+        printf("Pairing cancelled.\n\n");
+        return;
+    }
+
+    if (metallica_mis_open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("\nRunning plaintext bootstrap stage...\n");
+    if (metallica_mis_send_init() != 0) {
+        vfsc_err("Plaintext bootstrap stage failed. Check the diagnostic output "
+                  "above for the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Bootstrap OK.\n\n");
+
+    printf("Attempting real pairing + firmware upload now...\n");
+    if (metallica_mis_do_pairing() != 0) {
+        vfsc_err("Pairing failed. Sensor flash state is whatever the last "
+                  "completed step left it in -- there is no rollback. Do not "
+                  "assume the device is in a clean/unpaired state before "
+                  "trying again.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+
+    vfsc_ok("\nPairing + firmware upload succeeded. The device sent itself a "
+            "reboot command as the last step and should be re-enumerating "
+            "now -- give it a moment before running Enroll/Verify (once "
+            "this sensor's capture backend exists).\n\n");
+    metallica_mis_close_device();
+}
+
+/* Runs the full type-0x199 calibration sequence (3 capture iterations
+ * + one blank-image capture, then persists the clean-slate blob to
+ * flash) against a Metallica MIS sensor, via
+ * metallica_mis_open_calibration_session() +
+ * metallica_mis_do_calibrate() (both metallica_mis_daemon.c, this
+ * session). Requires the sensor to have already been successfully
+ * paired -- run [P] Pair Sensor first if it hasn't been.
+ *
+ * Like [P] Pair Sensor and [U] Test Capture, this is its own menu
+ * action rather than part of Enroll/Verify/Deploy: this sensor
+ * family's capture backend still doesn't exist (backend_available
+ * stays 0 in supported_sensors.h), so there's no Enroll/Verify flow
+ * for it to belong to yet. This is purely about getting real
+ * calibration data onto the sensor's flash so that work has
+ * something real to build capture()/enroll() against next.
+ *
+ * Session-establishment nuance worth surfacing to the tester: this
+ * calls metallica_mis_open_calibration_session(), which re-runs the
+ * same init_flash()+upload_fwext() sequence [P] Pair Sensor uses.
+ * On an already-paired, already-loaded device (the expected case
+ * here) both steps are fast read-only no-ops and there's no reboot --
+ * but if either isn't true yet, this will actually re-pair / re-upload
+ * firmware / reboot the device for real, same as [P] Pair Sensor
+ * itself would. That's why this prints the same category of warning
+ * before proceeding, even though the common-case run is much less
+ * eventful than pairing. */
+static void do_calibrate_metallica_mis(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. Nothing to calibrate.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis will run real calibration against %s {0x%04X:0x%04X}.\n\n"
+        "If this sensor is ALREADY paired with firmware already loaded\n"
+        "(the expected case if you already ran [P] Pair Sensor "
+        "successfully), this is safe and reboot-free: it just runs 3\n"
+        "real capture passes plus one blank-image capture, then "
+        "unconditionally ERASES AND REWRITES flash partition 6 with the\n"
+        "resulting clean-slate calibration data.\n\n"
+        "If this sensor is NOT yet paired, or firmware isn't loaded yet,\n"
+        "this will instead trigger the SAME real pairing + firmware\n"
+        "upload + reboot that [P] Pair Sensor does, and will abort "
+        "without calibrating (the device won't be there to receive "
+        "calibration commands right after a reboot) -- run [P] Pair "
+        "Sensor first in that case, then try this again.\n\n"
+        "This has NOT been run against real hardware yet.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    printf("Type CALIBRATE (all caps) to proceed, anything else to cancel: ");
+    fflush(stdout);
+    char confirm[16];
+    if (!fgets(confirm, sizeof(confirm), stdin)) {
+        printf("\nCalibration cancelled.\n\n");
+        return;
+    }
+    size_t clen = strlen(confirm);
+    while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+    if (strcmp(confirm, "CALIBRATE") != 0) {
+        printf("Calibration cancelled.\n\n");
+        return;
+    }
+
+    if (metallica_mis_open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("\nRunning plaintext bootstrap stage...\n");
+    if (metallica_mis_send_init() != 0) {
+        vfsc_err("Plaintext bootstrap stage failed. Check the diagnostic output "
+                  "above for the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Bootstrap OK.\n\n");
+
+    printf("Establishing a secure session (should be quick and reboot-free "
+           "if this sensor is already paired + loaded)...\n");
+    metallica_mis_tls_t tls;
+    if (metallica_mis_open_calibration_session(&tls) != 0) {
+        vfsc_err("Could not establish a live secure session for calibration. "
+                  "Check the diagnostic output above -- if it mentions a real "
+                  "pairing/firmware-upload/reboot just happened, wait a few "
+                  "seconds for the device to re-enumerate and try again; it "
+                  "should be reboot-free on the next attempt.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+    printf("Session ready.\n\n");
+
+    printf("Running calibration (3 capture passes + 1 blank-image capture, "
+           "then writing to flash)...\n");
+    if (metallica_mis_do_calibrate(&tls) != 0) {
+        vfsc_err("Calibration failed. Check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        metallica_mis_close_device();
+        return;
+    }
+
+    vfsc_ok("\nCalibration succeeded. The clean-slate blob has been written "
+            "to flash partition 6.\n\n");
+    metallica_mis_close_device();
+}
+
+/* run_records_mode() -- headless "--list-records" / "--wipe-records" for
+ * Metallica MIS sensors. Lists (or wipes) the fingerprint records stored on
+ * the sensor itself. See metallica_mis_do_records() in
+ * metallica_mis_daemon.c for what it needs (already-paired sensor) and
+ * what the wipe does and does not touch.
+ *
+ * The wipe asks for a typed confirmation, since it deletes every print
+ * stored on the sensor (not just HTID's). Pass --debug alongside either
+ * flag to get the full protocol log. */
+static void run_records_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --list-records/--wipe-records only apply to that sensor family.\n\n");
+        return;
+    }
+
+    if (g_records_wipe_mode) {
+        vfsc_warn(
+            "\nThis will DELETE every fingerprint record stored on the sensor\n"
+            "(%s {0x%04X:0x%04X}), including prints enrolled by other\n"
+            "software on this same sensor. It exists to fix the \"Failed: 04c3\"\n"
+            "enroll error, which happens when an earlier print is still stored\n"
+            "on the sensor.\n\n"
+            "HTID's own saved templates on this Mac are NOT touched.\n\n",
+            g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+        printf("Type WIPE (all caps) to proceed, anything else to cancel: ");
+        fflush(stdout);
+        char confirm[16];
+        if (!fgets(confirm, sizeof(confirm), stdin)) {
+            printf("\nCancelled.\n\n");
+            return;
+        }
+        size_t clen = strlen(confirm);
+        while (clen > 0 && (confirm[clen-1] == '\n' || confirm[clen-1] == '\r')) confirm[--clen] = '\0';
+        if (strcmp(confirm, "WIPE") != 0) {
+            printf("Cancelled.\n\n");
+            return;
+        }
+    }
+
+    printf("\n");
+    if (metallica_mis_do_records(g_records_wipe_mode) != 0) {
+        vfsc_err("\nRecord %s failed. Re-run with --debug and send the full output.\n\n",
+                 g_records_wipe_mode ? "wipe" : "listing");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
+}
+
+/* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS
+ * sensors: the first native enrollment (see metallica_mis_enroll.h). It
+ * saves the print on the sensor, so it needs the sensor to be paired
+ * already; if an older print blocks the save, --wipe-records fixes that. */
+static void run_enroll_test_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --enroll-test only applies to that sensor family.\n\n");
+        return;
+    }
+    vfsc_warn(
+        "\nExperimental: this runs a real enrollment on %s {0x%04X:0x%04X}.\n"
+        "It calibrates first (keep your finger OFF the sensor), then asks you to touch\n"
+        "the sensor several times with the SAME finger, and saves the print on the sensor.\n"
+        "Nothing is saved on this Mac. Run it with --debug and send the whole output.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+    if (metallica_mis_do_enroll_test() != 0) {
+        vfsc_err("\nEnroll test failed. Re-run with --debug and send the full output.\n\n");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
+}
+
+/* run_verify_test_mode() -- headless "--verify-test" for Metallica MIS
+ * sensors: match-in-sensor against a print saved by --enroll-test. */
+static void run_verify_test_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --verify-test only applies to that sensor family.\n\n");
+        return;
+    }
+    vfsc_warn(
+        "\nExperimental: this runs a real verify on %s {0x%04X:0x%04X}.\n"
+        "It calibrates first (keep your finger OFF the sensor), then asks for one touch\n"
+        "and the sensor says whether it matches a print saved by --enroll-test.\n"
+        "Nothing is changed on the sensor. Run it with --debug and send the whole output.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+    if (metallica_mis_do_verify_test() != 0) {
+        vfsc_err("\nVerify test did not match or failed. Re-run with --debug and send the full output.\n\n");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
+}
+
+/* Runs ONE real capture attempt against a UPEK/AuthenTec TouchStrip
+ * sensor using the capture dispatch wired in Aug 29 (see
+ * capture_fingerprint_image() and upek_daemon.h above), and reports
+ * what came back -- WITHOUT touching enrolled-finger storage.
+ *
+ * This is the "first real-hardware pass" upek_daemon.c's own header
+ * comment says needs to happen before backend_available flips to 1
+ * for this sensor -- it exists so Cold_Salamander7764 (or anyone
+ * else with this hardware) can run it from the one client binary
+ * instead of separately building upek_daemon.c's own
+ * UPEK_STANDALONE_TEST smoke-test harness. Non-destructive: reading
+ * a swipe image has none of the flash-write risk Metallica MIS
+ * pairing does, so this doesn't need that action's typed-confirmation
+ * gate -- just a heads-up that it's unproven on real hardware yet.
+ *
+ * Deliberately separate from do_enroll()/do_verify() rather than
+ * flipping backend_available early: this only proves capture
+ * produces a plausible image with enough minutiae, not that the
+ * whole Enroll/Verify/Deploy flow works end-to-end for this sensor.
+ * Once this has been run successfully against real hardware,
+ * backend_available can flip to 1 in supported_sensors.h and this
+ * menu item can eventually be retired in favor of the normal flow. */
+static void do_test_upek_capture(void) {
+    if (!g_detected_sensor || !is_upek_sensor(g_detected_sensor)) {
+        vfsc_err("No UPEK sensor detected. Nothing to test.\n\n");
+        return;
+    }
+
+    vfsc_warn(
+        "\nThis performs ONE real capture attempt against %s "
+        "{0x%04X:0x%04X} using a capture backend that has NOT been "
+        "confirmed against real hardware yet. Nothing is saved to "
+        "enrolled-finger storage -- this only reports what the sensor "
+        "returned, plus a raw debug image for visual inspection.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+
+    if (open_device() != 0) {
+        vfsc_err("Could not open the sensor. Aborting.\n\n");
+        return;
+    }
+
+    printf("Swipe your finger across the sensor now...\n");
+    int height = 0;
+    unsigned char *image = capture_fingerprint_image(g_handle, &height);
+    close_device();
+
+    if (!image) {
+        vfsc_err("Capture failed -- check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        return;
+    }
+
+    int width = current_sensor_image_width();
+    const char *debug_path = "/tmp/upek_test_capture.pgm";
+    FILE *fp = fopen(debug_path, "wb");
+    if (fp) {
+        fprintf(fp, "P5\n%d %d\n255\n", width, height);
+        fwrite(image, 1, (size_t)width * (size_t)height, fp);
+        fclose(fp);
+    } else {
+        vfsc_warn("Could not save debug image to %s: %s (continuing anyway)\n",
+                  debug_path, strerror(errno));
+    }
+
+    struct xyt_struct tmpl;
+    memset(&tmpl, 0, sizeof(tmpl));
+    int r = vfs5011_extract_template(image, width, height, &tmpl);
+    free(image);
+
+    if (r != 0) {
+        vfsc_err("Capture succeeded (%d x %d image) but minutiae extraction "
+                  "failed (code %d). Raw capture saved to %s for inspection "
+                  "-- check whether it actually looks like a fingerprint.\n\n",
+                  width, height, r, debug_path);
+        return;
+    }
+
+    vfsc_ok("Capture succeeded: %d x %d image, %d minutiae extracted "
+            "(need >= %d to be usable for Enroll/Verify). Raw capture "
+            "also saved to %s.\n\n",
+            width, height, tmpl.nrows, MIN_MINUTIAE, debug_path);
+}
+
+/* [C] View Fingerprint -- captures one swipe and saves it as a
+ * viewable .pgm image, purely for visual inspection. Deliberately
+ * lighter-weight than do_enroll()/do_verify(): no minutiae
+ * extraction, no template volume, no enrolled-finger storage touched
+ * at all. Reuses the same capture_fingerprint_image() dispatch and
+ * .pgm-writing shape already proven in do_test_upek_capture() above.
+ *
+ * Only sensors with an actual raw-image capture path support this.
+ * Metallica MIS is match-in-sensor -- enroll/verify both happen on
+ * the chip itself, so there's no raw swipe image to retrieve at all,
+ * not even in principle. Refused with an explanation here rather than
+ * left to fail confusingly deeper in capture_fingerprint_image(),
+ * which has no Metallica MIS branch to begin with. */
+static void do_view_fingerprint(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected.\n\n");
+        return;
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("%s is match-in-sensor -- enrollment and matching happen on "
+                  "the chip itself, so there's no raw swipe image to view.\n\n",
+                  g_detected_sensor->display_name);
+        return;
+    }
+    if (!g_detected_sensor->backend_available) {
+        vfsc_warn("%s's capture backend isn't confirmed working on real "
+                   "hardware yet, but trying anyway -- this is just a "
+                   "preview, nothing gets saved to enrolled-finger storage.\n\n",
+                   g_detected_sensor->display_name);
+    }
+
+    if (open_device() != 0) {
+        vfsc_err("Could not open the sensor.\n\n");
+        return;
+    }
+    printf("Swipe your finger across the sensor now...\n");
+    int height = 0;
+    unsigned char *image = capture_fingerprint_image(g_handle, &height);
+    close_device();
+
+    if (!image) {
+        vfsc_err("Capture failed -- check the diagnostic output above for "
+                  "the specific step that failed.\n\n");
+        return;
+    }
+
+    int width = current_sensor_image_width();
+    const char *path = "/tmp/hack-touchid-preview.pgm";
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        vfsc_err("Captured a %d x %d image but couldn't save it: %s\n\n",
+                  width, height, strerror(errno));
+        free(image);
+        return;
+    }
+    fprintf(fp, "P5\n%d %d\n255\n", width, height);
+    fwrite(image, 1, (size_t)width * (size_t)height, fp);
+    fclose(fp);
+    free(image);
+
+    vfsc_ok("Captured %d x %d image, saved to %s.\n", width, height, path);
+    printf("Opening it now...\n\n");
+    char open_cmd[PATH_MAX + 16];
+    snprintf(open_cmd, sizeof(open_cmd), "open \"%s\"", path);
+    system(open_cmd);
+}
+
+/* Enrolls ONE named finger. Multiple fingers can be enrolled by
+ * calling this repeatedly with different names — each gets its own
+ * file under fingers/ on the volume, holding its own ENROLL_SWIPES
+ * templates (multiple swipes of THAT finger, for robustness, same as
+ * before — that part is unchanged). */
+static void do_enroll(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected. Can't enroll without one.\n\n");
+        return;
+    }
+    if (!g_detected_sensor->backend_available) {
+        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
+                  g_detected_sensor->display_name);
+        return;
+    }
+
+    /* Metallica MIS-specific: this sensor needs a proprietary
+     * firmware blob uploaded during first-run pairing before it can
+     * do anything. Other sensors (VFS5011, UPEK) don't have this
+     * requirement, so this check is scoped to this exact VID:PID
+     * rather than being a general precondition every sensor goes
+     * through. See metallica_mis_firmware.h for why this fetches
+     * from Lenovo directly rather than bundling the firmware. */
+    if (g_detected_sensor->vid == 0x06cb && g_detected_sensor->pid == 0x009a) {
+        if (!metallica_mis_firmware_is_present()) {
+            if (!metallica_mis_firmware_fetch()) {
+                vfsc_err("Couldn't obtain the sensor firmware. Enrollment can't "
+                          "continue until this is resolved.\n\n");
+                return;
+            }
+            printf("\n");
+        }
+    }
+
+    /* First-run convenience, same reasoning as do_deploy()'s identical
+     * check: Enroll needs the template volume to exist to save
+     * anything, so set it up automatically here too rather than
+     * letting the person complete ENROLL_SWIPES swipes only to hit
+     * "template volume unavailable" at the very last step. Sharing
+     * do_run_volume_setup() with do_deploy() means this stays in sync
+     * with whatever that does (Settings volume repair prompt is
+     * unaffected -- this only fires when no volume exists at all). */
+    if (!is_volume_configured()) {
+        vfsc_warn("\nTemplate volume isn't set up yet — setting it up now...\n\n");
+        if (do_run_volume_setup() != 0) {
+            vfsc_err("Cannot continue enrollment without the template volume.\n\n");
+            return;
+        }
+    }
+
+    if (g_finger_count < 0) refresh_finger_cache();
+
+    printf("Enter a name for this finger (e.g. \"Right Index\"): ");
+    fflush(stdout);
+    char raw_label[128];
+    if (!fgets(raw_label, sizeof(raw_label), stdin)) {
+        printf("\nEnrollment cancelled.\n\n");
+        return;
+    }
+    char label[MAX_FINGER_LABEL + 1];
+    if (sanitize_finger_label(raw_label, label, sizeof(label)) != 0) {
+        vfsc_err("Invalid finger name.\n\n");
+        return;
+    }
+
+    int existing_idx = -1;
+    for (int i = 0; i < g_finger_count; i++) {
+        if (strcmp(g_finger_labels[i], label) == 0) { existing_idx = i; break; }
+    }
+
+    if (existing_idx < 0 && g_finger_count >= MAX_ENROLLED_FINGERS) {
+        vfsc_err(
+                "Maximum of %d enrolled fingers reached — delete one via "
+                "[3] Manage Enrolled Fingers first.\n\n",
+                MAX_ENROLLED_FINGERS);
+        return;
+    }
+
+    if (existing_idx >= 0) {
+        printf("A finger named \"%s\" is already enrolled. Re-enrolling will replace it.\n", label);
+        printf("Continue? [y/N]: ");
+        fflush(stdout);
+        char confirm[8];
+        if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+            printf("Enrollment cancelled.\n\n");
+            return;
+        }
+    }
+
+    struct xyt_struct templates[ENROLL_SWIPES];
+    int good = 0;
+    printf("Place your finger on the sensor.\n\n");
+    draw_enroll_bar(good, ENROLL_SWIPES, NULL, NULL);
+    for (int i = 0; i < ENROLL_SWIPES; i++) {
+        struct xyt_struct candidate;
+        int outlier_retries = 0;
+        for (;;) {
+            if (capture_quality_template(&candidate, /*quiet=*/1) != 0) {
+                draw_enroll_bar(good, ENROLL_SWIPES, "Retry -- couldn't get a clean read", VFSC_YELLOW);
+                goto slot_done;
+            }
+
+            if (good == 0) {
+                templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Good capture", VFSC_GREEN);
+                break;
+            }
+
+            int best_self_score = -1;
+            for (int j = 0; j < good; j++) {
+                int s = vfs5011_match_score(&candidate, &templates[j]);
+                if (s > best_self_score) best_self_score = s;
+            }
+
+            if (best_self_score >= MIN_SELF_CONSISTENCY) {
+                templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Good capture", VFSC_GREEN);
+                break;
+            }
+
+            outlier_retries++;
+            if (outlier_retries >= MAX_SWIPE_RETRIES) {
+                templates[good++] = candidate;
+                draw_enroll_bar(good, ENROLL_SWIPES, "Captured (kept)", VFSC_YELLOW);
+                break;
+            }
+            draw_enroll_bar(good, ENROLL_SWIPES, "Try a slightly different position", VFSC_YELLOW);
+        }
+        slot_done:
+        printf("\n");
+        if (i + 1 < ENROLL_SWIPES) draw_enroll_bar(good, ENROLL_SWIPES, NULL, NULL);
+    }
+    printf("\n");
+
+    if (good == 0) {
+        vfsc_err("Enrollment failed: no usable swipes captured.\n\n");
+        return;
+    }
+
+    /* Volume is only mounted for this final save step — every swipe
+     * above happened with it fully unmounted, so the exposure window
+     * is as short as physically possible: mount, write, unmount. */
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Enrollment captured but could not be saved: template volume unavailable.\n\n");
+        return;
+    }
+    char fingers_dir[PATH_MAX];
+    snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
+    mkdir(fingers_dir, 0700); /* ignore EEXIST — just needs to exist */
+
+    char template_path[PATH_MAX];
+    snprintf(template_path, sizeof(template_path), "%s/%s.dat", fingers_dir, label);
+
+    if (vfs5011_save_templates(template_path, templates, good) != 0) {
+        vfsc_err("Failed to save templates\n\n");
+        unmount_template_volume();
+        return;
+    }
+    unmount_template_volume();
+    vfsc_ok("Enrolled \"%s\" with %d template(s) saved.\n\n", label, good);
+    g_finger_count = -1; /* stale — next status/enroll/verify will re-list */
+}
+
+/* Same verify logic as the original CLI's "verify" mode, pulled into
+ * a function. Returns 0 on match, 2 on no-match, 1 on hard error —
+ * matching the original process exit codes, in case the menu ever
+ * needs to react to the outcome (e.g. counting consecutive failures
+ * for the daemon's lockout behavior later).
+ *
+ * As with enroll, the volume is only mounted around the load step —
+ * the swipe capture itself happens first, fully unmounted. */
+/* Shared by do_verify() and the Fpbootd daemon loop: captures one
+ * swipe, matches it against every enrolled finger, and reports the
+ * best result. Mounts/unmounts the store itself. Does NOT play
+ * sounds or print the "Success!"/"Incorrect" banner -- callers decide
+ * what a match/no-match means for their context (an interactive
+ * banner vs a socket response). quiet is forwarded straight to
+ * capture_quality_template() (0 = do_verify()'s normal interactive
+ * output, 1 = Fpbootd's silent background captures). Returns 0 on a
+ * genuine match (score >= g_match_threshold), 2 on a clean no-match,
+ * 1 on a hard failure (no sensor, no enrolled fingers, capture
+ * failed, etc). On a 0 or 2 return, out_label and out_score are
+ * always filled in; on 1 they're not meaningful. */
+static int verify_once(char *out_label, size_t out_label_size, int *out_score, int quiet) {
+    if (!g_detected_sensor) return 1;
+    if (!g_detected_sensor->backend_available) return 1;
+
+    struct xyt_struct probe;
+    if (capture_quality_template(&probe, quiet) != 0) return 1;
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) return 1;
+    char fingers_dir[PATH_MAX];
+    snprintf(fingers_dir, sizeof(fingers_dir), "%s/%s", mount_path, FINGERS_DIRNAME);
+
+    char labels[MAX_ENROLLED_FINGERS][MAX_FINGER_LABEL + 1];
+    int finger_count = list_enrolled_fingers(fingers_dir, labels, MAX_ENROLLED_FINGERS);
+    if (finger_count <= 0) {
+        unmount_template_volume();
+        g_finger_count = 0;
+        return 1;
+    }
+
+    int best_score = -1;
+    int best_finger = -1;
+    for (int f = 0; f < finger_count; f++) {
+        char template_path[PATH_MAX];
+        snprintf(template_path, sizeof(template_path), "%s/%s.dat", fingers_dir, labels[f]);
+
+        struct xyt_struct enrolled[MAX_STORED_TEMPLATES];
+        int enrolled_count = 0;
+        if (vfs5011_load_templates(template_path, enrolled, MAX_STORED_TEMPLATES, &enrolled_count) != 0) {
+            vfsc_err("  (could not load \"%s\", skipping)\n", labels[f]);
+            continue;
+        }
+
+        int finger_best = -1;
+        for (int i = 0; i < enrolled_count; i++) {
+            int score = vfs5011_match_score(&probe, &enrolled[i]);
+            if (score > finger_best) finger_best = score;
+        }
+        printf("  vs \"%s\": best score %d (%d template(s))\n", labels[f], finger_best, enrolled_count);
+        if (finger_best > best_score) { best_score = finger_best; best_finger = f; }
+    }
+    unmount_template_volume();
+
+    g_finger_count = finger_count;
+    memcpy(g_finger_labels, labels, sizeof(labels));
+
+    if (best_finger < 0) return 1;
+
+    snprintf(out_label, out_label_size, "%s", labels[best_finger]);
+    *out_score = best_score;
+    return (best_score >= g_match_threshold) ? 0 : 2;
+}
+
+static int do_verify(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected. Can't verify without one.\n\n");
+        return 1;
+    }
+    if (!g_detected_sensor->backend_available) {
+        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
+                  g_detected_sensor->display_name);
+        return 1;
+    }
+
+    char label[MAX_FINGER_LABEL + 1];
+    int score = -1;
+    int rc = verify_once(label, sizeof(label), &score, /*quiet=*/0);
+
+    if (rc == 1) {
+        vfsc_err("Verify failed: could not get a usable swipe, or no enrolled fingers found.\n\n");
+        return 1;
+    }
+
+    printf("Best match: \"%s\" score %d (threshold: %d)\n", label, score, g_match_threshold);
+    if (rc == 0) {
+        play_success_sound();
+        printf("\n  %s\xE2\x9C\x93  Success! (%s)%s\n\n", VFSC_BGREEN, label, VFSC_RESET);
+        return 0;
+    } else {
+        play_failure_sound();
+        printf("\n  %s\xE2\x9C\x97  Incorrect fingerprint%s\n\n", VFSC_BRED, VFSC_RESET);
+        return 2;
+    }
+}
+
+#define MAX_PASSWORD_LEN 256 /* matches vfs5011_daemon.c's own MAX_PASSWORD_LEN */
+
+/* --- Fpbootd: pre-login daemon mode (--fpbootd-daemon) ---
+ *
+ * Meant to run as a LaunchDaemon (RunAtLoad, root, no session
+ * dependency), so it's alive from very early in boot -- well before
+ * loginwindow renders. It does NOT hold the sensor open continuously
+ * between requests; verify_once()/capture_quality_template() already
+ * open and close the USB device fresh on every single capture, same
+ * as every other call site in this file, and there was no reason to
+ * special-case that here. What actually being alive this early buys
+ * is zero cold-start process-launch latency: by the time a login
+ * mechanism asks for a capture, this process and its match pipeline
+ * are already sitting in memory, so a request only ever pays for the
+ * capture itself.
+ *
+ * Socket protocol (deliberately trivial -- one command, one line
+ * back): a client writes "CAPTURE\n", this replies with exactly one
+ * of:
+ *   MATCH:<label>:<password>\n   -- score >= g_match_threshold
+ *   NOMATCH\n                    -- clean capture, no match
+ *   ERROR:<reason>\n             -- capture/mount/enrollment failure
+ * then the connection is closed. One request per connection, no
+ * persistent session -- whatever's on the other end (an Authorization
+ * Plugin mechanism, in the intended design) reconnects for each swipe
+ * attempt.
+ *
+ * SECURITY NOTE -- genuinely unresolved: the socket is created 0600
+ * (root-only) as the conservative default, since handing out a live
+ * fingerprint-to-password oracle to any local process would be
+ * reckless. Whether SecurityAgent's own process can connect to a
+ * root-owned socket at that permission at all is exactly the open
+ * question this whole feature is spiking to answer -- don't loosen
+ * this without understanding why it needed loosening first. */
+#define FPBOOTD_SOCKET_PATH "/var/run/fpbootd.sock"
+
+static void run_fpbootd_daemon(void) {
+    if (!g_detected_sensor || !g_detected_sensor->backend_available) {
+        fprintf(stderr, "fpbootd: no usable sensor detected, refusing to start.\n");
+        exit(1);
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        /* Match-in-sensor verify is architecturally a different path
+         * entirely (on-chip, no local minutiae compare) -- not wired
+         * up here yet. Fail loudly rather than silently doing
+         * nothing useful. */
+        fprintf(stderr, "fpbootd: Metallica MIS verify isn't wired into the daemon loop yet.\n");
+        exit(1);
+    }
+
+    unlink(FPBOOTD_SOCKET_PATH); /* stale socket from a previous run/crash */
+
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) {
+        fprintf(stderr, "fpbootd: socket() failed: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", FPBOOTD_SOCKET_PATH);
+
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "fpbootd: bind() failed: %s\n", strerror(errno));
+        close(srv);
+        exit(1);
+    }
+    chmod(FPBOOTD_SOCKET_PATH, 0600); /* see the SECURITY NOTE above */
+
+    if (listen(srv, 4) != 0) {
+        fprintf(stderr, "fpbootd: listen() failed: %s\n", strerror(errno));
+        close(srv);
+        exit(1);
+    }
+
+    fprintf(stderr, "fpbootd: listening on %s (sensor: %s)\n",
+            FPBOOTD_SOCKET_PATH, g_detected_sensor->display_name);
+
+    for (;;) {
+        int conn = accept(srv, NULL, NULL);
+        if (conn < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "fpbootd: accept() failed: %s\n", strerror(errno));
+            usleep(200000);
+            continue;
+        }
+
+        char cmd[32] = {0};
+        ssize_t n = read(conn, cmd, sizeof(cmd) - 1);
+        if (n > 0) {
+            char *nl = strchr(cmd, '\n');
+            if (nl) *nl = '\0';
+        }
+
+        char response[MAX_FINGER_LABEL + 512];
+        if (n > 0 && strcmp(cmd, "CAPTURE") == 0) {
+            char label[MAX_FINGER_LABEL + 1];
+            int score = -1;
+            int rc = verify_once(label, sizeof(label), &score, /*quiet=*/1);
+
+            if (rc == 0) {
+                play_success_sound();
+                char mount_path[PATH_MAX];
+                char password[MAX_PASSWORD_LEN + 1] = {0};
+                if (mount_template_volume(mount_path, sizeof(mount_path)) == 0) {
+                    char password_path[PATH_MAX];
+                    snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+                    FILE *pf = fopen(password_path, "r");
+                    if (pf) {
+                        size_t pn = fread(password, 1, MAX_PASSWORD_LEN, pf);
+                        password[pn] = '\0';
+                        fclose(pf);
+                    }
+                    unmount_template_volume();
+                }
+                if (password[0] != '\0') {
+                    snprintf(response, sizeof(response), "MATCH:%s:%s\n", label, password);
+                } else {
+                    snprintf(response, sizeof(response), "ERROR:no_stored_password\n");
+                }
+            } else if (rc == 2) {
+                play_failure_sound();
+                snprintf(response, sizeof(response), "NOMATCH\n");
+            } else {
+                snprintf(response, sizeof(response), "ERROR:capture_failed\n");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR:unknown_command\n");
+        }
+
+        write(conn, response, strlen(response));
+        close(conn);
+    }
+}
+
+/* --- Settings: [1] Delete Fingerprint Templates --- */
+/* Lists enrolled fingers and lets the user delete one by number.
+ * Deletion just removes that finger's .dat file from the volume —
+ * the other fingers are untouched. */
+static void do_settings_delete_fingers(void) {
+    refresh_finger_cache();
+
+    if (g_finger_count < 0) {
+        vfsc_err("Could not check enrolled fingers: template volume unavailable.\n\n");
+        return;
+    }
+    if (g_finger_count == 0) {
+        printf("No fingers enrolled yet. Use [1] Enroll a Finger to add one.\n\n");
+        return;
+    }
+
+    printf("Enrolled fingers:\n");
+    for (int i = 0; i < g_finger_count; i++) {
+        printf("  [%d] %s\n", i + 1, g_finger_labels[i]);
+    }
+    printf("\nEnter a number to delete that finger, or press Enter to go back: ");
+    fflush(stdout);
+
+    char line[16];
+    if (!fgets(line, sizeof(line), stdin)) { printf("\n"); return; }
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+    if (len == 0) { printf("\n"); return; }
+
+    int idx = atoi(line);
+    if (idx < 1 || idx > g_finger_count) {
+        vfsc_err("Invalid selection.\n\n");
+        return;
+    }
+
+    printf("Delete \"%s\"? This cannot be undone. [y/N]: ", g_finger_labels[idx - 1]);
+    fflush(stdout);
+    char confirm[8];
+    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("Cancelled.\n\n");
+        return;
+    }
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Cannot delete: template volume unavailable.\n\n");
+        return;
+    }
+    char template_path[PATH_MAX];
+    snprintf(template_path, sizeof(template_path), "%s/%s/%s.dat",
+             mount_path, FINGERS_DIRNAME, g_finger_labels[idx - 1]);
+
+    if (remove(template_path) != 0) {
+        vfsc_err("Failed to delete \"%s\": %s\n\n", g_finger_labels[idx - 1], strerror(errno));
+    } else {
+        printf("Deleted \"%s\".\n\n", g_finger_labels[idx - 1]);
+    }
+    unmount_template_volume();
+    g_finger_count = -1; /* stale — force a re-list next time */
+}
+
+/* --- Settings: [2] Clear Password Cache --- */
+/* Removes password.txt from the volume — the login password the
+ * daemon reads at lock time and auto-types on a match (see
+ * hack-touchid-store-password.sh / vfs5011_daemon.c). This does NOT touch
+ * enrolled fingerprints. After clearing, the daemon has nothing to
+ * type until hack-touchid-store-password.sh is run again. */
+static void do_settings_clear_password_cache(void) {
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Cannot clear password cache: template volume unavailable.\n\n");
+        return;
+    }
+    char password_path[PATH_MAX];
+    snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+
+    if (access(password_path, F_OK) != 0) {
+        printf("No cached password found — nothing to clear.\n\n");
+        unmount_template_volume();
+        return;
+    }
+
+    printf("Clear the cached login password? The daemon won't be able to auto-type\n");
+    printf("on unlock until you run hack-touchid-store-password.sh again. [y/N]: ");
+    fflush(stdout);
+    char confirm[8];
+    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("Cancelled.\n\n");
+        unmount_template_volume();
+        return;
+    }
+
+    if (remove(password_path) != 0) {
+        vfsc_err("Failed to clear password cache: %s\n\n", strerror(errno));
+    } else {
+        printf("Password cache cleared.\n\n");
+    }
+    unmount_template_volume();
+}
+
+/* --- Settings: [3] Set/Update Auto-Type Password --- */
+static void do_settings_set_password(void) {
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Cannot set password: template volume unavailable.\n\n");
+        return;
+    }
+    prompt_and_store_password(mount_path, /*only_if_missing=*/0);
+    unmount_template_volume();
+}
+
+/* Runs hack-touchid-setup-volume.sh (the one-time encrypted-volume creation
+ * script), streaming its output live rather than capturing-then-
+ * dumping like do_deploy() does — this one runs interactively rarely
+ * enough, and takes long enough (diskutil work), that the person
+ * running it benefits from watching it progress rather than staring
+ * at a blank line. Returns 0 on success. Shared between the Settings
+ * entry point and Deploy's own first-run auto-setup. */
+static int do_run_volume_setup(void) {
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, SETUP_VOLUME_SCRIPT_NAME);
+
+    printf("%s", VFSC_DIM);
+    int status = system(cmd);
+    printf("%s", VFSC_RESET);
+
+    if (status != 0) {
+        vfsc_err("Volume setup failed (exit status %d) — see output above.\n\n", status);
+        return -1;
+    }
+    vfsc_ok("Template volume set up successfully.\n\n");
+    return 0;
+}
+
+/* --- Settings: [4] Set Up / Repair Template Volume ---
+ * Guards against the easy mistake of re-running this against an
+ * already-configured volume: hack-touchid-setup-volume.sh doesn't check
+ * for an existing HackTouchIDStore, so running it twice would create a SECOND
+ * volume of the same name rather than repairing the first one. */
+static void do_settings_setup_volume(void) {
+    if (is_volume_configured()) {
+        vfsc_warn("A template volume named \"%s\" already exists.\n", VOLUME_NAME);
+        printf("Re-running setup will create a SEPARATE volume with the same name —\n");
+        printf("it will NOT repair or replace the existing one. Only do this if you\n");
+        printf("know the existing volume is broken and you're prepared to clean up\n");
+        printf("the old one yourself afterward (diskutil apfs deleteVolume).\n\n");
+        printf("Type \"yes\" to proceed anyway, or press Enter to cancel: ");
+        fflush(stdout);
+        char line[16];
+        if (!fgets(line, sizeof(line), stdin) || strncmp(line, "yes", 3) != 0) {
+            printf("Cancelled.\n\n");
+            return;
+        }
+        printf("\n");
+    }
+    do_run_volume_setup();
+}
+
+/* --- FPOV (Fingerprint Operating Verification) helpers --- */
+
+/* Encodes a build-style version string into FPOV's on-disk format:
+ * the first two characters as one token (the "year" pair), then one
+ * token per remaining character, a pipe separator, then 6 reserved
+ * zero bytes for future use. Plain text, not raw binary, so it stays
+ * eyeballable like the rest of the store's files. "26B216" becomes
+ * "{ 26 B 2 1 6 | 0x0 0x0 0x0 0x0 0x0 0x0 }". */
+static void fpov_encode_version(const char *version, char *out, size_t out_size) {
+    size_t len = strlen(version);
+    char body[128] = {0};
+    size_t pos = 0;
+
+    if (len >= 2) {
+        int n = snprintf(body, sizeof(body), "%.2s", version);
+        pos = (n > 0) ? (size_t)n : 0;
+        for (size_t i = 2; i < len && pos < sizeof(body); i++) {
+            n = snprintf(body + pos, sizeof(body) - pos, " %c", version[i]);
+            if (n > 0) pos += (size_t)n;
+        }
+    } else {
+        snprintf(body, sizeof(body), "%s", version);
+    }
+
+    snprintf(out, out_size, "{ %s | 0x0 0x0 0x0 0x0 0x0 0x0 }\n", body);
+}
+
+/* Finds this install's own local FPOV-OS<N>.txt, if FPOV setup was
+ * ever run for it. Only one is ever expected to exist on any single
+ * install's own disk (each install only ever receives its own during
+ * setup) -- the caller doesn't need to know or care whether it's
+ * labeled OS1, OS2, or OS3, just whatever's actually here. Returns
+ * true and fills out_path/out_label on a find; false if FPOV_SUPPORT_DIR
+ * doesn't exist or has nothing matching -- meaning FPOV was never set
+ * up on this install, not an error. */
+static bool find_local_fpov_file(char *out_path, size_t out_path_size,
+                                  char *out_label, size_t out_label_size) {
+    DIR *d = opendir(FPOV_SUPPORT_DIR);
+    if (!d) return false;
+
+    struct dirent *entry;
+    bool found = false;
+    while ((entry = readdir(d)) != NULL) {
+        if (strncmp(entry->d_name, "FPOV-OS", 7) == 0 && strstr(entry->d_name, ".txt")) {
+            snprintf(out_path, out_path_size, "%s/%s", FPOV_SUPPORT_DIR, entry->d_name);
+            snprintf(out_label, out_label_size, "%s", entry->d_name + 5); /* skip "FPOV-" */
+            char *dot = strstr(out_label, ".txt");
+            if (dot) *dot = '\0';
+            found = true;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Reads a whole small text file into a fixed buffer, trimming
+ * trailing whitespace/newlines. Returns false on any read failure. */
+static bool read_small_text_file(const char *path, char *out, size_t out_size) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    size_t n = fread(out, 1, out_size - 1, fp);
+    fclose(fp);
+    out[n] = '\0';
+    while (n > 0 && (out[n-1] == '\n' || out[n-1] == '\r' || out[n-1] == ' ')) out[--n] = '\0';
+    return true;
+}
+
+/* --- Settings: [9] Set Up FPOV (Multi-OS Version Check) ---
+ * Opt-in: only relevant for a genuine dual/triple-boot machine
+ * sharing one HackTouchIDStore volume across more than one macOS
+ * install. Writes the current install's FPOV_SCHEMA_VERSION as the
+ * shared baseline (FPOV-base.txt on the store) and as each named
+ * install's own local marker (FPOV-OS<N>.txt under FPOV_SUPPORT_DIR
+ * on that install's own boot volume) -- all installs start in sync
+ * at setup time by definition, since this is what establishes the
+ * baseline in the first place. */
+static void do_settings_setup_fpov(void) {
+    printf("Does this system have 2 or more macOS installs sharing this\n");
+    printf("HackTouchIDStore volume (dual/triple boot)? [y/N]: ");
+    fflush(stdout);
+    char confirm[8];
+    if (!fgets(confirm, sizeof(confirm), stdin) || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+        printf("No FPOV setup needed for a single-OS install. Skipping.\n\n");
+        return;
+    }
+
+    printf("\nHow many macOS installs in total share this volume (2 or 3)? ");
+    fflush(stdout);
+    char count_line[8];
+    if (!fgets(count_line, sizeof(count_line), stdin)) { printf("\n"); return; }
+    int os_count = atoi(count_line);
+    if (os_count < 2 || os_count > 3) {
+        vfsc_err("Enter 2 or 3 -- FPOV covers dual/triple boot, not arbitrary counts.\n\n");
+        return;
+    }
+
+    char os_paths[3][PATH_MAX];
+    for (int i = 0; i < os_count; i++) {
+        printf("Volume path for OS%d (e.g. /Volumes/Macintosh HD): ", i + 1);
+        fflush(stdout);
+        if (!fgets(os_paths[i], sizeof(os_paths[i]), stdin)) { printf("\n"); return; }
+        size_t len = strlen(os_paths[i]);
+        while (len > 0 && (os_paths[i][len-1] == '\n' || os_paths[i][len-1] == '\r' ||
+                            os_paths[i][len-1] == '/')) {
+            os_paths[i][--len] = '\0';
+        }
+        struct stat st;
+        if (len == 0 || stat(os_paths[i], &st) != 0 || !S_ISDIR(st.st_mode)) {
+            vfsc_err("\"%s\" doesn't look like a real, currently-mounted path.\n\n", os_paths[i]);
+            return;
+        }
+    }
+
+    char encoded[160];
+    fpov_encode_version(FPOV_SCHEMA_VERSION, encoded, sizeof(encoded));
+
+    printf("\n");
+    for (int i = 0; i < os_count; i++) {
+        char support_dir[PATH_MAX], file_path[PATH_MAX];
+        snprintf(support_dir, sizeof(support_dir), "%s%s", os_paths[i], FPOV_SUPPORT_DIR);
+        mkdir(support_dir, 0755); /* Library/Application Support are standard on any real
+                                      boot volume -- this dir is the only level that's ours
+                                      to create; ignore EEXIST, just needs to exist */
+        snprintf(file_path, sizeof(file_path), "%s/FPOV-OS%d.txt", support_dir, i + 1);
+
+        FILE *fp = fopen(file_path, "w");
+        if (!fp) {
+            vfsc_err("Could not write %s: %s\n\n", file_path, strerror(errno));
+            return;
+        }
+        fputs(encoded, fp);
+        fclose(fp);
+        vfsc_ok("Wrote FPOV-OS%d.txt for \"%s\".\n", i + 1, os_paths[i]);
+    }
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("\nLocal markers written, but couldn't mount the template volume to\n");
+        vfsc_err("write the shared FPOV-base.txt. Run [9] again once it's available.\n\n");
+        return;
+    }
+    char base_path[PATH_MAX];
+    snprintf(base_path, sizeof(base_path), "%s/%s", mount_path, FPOV_BASE_FILENAME);
+    FILE *fp = fopen(base_path, "w");
+    if (fp) {
+        fputs(encoded, fp);
+        fclose(fp);
+        vfsc_ok("Wrote %s to the shared store.\n\n", FPOV_BASE_FILENAME);
+    } else {
+        vfsc_err("Could not write %s: %s\n\n", base_path, strerror(errno));
+    }
+    unmount_template_volume();
+}
+
+/* Startup gate, called once from main() before letting the user into
+ * anything. Silently returns true (nothing to check) when FPOV was
+ * never set up on THIS install -- opt-in, never nags a single-OS
+ * setup. When it WAS set up, any mismatch against the shared
+ * FPOV-base.txt -- not just older-than -- blocks entirely, since
+ * there's no way to reason about forward/backward compatibility of
+ * the store format from here; simplest correct rule is exact match. */
+static bool check_fpov_version(void) {
+    char local_path[PATH_MAX], label[32];
+    if (!find_local_fpov_file(local_path, sizeof(local_path), label, sizeof(label))) {
+        return true; /* FPOV never set up on this install -- nothing to check */
+    }
+
+    char display_path[PATH_MAX] = "/";
+    char diskutil_out[256];
+    FILE *dp = popen("diskutil info / 2>/dev/null", "r");
+    if (dp) {
+        while (fgets(diskutil_out, sizeof(diskutil_out), dp)) {
+            char *p = strstr(diskutil_out, "Volume Name:");
+            if (p) {
+                p += strlen("Volume Name:");
+                while (*p == ' ') p++;
+                char *nl = strchr(p, '\n');
+                if (nl) *nl = '\0';
+                snprintf(display_path, sizeof(display_path), "/Volumes/%s/", p);
+                break;
+            }
+        }
+        pclose(dp);
+    }
+
+    vfsc_status_line("Checking FPOV Version for %s \"%s\"....", label, display_path);
+
+    char local_version[160];
+    if (!read_small_text_file(local_path, local_version, sizeof(local_version))) {
+        vfsc_err("Could not read %s: %s\n\n", local_path, strerror(errno));
+        return false;
+    }
+
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
+        vfsc_err("Cannot verify FPOV: template volume unavailable.\n\n");
+        return false;
+    }
+    char base_path[PATH_MAX];
+    snprintf(base_path, sizeof(base_path), "%s/%s", mount_path, FPOV_BASE_FILENAME);
+    char base_version[160];
+    bool base_ok = read_small_text_file(base_path, base_version, sizeof(base_version));
+    unmount_template_volume();
+
+    if (!base_ok) {
+        vfsc_err("Store has no %s -- this OS has a local FPOV marker but the shared\n",
+                  FPOV_BASE_FILENAME);
+        vfsc_err("store doesn't. Run Settings [9] again to re-establish it.\n\n");
+        return false;
+    }
+
+    if (strcmp(local_version, base_version) != 0) {
+        /* Before treating this as a real version difference, check
+         * whether it's actually just a stale/corrupted local file --
+         * regenerate it from THIS client's own compiled-in
+         * FPOV_SCHEMA_VERSION (never from the store's base; copying
+         * the store's value here would let a genuinely outdated
+         * client silently mark itself compliant without ever being
+         * updated, which defeats the entire point of FPOV) and
+         * compare again. Only a client whose own real version still
+         * doesn't match after this stays blocked. */
+        char regenerated[160];
+        fpov_encode_version(FPOV_SCHEMA_VERSION, regenerated, sizeof(regenerated));
+        char regenerated_trimmed[160];
+        snprintf(regenerated_trimmed, sizeof(regenerated_trimmed), "%s", regenerated);
+        size_t rlen = strlen(regenerated_trimmed);
+        while (rlen > 0 && (regenerated_trimmed[rlen-1] == '\n' || regenerated_trimmed[rlen-1] == '\r')) {
+            regenerated_trimmed[--rlen] = '\0';
+        }
+
+        if (strcmp(regenerated_trimmed, base_version) == 0) {
+            FILE *fp = fopen(local_path, "w");
+            if (fp) {
+                fputs(regenerated, fp);
+                fclose(fp);
+                vfsc_ok("Local FPOV marker was stale, not this client's real version --\n");
+                printf("regenerated from this build's own version and it matches. Continuing.\n\n");
+                return true;
+            }
+            /* Couldn't even repair it -- fall through to the hard block below. */
+        }
+
+        vfsc_err("FPOV MISMATCH for %s -- this install doesn't match the shared\n", label);
+        vfsc_err("store's version. Update this OS's client to the latest build on\n");
+        vfsc_err("your configured update channel (Settings [7]) before authenticating.\n\n");
+        return false;
+    }
+
+    vfsc_status_line_ok("Matches Store FPOV.");
+    return true;
+}
+
+/* --- Settings: [8] Link to a Different Volume / Check for Orphans ---
+ * Runs hack-touchid-volume-mount.sh --list to enumerate every volume
+ * currently named HackTouchIDStore (by disk id, not name -- see that
+ * script's header on why), shows the person what each one looks like
+ * (mounted/locked, has data or not), and lets them explicitly pick
+ * one to link this install to via --link <diskid>. Exists for cases
+ * the automatic mount-time logic won't touch on its own: e.g. a
+ * second macOS install (different APFS container -- discovered on
+ * Sequoia, where the store volume turned out NOT to be the same one
+ * Sonoma was using) that has its own real data, so there's more than
+ * one legitimate candidate and the automatic path refuses to guess.
+ * "Orphans" here just means every candidate that ISN'T the one
+ * linked -- this never deletes anything itself, only points out what
+ * a human might want to clean up with diskutil apfs deleteVolume. */
+static void do_settings_link_volume(void) {
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --list 2>&1", g_exec_dir, MOUNT_SCRIPT_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_err("Could not run the volume scanner: %s\n\n", strerror(errno));
+        return;
+    }
+
+    char diskids[16][64];
+    char mounts[16][PATH_MAX];
+    char datas[16][16];
+    int n = 0;
+    char line[PATH_MAX + 64];
+    while (n < 16 && fgets(line, sizeof(line), fp)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *p1 = strchr(line, '|');
+        if (!p1) continue; /* not a data line -- e.g. a stray script error */
+        char *p2 = strchr(p1 + 1, '|');
+        if (!p2) continue;
+        *p1 = '\0';
+        *p2 = '\0';
+        snprintf(diskids[n], sizeof(diskids[n]), "%s", line);
+        snprintf(mounts[n], sizeof(mounts[n]), "%s", p1 + 1);
+        snprintf(datas[n], sizeof(datas[n]), "%s", p2 + 1);
+        n++;
+    }
+    int status = pclose(fp);
+
+    if (n == 0) {
+        if (status != 0) {
+            vfsc_err("Volume scan failed (exit status %d).\n\n", status);
+        } else {
+            printf("No volumes named \"%s\" found anywhere.\n\n", VOLUME_NAME);
+        }
+        return;
+    }
+
+    printf("Found %d volume%s named \"%s\":\n\n", n, n == 1 ? "" : "s", VOLUME_NAME);
+    for (int i = 0; i < n; i++) {
+        printf("  %s[%d]%s %-12s  %-8s  data: %s%s\n",
+               VFSC_BOLD, i + 1, VFSC_RESET,
+               diskids[i],
+               strcmp(mounts[i], "-") == 0 ? "locked" : "mounted",
+               datas[i],
+               strcmp(datas[i], "unknown") == 0
+                   ? "  (stored passphrase doesn't open this one)" : "");
+    }
+    printf("\n");
+    printf("Pick one to link this install to it (its passphrase becomes the one\n");
+    printf("used automatically from now on), or press Enter to just leave this as\n");
+    printf("a report: ");
+    fflush(stdout);
+
+    char choice[8];
+    if (!fgets(choice, sizeof(choice), stdin)) {
+        printf("\n");
+        return;
+    }
+    int idx = atoi(choice);
+    if (idx < 1 || idx > n) {
+        printf("\n");
+        if (n > 1) {
+            printf("No link made. Whichever of the above you don't need is a candidate\n");
+            printf("for cleanup: \"diskutil apfs deleteVolume <diskid>\".\n\n");
+        }
+        return;
+    }
+    printf("\n");
+
+    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --link \"%s\"",
+             g_exec_dir, MOUNT_SCRIPT_NAME, diskids[idx - 1]);
+    printf("%s", VFSC_DIM);
+    status = system(cmd);
+    printf("%s", VFSC_RESET);
+    if (status != 0) {
+        vfsc_err("Linking failed (exit status %d) -- see output above.\n\n", status);
+        return;
+    }
+    vfsc_ok("Linked to %s.\n", diskids[idx - 1]);
+    if (n > 1) {
+        printf("The other%s listed above %s a candidate for cleanup once you've\n",
+               n > 2 ? "s" : "", n > 2 ? "are" : "is");
+        printf("confirmed you don't need %s: \"diskutil apfs deleteVolume <diskid>\".\n",
+               n > 2 ? "them" : "it");
+    }
+    printf("\n");
+    g_finger_count = -1; /* force a refresh next time it's shown */
+}
+
+/* Runs hack-touchid-grant-accessibility.sh against the daemon's fixed
+ * install path. Safe to call even if the daemon hasn't been deployed
+ * yet — the script itself checks the binary exists and reports a
+ * clear error rather than doing anything destructive. */
+static int do_run_accessibility_grant(void) {
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, GRANT_ACCESSIBILITY_SCRIPT_NAME);
+
+    printf("%s", VFSC_DIM);
+    int status = system(cmd);
+    printf("%s", VFSC_RESET);
+
+    if (status != 0) {
+        vfsc_err("Accessibility grant failed (exit status %d) — see output above.\n\n", status);
+        return -1;
+    }
+    if (is_accessibility_granted()) {
+        vfsc_ok("Accessibility permission confirmed granted.\n\n");
+        return 0;
+    }
+    vfsc_warn("Grant script exited cleanly, but the permission still isn't showing as\n"
+              "granted. Double-check that Filesystem Protections are disabled\n"
+              "(csrutil status) — the grant script relies on that.\n\n");
+    return -1;
+}
+
+/* --- Settings: [5] Grant/Verify Accessibility Permission --- */
+static void do_settings_grant_accessibility(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected -- can't determine which daemon to check.\n\n");
+        return;
+    }
+    char daemon_path[PATH_MAX];
+    get_daemon_install_path(daemon_path, sizeof(daemon_path));
+    if (access(daemon_path, F_OK) != 0) {
+        vfsc_err("Daemon isn't installed yet at:\n  %s\n"
+                 "Run [3] Deploy from the main menu first.\n\n", daemon_path);
+        return;
+    }
+    if (is_accessibility_granted()) {
+        printf("Accessibility is already granted for the installed daemon.\n");
+        printf("Re-grant anyway (e.g. after a manual rebuild)? [y/N]: ");
+        fflush(stdout);
+        char line[8];
+        if (!fgets(line, sizeof(line), stdin) || (line[0] != 'y' && line[0] != 'Y')) {
+            printf("Cancelled.\n\n");
+            return;
+        }
+        printf("\n");
+    }
+    do_run_accessibility_grant();
+}
+
+/* --- Settings: [6] Adjust Match Threshold ---
+ * Higher = stricter (fewer false accepts, more false rejects of the
+ * legitimate finger); lower = looser. Constrained to a fixed set of
+ * sane steps rather than a free-typed number, so someone can't
+ * accidentally set something wildly unsafe (e.g. 1) or above what
+ * this sensor's score range realistically produces. Writes the new
+ * value to MATCH_THRESHOLD_CONF_PATH and updates g_match_threshold
+ * immediately -- this client session and the background daemon (on
+ * its next swipe) both pick it up without needing a restart. */
+static void do_settings_adjust_threshold(void) {
+    printf("Current match threshold: %d\n\n", g_match_threshold);
+    printf("Higher = stricter matching (fewer false accepts, may need cleaner\n");
+    printf("swipes). Lower = looser (easier match, slightly higher false-accept\n");
+    printf("risk). Pick a value:\n\n");
+    printf("%s[1]%s 20 (default)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[2]%s 25\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[3]%s 30\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[4]%s 35\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[5]%s 40 (strictest)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[C]%s Cancel\n\n", VFSC_BOLD, VFSC_RESET);
+    printf("Choice: ");
+    fflush(stdout);
+
+    char line[16];
+    if (!fgets(line, sizeof(line), stdin)) {
+        printf("\n");
+        return;
+    }
+
+    int new_threshold;
+    switch (line[0]) {
+        case '1': new_threshold = 20; break;
+        case '2': new_threshold = 25; break;
+        case '3': new_threshold = 30; break;
+        case '4': new_threshold = 35; break;
+        case '5': new_threshold = 40; break;
+        default:
+            printf("Cancelled.\n\n");
+            return;
+    }
+
+    /* Parent dir already exists once the daemon's been deployed once
+     * (get_daemon_install_path() lives under the same tree), but
+     * don't assume Deploy has run yet -- create it defensively so
+     * this doesn't fail on a fresh checkout. */
+    system("mkdir -p /usr/local/libexec/hack-touchid");
+
+    FILE *f = fopen(MATCH_THRESHOLD_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", MATCH_THRESHOLD_CONF_PATH, strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", new_threshold);
+    fclose(f);
+
+    g_match_threshold = new_threshold;
+    vfsc_ok("Match threshold set to %d. Takes effect immediately -- no restart needed.\n\n",
+            new_threshold);
+}
+
+/* ------------------------------------------------------------------ *
+ * Swipe to Lock sensitivity + sensor test
+ *
+ * The daemon requires a lock swipe to be at least this many rows tall.
+ * It re-reads the file on every lock swipe, so a change here applies on
+ * the next swipe with no daemon restart. Keep the path and limits in
+ * sync with vfs5011_daemon.c.
+ * ------------------------------------------------------------------ */
+#define LOCKSWIPE_HEIGHT_CONF_PATH "/usr/local/libexec/hack-touchid/lockswipe_min_height.conf"
+#define LOCKSWIPE_HEIGHT_DEFAULT 60
+#define LOCKSWIPE_HEIGHT_LIMIT_MIN 20
+#define LOCKSWIPE_HEIGHT_LIMIT_MAX 400
+
+static int read_lockswipe_min_height(void) {
+    FILE *f = fopen(LOCKSWIPE_HEIGHT_CONF_PATH, "r");
+    if (!f) return LOCKSWIPE_HEIGHT_DEFAULT;
+    int val = LOCKSWIPE_HEIGHT_DEFAULT;
+    int got = fscanf(f, "%d", &val);
+    fclose(f);
+    if (got != 1 || val < LOCKSWIPE_HEIGHT_LIMIT_MIN || val > LOCKSWIPE_HEIGHT_LIMIT_MAX) {
+        return LOCKSWIPE_HEIGHT_DEFAULT;
+    }
+    return val;
+}
+
+static bool write_lockswipe_min_height(int value) {
+    system("mkdir -p /usr/local/libexec/hack-touchid");
+    FILE *f = fopen(LOCKSWIPE_HEIGHT_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", LOCKSWIPE_HEIGHT_CONF_PATH, strerror(errno));
+        return false;
+    }
+    fprintf(f, "%d\n", value);
+    fclose(f);
+    chmod(LOCKSWIPE_HEIGHT_CONF_PATH, 0644);
+    return true;
+}
+
+static void do_settings_lockswipe_sensitivity(void) {
+    int cur = read_lockswipe_min_height();
+    printf("Swipe to Lock minimum swipe height: %d rows (default %d)\n\n", cur, LOCKSWIPE_HEIGHT_DEFAULT);
+    printf("A swipe has to be at least this tall to lock the screen. Higher\n");
+    printf("ignores light brushes and resting touches. Lower triggers more\n");
+    printf("easily. Use [T] Sensor Test on the main menu to see your real\n");
+    printf("swipe heights first.\n\n");
+    printf("Enter a value (%d-%d), D for the default, or press Enter to cancel: ",
+           LOCKSWIPE_HEIGHT_LIMIT_MIN, LOCKSWIPE_HEIGHT_LIMIT_MAX);
+    fflush(stdout);
+
+    char line[32];
+    if (!fgets(line, sizeof(line), stdin)) {
+        printf("\n");
+        return;
+    }
+    if (line[0] == 'd' || line[0] == 'D') {
+        if (unlink(LOCKSWIPE_HEIGHT_CONF_PATH) != 0 && errno != ENOENT) {
+            vfsc_err("Failed to reset: %s\n\n", strerror(errno));
+            return;
+        }
+        vfsc_ok("Swipe to Lock minimum height reset to %d. Applies on the next swipe.\n\n",
+                LOCKSWIPE_HEIGHT_DEFAULT);
+        return;
+    }
+    int value = atoi(line);
+    if (value < LOCKSWIPE_HEIGHT_LIMIT_MIN || value > LOCKSWIPE_HEIGHT_LIMIT_MAX) {
+        printf("Cancelled.\n\n");
+        return;
+    }
+    if (write_lockswipe_min_height(value)) {
+        vfsc_ok("Swipe to Lock minimum height set to %d. Applies on the next swipe, no restart needed.\n\n", value);
+    }
+}
+
+/* Swipes the sensor as many times as you like and shows, for each swipe,
+ * the image height (what Swipe to Lock compares) and the minutiae count
+ * (what the weak-swipe check compares). Nothing is saved. At the end it
+ * summarises your swipes and can save a suggested sensitivity. */
+#define SENSOR_TEST_MAX_SWIPES 64
+static void do_sensor_test(void) {
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected.\n\n");
+        return;
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("%s is match-in-sensor, so there is no swipe image to measure.\n\n",
+                 g_detected_sensor->display_name);
+        return;
+    }
+
+    int need = read_lockswipe_min_height();
+    int heights[SENSOR_TEST_MAX_SWIPES];
+    int n = 0, failed = 0, weak = 0, would_lock = 0;
+
+    printf("Sensor Test: nothing is saved. Swipe the way you do to lock the screen.\n");
+    printf("Swipe to Lock currently needs a height of %d rows.\n\n", need);
+
+    for (;;) {
+        printf("Press Enter for swipe #%d, or Q then Enter to finish: ", n + failed + 1);
+        fflush(stdout);
+        char line[16];
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+        if (line[0] == 'q' || line[0] == 'Q') break;
+        if (n >= SENSOR_TEST_MAX_SWIPES) {
+            printf("Reached %d swipes, finishing.\n", SENSOR_TEST_MAX_SWIPES);
+            break;
+        }
+
+        if (open_device() != 0) {
+            close_device();
+            vfsc_err("Could not open the sensor.\n\n");
+            failed++;
+            continue;
+        }
+        int height = 0;
+        unsigned char *image = capture_fingerprint_image(g_handle, &height);
+        close_device();
+        if (!image) {
+            vfsc_err("Capture failed.\n\n");
+            failed++;
+            continue;
+        }
+
+        struct xyt_struct tmpl;
+        memset(&tmpl, 0, sizeof(tmpl));
+        int r = vfs5011_extract_template(image, current_sensor_image_width(), height, &tmpl);
+        free(image);
+        int minutiae = (r == 0) ? tmpl.nrows : 0;
+        bool locks = height >= need;
+        bool is_weak = minutiae < MIN_MINUTIAE;
+
+        heights[n++] = height;
+        if (locks) would_lock++;
+        if (is_weak) weak++;
+        printf("  Swipe %d: height %d rows, %d minutiae -> %s, %s\n\n", n, height, minutiae,
+               locks ? "would lock" : "too short to lock",
+               is_weak ? "weak for matching" : "good for matching");
+    }
+
+    if (n == 0) {
+        printf("No swipes recorded.\n\n");
+        return;
+    }
+
+    int min_h = heights[0], max_h = heights[0];
+    long sum = 0;
+    for (int i = 0; i < n; i++) {
+        if (heights[i] < min_h) min_h = heights[i];
+        if (heights[i] > max_h) max_h = heights[i];
+        sum += heights[i];
+    }
+    printf("%sSummary%s\n", VFSC_BOLD, VFSC_RESET);
+    printf("  Swipes recorded : %d (%d failed captures)\n", n, failed);
+    printf("  Height          : min %d, max %d, average %ld\n", min_h, max_h, sum / n);
+    printf("  Would lock      : %d of %d at the current setting (%d)\n", would_lock, n, need);
+    printf("  Weak for match  : %d of %d\n\n", weak, n);
+
+    if (n < 3) {
+        printf("Do at least 3 swipes to get a suggested sensitivity.\n\n");
+        return;
+    }
+
+    /* About half the shortest real swipe: well under anything you do on
+     * purpose, above grazes and resting touches. Rounded down to 5. */
+    int suggested = (min_h / 2) / 5 * 5;
+    if (suggested < 40) suggested = 40;
+    if (suggested > 200) suggested = 200;
+    printf("Suggested Swipe to Lock minimum height: %d (about half your shortest swipe).\n", suggested);
+    if (suggested == need) {
+        printf("That matches your current setting.\n\n");
+        return;
+    }
+    printf("Save %d as the Swipe to Lock minimum height? [y/N]: ", suggested);
+    fflush(stdout);
+    char ans[16];
+    if (!fgets(ans, sizeof(ans), stdin) || (ans[0] != 'y' && ans[0] != 'Y')) {
+        printf("Left unchanged.\n\n");
+        return;
+    }
+    if (write_lockswipe_min_height(suggested)) {
+        vfsc_ok("Swipe to Lock minimum height set to %d. Applies on the next swipe.\n\n", suggested);
+    }
+}
+
+/* Flips VERSION.txt's BRANCH= between "active-development" (beta/
+ * testing builds) and "main" (stable releases) -- an explicit opt-in/
+ * opt-out beta toggle rather than the branch just being whatever the
+ * currently-installed build happened to ship with. Rewrites
+ * VERSION.txt on disk (preserving VERSION=/BUILD=/CRITICAL=, only
+ * BRANCH= changes) and updates the in-memory cache immediately, so
+ * the update checker later in this same session already sees the new
+ * branch with no relaunch needed. The actual switch (downloading/
+ * building main instead of active-development, or vice versa) still
+ * only happens on the next real update check/install -- this just
+ * changes which branch that next check compares against and pulls
+ * from. */
+static void do_settings_toggle_beta(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        vfsc_err("No local %s found -- can't toggle beta updates on a build from "
+                 "before this feature existed. Update once normally first.\n\n",
+                 VERSION_FILE_NAME);
+        return;
+    }
+
+    bool currently_beta = (strcmp(g_local_version_info.branch, "active-development") == 0);
+    const char *new_branch = currently_beta ? "main" : "active-development";
+    snprintf(g_local_version_info.branch, sizeof(g_local_version_info.branch), "%s", new_branch);
+
+    if (!write_local_version_file(&g_local_version_info)) {
+        vfsc_err("Failed to write %s: %s\n\n", VERSION_FILE_NAME, strerror(errno));
+        return;
+    }
+
+    if (currently_beta) {
+        vfsc_ok("Beta updates OFF. Now tracking \"main\" (stable releases).\n\n");
+    } else {
+        vfsc_ok("Beta updates ON. Now tracking \"active-development\" (newest fixes "
+                "land here first, may be less stable).\n\n");
+    }
+}
+
+/* Settings [U]: turns the live (while-running) update notifications on
+ * or off and saves the choice so it survives relaunches. The boot-time
+ * update check is not affected. */
+static void do_settings_toggle_live_update(void) {
+    bool new_state = !g_live_update_check;
+    FILE *f = fopen(LIVE_UPDATE_CONF_PATH, "w");
+    if (!f) {
+        vfsc_err("Failed to write %s: %s\n\n", LIVE_UPDATE_CONF_PATH, strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", new_state ? 1 : 0);
+    fclose(f);
+    g_live_update_check = new_state;
+    if (new_state) {
+        vfsc_ok("Live update notifications ON. You'll be prompted if a new version is "
+                "published while the client is open.\n\n");
+    } else {
+        vfsc_ok("Live update notifications OFF. Updates are only checked at launch.\n\n");
+    }
+}
+
+/* Defined further down in the updater section. */
+static bool fetch_remote_version_file(const char *branch, client_version_info_t *out);
+static void run_update_prompt(const client_version_info_t *local,
+                              const client_version_info_t *remote, bool live, bool relaunch);
+static bool remote_is_newer(const client_version_info_t *local, const client_version_info_t *remote);
+
+/* Settings [CU]: manual "check for updates now". Same comparison and
+ * [A]/[Y]/[N] prompt as the launch-time check, but it also tells the
+ * user when they are already up to date or when the check couldn't run. */
+static void do_settings_check_updates(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        vfsc_err("No local %s found, so there is nothing to compare against. "
+                 "Update once normally first.\n\n", VERSION_FILE_NAME);
+        return;
+    }
+    const client_version_info_t local = g_local_version_info;
+
+    printf("Checking for updates on \"%s\"...\n", local.branch);
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) {
+        vfsc_warn("Couldn't reach GitHub. Check your internet connection and try again.\n\n");
+        return;
+    }
+    if (!remote_is_newer(&local, &remote)) {
+        vfsc_ok("You are up to date: v%s (%s).\n\n", local.version, local.build);
+        return;
+    }
+    run_update_prompt(&local, &remote, false, true);
+    /* Declined or failed: don't let the live watcher re-announce this build. */
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
+}
+
+/* One group heading: bold cyan title, then a dim underline. */
+static void print_settings_group(const char *title) {
+    printf("%s%s%s\n", VFSC_BCYAN, title, VFSC_RESET);
+    printf("%s--------------------------------%s\n", VFSC_DIM, VFSC_RESET);
+}
+
+/* The options are grouped by purpose. The keys did not change, only the
+ * order and the headings, so the dispatch in do_settings_menu() is the
+ * same. */
+static void print_settings_menu(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+    printf("%s                              SETTINGS%s\n", VFSC_BCYAN, VFSC_RESET);
+    printf("%s%s%s\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+
+    print_settings_group("FINGERPRINT & AUTHENTICATION");
+    printf("%s[1]%s Delete Fingerprint Templates\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[2]%s Clear Password Cache\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[3]%s Set/Update Auto-Type Password\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[6]%s Adjust Match Threshold (current: %d)\n", VFSC_BOLD, VFSC_RESET, g_match_threshold);
+    printf("\n");
+
+    print_settings_group("STORAGE & SYSTEM INTEGRATION");
+    printf("%s[4]%s Set Up / Repair Template Volume\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[5]%s Grant/Verify Accessibility Permission\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[8]%s Link to a Different Volume / Check for Orphans\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[9]%s Set Up FPOV (Multi-OS Version Check, dual/triple boot)\n", VFSC_BOLD, VFSC_RESET);
+    printf("\n");
+
+    print_settings_group("SWIPE TO LOCK");
+    printf("%s[L]%s Swipe to Lock Sensitivity (current: %d rows)\n", VFSC_BOLD, VFSC_RESET, read_lockswipe_min_height());
+    printf("\n");
+
+    print_settings_group("UPDATES & NOTIFICATIONS");
+    printf("%s[7]%s Toggle Beta Updates (current: %s)\n", VFSC_BOLD, VFSC_RESET,
+           g_local_version_loaded && g_local_version_info.branch[0] != '\0'
+               ? g_local_version_info.branch : "unknown");
+    printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
+           g_live_update_check ? "ON" : "OFF");
+    printf("%s[CU]%s Check for Updates Now\n", VFSC_BOLD, VFSC_RESET);
+
+    printf("\n");
+    printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s%s%s\n\n", VFSC_CYAN, VFSC_RULE, VFSC_RESET);
+}
+
+/* Small dedicated loop, same pattern as main()'s — stays inside
+ * Settings until the user picks [B] Back or hits EOF. Naming a finger
+ * (e.g. "Left Index Finger", "Right Middle Finger") already happens
+ * as part of [1] Enroll a Finger on the main menu, so it isn't
+ * duplicated here. */
+static void do_settings_menu(void) {
+    char line[64];
+    for (;;) {
+        print_settings_menu();
+        printf("%s<Hack-touchid Settings>%s ", VFSC_BOLD, VFSC_RESET);
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            return;
+        }
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' || line[len-1] == ' ')) {
+            line[--len] = '\0';
+        }
+        if (len == 0) continue;
+
+        char cmd = line[0];
+        printf("\n");
+        if ((line[0] == 'C' || line[0] == 'c') && (line[1] == 'U' || line[1] == 'u') && line[2] == '\0') {
+            do_settings_check_updates();
+            continue;
+        }
+        switch (cmd) {
+            case '1': do_settings_delete_fingers(); break;
+            case '2': do_settings_clear_password_cache(); break;
+            case '3': do_settings_set_password(); break;
+            case '4': do_settings_setup_volume(); break;
+            case '5': do_settings_grant_accessibility(); break;
+            case '6': do_settings_adjust_threshold(); break;
+            case '7': do_settings_toggle_beta(); break;
+            case '8': do_settings_link_volume(); break;
+            case '9': do_settings_setup_fpov(); break;
+            case 'U': case 'u': do_settings_toggle_live_update(); break;
+            case 'L': case 'l': do_settings_lockswipe_sensitivity(); break;
+            case 'B': case 'b': return;
+            default:
+                vfsc_err("Unrecognized option '%s'. Choose 1-9, L, U, CU or B.\n\n", line);
+        }
+    }
+}
+
+/* Deploy installs/reinstalls hack-touchid-agent-install.sh, which handles
+ * everything: rebuilding the daemon from source, copying it into
+ * place, tearing down any prior registration, the scoped NOPASSWD
+ * sudoers rule, writing the LaunchAgent plist to the console user's
+ * own ~/Library/LaunchAgents (NOT /Library/LaunchAgents — see that
+ * script's header comment for why the system-domain location doesn't
+ * work), and bootstrapping it into that user's gui/<uid> session.
+ * the hack-touchid client is already running as root at this point (see main()'s
+ * self-elevation), so the script's own root check passes straight
+ * through without a second sudo prompt.
+ *
+ * The install script's own output is captured rather than streamed —
+ * on success we print one clean summary line per phase; on failure we
+ * dump everything captured so far so the actual error is still
+ * visible. */
+static bool do_deploy(void) {
+    /* Hard gate, generalized in v1.1: refuse to install anything at
+     * all unless a sensor from supported_sensors.h is actually on the
+     * USB bus. Deploy used to happily install/register the LaunchAgent
+     * on any machine regardless of hardware, which meant a fresh
+     * checkout run on the wrong laptop (or with the sensor unplugged)
+     * would leave a dead agent behind that could never do anything
+     * useful. g_detected_sensor is set once at startup by
+     * detect_supported_sensor(), the same non-claiming enumeration
+     * used for the status line, so this is safe pre-root-check and
+     * won't fight a concurrent enroll/verify.
+     *
+     * Returns true/false (added for --deploy-agent, the headless CLI
+     * mode below, so its caller can report pass/fail and exit
+     * accordingly instead of always exiting 0). The interactive menu
+     * caller (case '3') still just discards the result, same as
+     * before. */
+    if (!g_detected_sensor) {
+        vfsc_err("No supported sensor detected on the USB bus.\n"
+                  "Refusing to deploy -- this installs a background service tied\n"
+                  "to a specific sensor, so it's not installed on hardware that\n"
+                  "doesn't have one.\n\n");
+        return false;
+    }
+
+    /* Detected, but that sensor's capture backend isn't built yet
+     * (backend_available == 0 in the table) -- e.g. UPEK is
+     * recognized on sight but has no daemon/installer to deploy. */
+    if (!g_detected_sensor->backend_available) {
+        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n"
+                  "Deploy isn't available for this sensor until that's built.\n\n",
+                  g_detected_sensor->display_name);
+        return false;
+    }
+
+    /* First-run convenience: Deploy needs the template volume to exist
+     * (it stores the auto-type password there right below), so set it
+     * up automatically rather than making the person discover Settings
+     * [4] on their own after a confusing failure. */
+    if (!is_volume_configured()) {
+        vfsc_warn("\nTemplate volume isn't set up yet — setting it up now...\n\n");
+        if (do_run_volume_setup() != 0) {
+            vfsc_err("Cannot continue deployment without the template volume.\n\n");
+            return false;
+        }
+    }
+
+    printf("\n%sDeploying Authentication Service (%s)...%s\n",
+           VFSC_CYAN, g_detected_sensor->display_name, VFSC_RESET);
+
+    /* This client already confirmed the sensor over libusb a moment ago
+     * (g_detected_sensor above), so tell the installer not to repeat the
+     * check with its own shell-level USB probe. That second probe used to
+     * refuse on Tahoe while the sensor was clearly present. Inherited by
+     * the popen() child below. */
+    setenv("HT_SENSOR_VERIFIED", "1", 1);
+
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, g_detected_sensor->install_script_name);
+
+    FILE *fp = popen(cmd, "r");
+    char captured[4096] = {0};
+    if (fp) {
+        char line[512];
+        while (fgets(line, sizeof(line), fp)) {
+            strncat(captured, line, sizeof(captured) - strlen(captured) - 1);
+        }
+    }
+    int status = fp ? pclose(fp) : -1;
+
+    if (status != 0) {
+        printf("\n%s\n", captured);
+        vfsc_err("Service deployment failed (exit status %d) — see output above.\n\n", status);
+        return false;
+    }
+
+    printf("%sBuilding daemon executable...%s\n", VFSC_DIM, VFSC_RESET);
+    printf("%sRegistering background service...%s\n", VFSC_DIM, VFSC_RESET);
+    vfsc_ok("Service deployed successfully with 0 errors.\n");
+
+    /* hack-touchid-agent-install.sh already re-grants Accessibility on every
+     * deploy internally (see that script's header for why it must be
+     * redone every rebuild). This just surfaces whether it actually
+     * took, since a silent TCC failure would otherwise only show up
+     * later as "sensor matched but nothing got typed". */
+    if (is_accessibility_granted()) {
+        vfsc_ok("Accessibility permission: Granted.\n\n");
+    } else {
+        vfsc_warn("Accessibility permission: NOT detected.\n"
+                  "Run Settings [5] Grant/Verify Accessibility Permission to retry.\n\n");
+    }
+
+    /* Now that the service is live, make sure it actually has a
+     * password to type on a match — a fresh deploy on a machine that
+     * has never run hack-touchid-store-password.sh (or the older manual
+     * script flow) would otherwise sit there matching fingerprints
+     * and silently failing to type anything. */
+    char mount_path[PATH_MAX];
+    if (mount_template_volume(mount_path, sizeof(mount_path)) == 0) {
+        char password_path[PATH_MAX];
+        snprintf(password_path, sizeof(password_path), "%s/%s", mount_path, PASSWORD_FILENAME);
+        if (access(password_path, F_OK) != 0) {
+            prompt_and_store_password(mount_path, /*only_if_missing=*/1);
+        }
+        unmount_template_volume();
+    }
+
+    printf("Lock your screen and swipe an enrolled finger to test it.\n\n");
+    return true;
+}
+
+/* Darwin kernel major version 23 == macOS 14 Sonoma, the stated floor
+ * as of this change (raised from Ventura Sep 18 2026 -- Homebrew isn't
+ * practically usable on Ventura, and several update-checker/build
+ * steps assume it). Before that, this gated at Darwin 22 (Ventura),
+ * and before THAT at Darwin 24 (Sequoia, the OS this project was
+ * first developed against) -- a source review at the time found no
+ * actual Sequoia/Sonoma-only API dependency anywhere in the daemon,
+ * client, or menu bar app: every system call in use (AX APIs,
+ * CFNotificationCenterGetDistributedCenter, diskutil apfs, TCC.db
+ * writes, SMAppService) has worked since well before Ventura. The
+ * "Passwords" entry in is_system_auth_process() is Sequoia-only in
+ * practice (that app doesn't exist earlier) but is a harmless no-op
+ * allowlist entry on older OSes, not a hard dependency. The Sonoma
+ * floor itself is about Homebrew, not an OS API gap.
+ *
+ * The one confirmed empirical gap: the coreautha/Keychain-Access
+ * auth-surface finding from v1.0.2 was only verified via ax_probe.c on
+ * Sequoia. It has NOT yet been re-verified on Sonoma, so that specific
+ * feature may behave differently there until confirmed.
+ *
+ * Anything older than Darwin 23 is still untested -- this remains a
+ * heads-up, not a block. Someone running this on an older OS may know
+ * exactly what they're doing (or be deliberately porting it backward),
+ * but they should know up front that nothing here has been verified
+ * there and support is on them. */
+static void check_macos_version_warning(void) {
+    struct utsname uts;
+    if (uname(&uts) != 0) return; /* can't determine it -- don't nag about something unconfirmed */
+
+    int darwin_major = atoi(uts.release); /* "23.6.0" -> 23 */
+    if (darwin_major > 0 && darwin_major < 23) {
+        printf("\n");
+        printf("############################################################\n");
+        printf("  WARNING: Darwin %s detected -- older than macOS Sonoma\n", uts.release);
+        printf("  (Darwin 23.x). This project is developed and tested\n");
+        printf("  against Sonoma and later only (Homebrew isn't practically\n");
+        printf("  usable on Ventura). Older macOS versions are untested\n");
+        printf("  territory -- things may work, may not, or may behave\n");
+        printf("  differently. You're on your own for support here.\n");
+        printf("############################################################\n\n");
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Update checker
+ * ------------------------------------------------------------------ *
+ * Reads this build's own VERSION.txt (shipped alongside the binary,
+ * next to hack-touchid itself) and compares it against the SAME
+ * branch's VERSION.txt fetched fresh from GitHub. Deliberately NOT a
+ * gate -- unlike check_daemon_version_gate() or
+ * check_opencore_version_requirement(), this never stops launch on
+ * its own. The three outcomes:
+ *
+ *   - No local VERSION.txt (an old build from before this feature
+ *     existed) -- silently skip. Nothing to compare against.
+ *   - Fetch failed (offline, DNS, rate limited, GitHub down) -- tells
+ *     the user explicitly why, rather than saying nothing and letting
+ *     silence be mistaken for "you're up to date."
+ *   - Remote isn't newer -- silently skip, same "no fuss" precedent
+ *     the rest of this project's checks already follow.
+ *   - Remote IS newer -- prompts. On Y, hands off to
+ *     download_build_and_swap_update(), which either relaunches
+ *     straight into the new build or returns false (having already
+ *     explained why) so boot just continues on the current version.
+ *
+ * Uses curl via popen()/system(), same pattern the rest of this file
+ * already uses for scripts and downloads -- no new library dependency
+ * (curl ships with macOS). -m 3 on the VERSION.txt fetch specifically
+ * caps DNS+connect+transfer at 3 seconds so a stalled network can't
+ * hang startup; the zip download further down has no such cap since
+ * that one only runs after the user has already said yes.
+ *
+ * Fetches raw.githubusercontent.com directly rather than GitHub's API
+ * -- a plain two-field text file has no JSON to parse and isn't
+ * subject to the REST API's per-hour rate limit, unlike the tags API
+ * this used to hit. */
+
+#define UPDATE_REPO_URL "https://github.com/hackintosh-user/VFS5011-hackintosh"
+#define UPDATE_RAW_BASE_URL "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
+
+/* Fetches <branch>'s VERSION.txt fresh from GitHub -- deliberately the
+ * SAME branch the local copy says it's on (local.branch), so someone
+ * running active-development only ever gets prompted to update to a
+ * newer active-development build, never accidentally offered main
+ * (which could be an OLDER version number) or vice versa. Returns
+ * false on anything that isn't a clean 200 -- offline, DNS failure,
+ * curl not installed, branch renamed, whatever; all treated the same
+ * as "couldn't check," per the caller's disconnected-notice handling. */
+static bool fetch_remote_version_file(const char *branch, client_version_info_t *out) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "curl -fsS -m 3 '%s/%s/%s' 2>/dev/null",
+             UPDATE_RAW_BASE_URL, branch, VERSION_FILE_NAME);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+
+    char buf[512];
+    size_t total = 0;
+    size_t n;
+    while (total < sizeof(buf) - 1 &&
+           (n = fread(buf + total, 1, sizeof(buf) - 1 - total, fp)) > 0) {
+        total += n;
+    }
+    buf[total] = '\0';
+    pclose(fp);
+
+    if (total == 0) return false;
+
+    return parse_version_file(buf, out);
+}
+
+/* draw_progress_bar() -- redraws a single-line "label [####    ] NN%"
+ * bar in place via \r. Never prints a trailing \n itself (so repeated
+ * calls overwrite cleanly) -- the caller prints one \n once the
+ * operation this bar tracks has actually finished. */
+static void draw_progress_bar(int percent, const char *label) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    const int width = 30;
+    int filled = (percent * width) / 100;
+    printf("\r%s [", label);
+    for (int i = 0; i < width; i++) putchar(i < filled ? '#' : ' ');
+    printf("] %3d%%", percent);
+    fflush(stdout);
+}
+
+/* draw_enroll_bar() -- same single-line-redraw-via-\r technique as
+ * draw_progress_bar() above, but for enroll's "N good swipes out of
+ * M" progress instead of a percent, plus a short colored status word
+ * instead of the scrolling per-attempt messages capture_quality_template()
+ * used to print directly. Trailing spaces pad over a longer previous
+ * status line (e.g. "Try again, slower and fuller" -> "Good") so
+ * nothing lingers after a shorter one overwrites it.
+ *
+ * status/color are NULL during the "waiting on a swipe" state (no
+ * status word yet, just the bar). Caller prints one \n once a slot is
+ * fully resolved (or the whole loop ends), same convention as
+ * draw_progress_bar(). */
+static void draw_enroll_bar(int good, int total, const char *status, const char *color) {
+    const int width = 20;
+    int filled = total > 0 ? (good * width) / total : 0;
+    printf("\r  [");
+    for (int i = 0; i < width; i++) putchar(i < filled ? '#' : ' ');
+    printf("] %d/%d  %s%-32s%s", good, total,
+           color ? color : "", status ? status : "", VFSC_RESET);
+    fflush(stdout);
+}
+
+/* download_with_progress() -- fork+exec curl directly, fully silenced,
+ * polling the growing output file's size against a Content-Length
+ * fetched via a quick HEAD request beforehand, drawing our own
+ * draw_progress_bar() as it goes. Deliberately NOT using curl's own
+ * --progress-bar: that depends on curl detecting a real TTY + usable
+ * width, and in practice it falls back to curl's legacy "-=O=-"
+ * spinner+hashmark meter instead of a clean single-line bar -- not
+ * reliable enough to depend on. This avoids curl's renderer entirely.
+ * Returns true iff curl exited 0. */
+static bool download_with_progress(const char *url, const char *out_path) {
+    long total_size = -1;
+    {
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "curl -fsIL '%s' 2>/dev/null", url);
+        FILE *hp = popen(cmd, "r");
+        if (hp) {
+            char hline[512];
+            while (fgets(hline, sizeof(hline), hp)) {
+                long v;
+                /* keep the LAST Content-Length seen -- GitHub redirects,
+                 * and each hop's headers appear in this dump; the final
+                 * hop's value is the one we actually want. */
+                if (sscanf(hline, "Content-Length: %ld", &v) == 1 ||
+                    sscanf(hline, "content-length: %ld", &v) == 1) {
+                    total_size = v;
+                }
+            }
+            pclose(hp);
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) return false;
+
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+        }
+        execlp("curl", "curl", "-fsL", "-o", out_path, url, (char *)NULL);
+        _exit(127); /* only reached if execlp() itself failed */
+    }
+
+    draw_progress_bar(0, "Downloading");
+    int status = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        struct stat st;
+        long cur = (stat(out_path, &st) == 0) ? (long)st.st_size : 0;
+        if (total_size > 0) {
+            int pct = (int)((cur * 100) / total_size);
+            draw_progress_bar(pct, "Downloading");
+        }
+        if (r == pid) break;
+        usleep(150000);
+    }
+    draw_progress_bar(100, "Downloading");
+    printf("\n");
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* Downloads <branch>'s zip from GitHub, extracts it, chmod's its
+ * scripts, and builds it via prep_and_build.sh -- and ONLY if that
+ * build actually succeeds does it touch the current install at all:
+ * replaces g_exec_dir's contents in place with the freshly built
+ * source, then execv()s straight into the new hack-touchid binary
+ * (which, since this whole process is already running as root by the
+ * time this runs, needs no second sudo prompt).
+ *
+ * Build-success-gates-delete is deliberate and load-bearing:
+ * active-development is a moving target by definition, so if a build
+ * is ever broken when this runs, the user must be left exactly where
+ * they started -- their previously-working install untouched -- never
+ * bricked by an update that didn't actually work. On any failure
+ * (download, extract, or build), this returns false having already
+ * explained what went wrong; the caller just lets boot continue
+ * normally on the current version.
+ *
+ * Only returns on failure -- success means execv() replaced this
+ * process image and never came back here. */
+static bool download_build_and_swap_update(const char *branch, bool relaunch,
+                                           const char *new_version, const char *new_build) {
+    char tmp_dir[PATH_MAX];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/hack-touchid-update-%d", (int)getpid());
+
+    char cmd[PATH_MAX * 3];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", tmp_dir, tmp_dir);
+    system(cmd);
+
+    printf("\nDownloading HTID Update v%s %s...\n", new_version, new_build);
+    char zip_path[PATH_MAX];
+    snprintf(zip_path, sizeof(zip_path), "%s/update.zip", tmp_dir);
+    char dl_url[PATH_MAX];
+    snprintf(dl_url, sizeof(dl_url), "%s/archive/refs/heads/%s.zip", UPDATE_REPO_URL, branch);
+    if (!download_with_progress(dl_url, zip_path)) {
+        vfsc_err("Download failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    char extract_dir[PATH_MAX];
+    snprintf(extract_dir, sizeof(extract_dir), "%s/extracted", tmp_dir);
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", extract_dir);
+    system(cmd);
+
+    /* Count total entries first so the bar has a real denominator.
+     * unzip -l's entry lines map 1:1 to the creating:/inflating:/
+     * extracting: lines a verbose (non -q) extract prints, so this is
+     * an exact count, not an estimate -- format is 3 header lines +
+     * N entries + a "---" separator + 1 totals line. */
+    int total_entries = 1;
+    {
+        snprintf(cmd, sizeof(cmd), "unzip -l \"%s\" 2>/dev/null", zip_path);
+        FILE *lp = popen(cmd, "r");
+        if (lp) {
+            char lline[512];
+            int lineno = 0;
+            while (fgets(lline, sizeof(lline), lp)) lineno++;
+            pclose(lp);
+            if (lineno - 5 > 0) total_entries = lineno - 5;
+        }
+    }
+
+    snprintf(cmd, sizeof(cmd), "unzip -o \"%s\" -d \"%s\" 2>&1", zip_path, extract_dir);
+    FILE *ep = popen(cmd, "r");
+    if (!ep) {
+        vfsc_err("Extraction failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    int extracted = 0;
+    char eline[512];
+    draw_progress_bar(0, "Extracting");
+    while (fgets(eline, sizeof(eline), ep)) {
+        if (strstr(eline, "inflating:") || strstr(eline, "extracting:") ||
+            strstr(eline, "creating:") || strstr(eline, "linking:")) {
+            extracted++;
+            draw_progress_bar((extracted * 100) / total_entries, "Extracting");
+        }
+    }
+    int extract_wait_status = pclose(ep);
+
+    if (!WIFEXITED(extract_wait_status) || WEXITSTATUS(extract_wait_status) != 0) {
+        printf("\n");
+        vfsc_err("Extraction failed. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+    draw_progress_bar(100, "Extracting");
+    printf("\n");
+
+    /* GitHub's branch zip always contains exactly one top-level
+     * folder (named "<repo>-<branch>/", slashes in the branch name
+     * turned into dashes) -- found by scanning rather than
+     * hardcoding that name, so this doesn't silently break if
+     * GitHub ever changes the convention. */
+    char src_dir[PATH_MAX] = {0};
+    DIR *d = opendir(extract_dir);
+    if (d != NULL) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            snprintf(src_dir, sizeof(src_dir), "%s/%s", extract_dir, ent->d_name);
+            break;
+        }
+        closedir(d);
+    }
+
+    if (src_dir[0] == '\0') {
+        vfsc_err("Could not locate the extracted source folder. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    char build_log[PATH_MAX];
+    snprintf(build_log, sizeof(build_log), "%s/build.log", tmp_dir);
+    FILE *log_fp = fopen(build_log, "w");
+    if (!log_fp) {
+        vfsc_err("Could not open build log for writing. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    /* prep_and_build.sh has two interactive prompts: "Which sensor do you
+     * have?" when it cannot auto-detect one, and "Install them now with
+     * Homebrew? [y/N]" when a dependency is missing. Its output is captured
+     * below, so either prompt was invisible and the update sat at
+     * "Building [0/3]" forever. So: name the sensor family we already
+     * detected (or "all"), say yes to installs, and close stdin so
+     * nothing can ever wait on an answer. */
+    const char *build_family = (g_detected_sensor && g_detected_sensor->family)
+                                   ? g_detected_sensor->family : "all";
+    snprintf(cmd, sizeof(cmd),
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes 2>&1 </dev/null",
+             src_dir, build_family);
+    FILE *bp = popen(cmd, "r");
+    if (!bp) {
+        fclose(log_fp);
+        vfsc_err("Build failed to start. Staying on the current version.\n\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+        system(cmd);
+        return false;
+    }
+
+    /* build.sh echoes one "==>" line per binary it builds, in this fixed
+     * order. Compiler output has no natural "% done" signal, so the bar
+     * is driven by those discrete steps: it counts only the binaries
+     * this build actually makes (hack-touchid always, vfs5011_daemon for
+     * the VFS5011 family, metallica_mis_daemon for Metallica), and a step
+     * that has started counts as half done, so with 2 steps the bar goes
+     * 0% -> 25% -> 75% -> 100% at "Build complete". It is an estimate,
+     * not a measurement. */
+    static const char *const all_steps[] = {
+        "Building hack-touchid...",
+        "Building vfs5011_daemon...",
+        "Building metallica_mis_daemon"
+    };
+    const bool fam_all = strcmp(build_family, "all") == 0;
+    const char *build_steps[3];
+    int total_steps = 0;
+    build_steps[total_steps++] = all_steps[0];
+    if (fam_all || strstr(build_family, "vfs5011")) build_steps[total_steps++] = all_steps[1];
+    if (fam_all || strstr(build_family, "metallica")) build_steps[total_steps++] = all_steps[2];
+    int step = 0;   /* how many of build_steps have started */
+    int percent = 0;
+
+    char bline[1024];
+    draw_progress_bar(percent, "Building");
+    while (fgets(bline, sizeof(bline), bp)) {
+        fputs(bline, log_fp); /* full output still preserved for debugging */
+        if (strstr(bline, "Missing for your sensor")) {
+            printf("\nInstalling the Homebrew packages your sensor needs (this can take a few minutes)...\n");
+            draw_progress_bar(percent, "Building");
+        }
+        if (step < total_steps && strstr(bline, build_steps[step])) {
+            step++;
+            percent = ((2 * step - 1) * 100) / (2 * total_steps);
+            draw_progress_bar(percent, "Building");
+        } else if (strstr(bline, "Build complete (sensor family")) {
+            percent = 100;
+            draw_progress_bar(percent, "Building");
+        }
+    }
+    printf("\n");
+
+    int build_wait_status = pclose(bp);
+    fclose(log_fp);
+    int build_status = WIFEXITED(build_wait_status) ? WEXITSTATUS(build_wait_status) : -1;
+
+    char new_binary[PATH_MAX];
+    snprintf(new_binary, sizeof(new_binary), "%s/hack-touchid", src_dir);
+
+    if (build_status != 0 || access(new_binary, X_OK) != 0) {
+        vfsc_err("Build failed. Staying on the current version.\n");
+        printf("  Build log kept for debugging: %s\n\n", build_log);
+        /* Deliberately NOT deleting tmp_dir here -- the build log is
+         * the whole point of leaving it behind; delete manually once
+         * you're done with it. */
+        return false;
+    }
+
+    printf("Build succeeded. Installing...\n");
+    snprintf(cmd, sizeof(cmd),
+             "rm -rf \"%s\"/* \"%s\"/.[!.]* 2>/dev/null; cp -R \"%s\"/. \"%s\"/",
+             g_exec_dir, g_exec_dir, src_dir, g_exec_dir);
+    system(cmd);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmp_dir);
+    system(cmd);
+
+    /* The new source is in place. The installed daemon is now stale, and
+     * only [3] Deploy replaces it, so remove it here. */
+    bool daemon_removed = remove_daemon_for_update();
+    g_daemon_removed_by_update = daemon_removed;
+
+    if (!relaunch) {
+        printf("Update installed.\n");
+        printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
+        printf("Update was complete, please run sudo hack-touchid to launch the client.\n\n");
+        return true;
+    }
+
+    printf("Update installed. Relaunching...\n\n");
+    fflush(stdout);
+
+    char new_path[PATH_MAX];
+    snprintf(new_path, sizeof(new_path), "%s/hack-touchid", g_exec_dir);
+    char *new_argv[5];
+    int nai = 0;
+    new_argv[nai++] = new_path;
+    if (!g_verbose_boot) new_argv[nai++] = (char *)"--q";
+    new_argv[nai++] = (char *)"--post-update";
+    if (daemon_removed) new_argv[nai++] = (char *)"--daemon-removed";
+    new_argv[nai++] = NULL;
+    execv(new_path, new_argv);
+
+    /* execv() only returns on failure -- the update itself did
+     * succeed at this point, just the relaunch didn't. */
+    vfsc_err("Update installed, but relaunch failed: %s\n", strerror(errno));
+    vfsc_err("Please run hack-touchid manually.\n\n");
+    exit(1);
+}
+
+/* ------------------------------------------------------------------ *
+ * Update changelog viewer ([A] at the update prompt)
+ * ------------------------------------------------------------------ *
+ * Fetches CHANGELOG.md from the SAME branch as the version check and
+ * prints just what's new relative to the running build, so nobody has
+ * to open GitHub to find out what an update contains.
+ *
+ *   - Sections ("## vX.Y.Z ...") newer than the local version print in
+ *     full (bullets only).
+ *   - If the top section IS the local version (a beta build bump where
+ *     VERSION= didn't move), only its newest UPDATE_CL_BUILD_LINES
+ *     bullets print -- CHANGELOG.md is newest-first.
+ *   - Total output is capped at UPDATE_CL_MAX_LINES, then points at the
+ *     full file on GitHub.
+ * Markdown noise (** and backticks) is stripped for the terminal.
+ * Returns false if the changelog couldn't be fetched. */
+#define UPDATE_CL_MAX_BYTES    (128 * 1024)
+#define UPDATE_CL_MAX_LINES    40
+#define UPDATE_CL_BUILD_LINES  8
+
+/* Usable text width for the changelog: terminal columns minus a small
+ * margin, capped so very wide windows stay readable. Falls back to 80
+ * when stdout isn't a terminal. */
+static int changelog_width(void) {
+    int cols = 80;
+    struct winsize ws;
+    if (isatty(STDOUT_FILENO) && ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 40)
+        cols = ws.ws_col;
+    cols -= 2;
+    if (cols > 100) cols = 100;
+    return cols;
+}
+
+/* Prints out[from..to) and bolds whatever falls inside out[0..date_len). */
+static void changelog_emit(const char *out, size_t from, size_t to, size_t date_len) {
+    if (date_len > 0 && from < date_len) {
+        size_t mid = to < date_len ? to : date_len;
+        printf("%s", VFSC_BOLD);
+        fwrite(out + from, 1, mid - from, stdout);
+        printf("%s", VFSC_RESET);
+        if (to > mid) fwrite(out + mid, 1, to - mid, stdout);
+    } else {
+        fwrite(out + from, 1, to - from, stdout);
+    }
+}
+
+/* Prints one changelog line for the terminal:
+ *   - section headers in bold,
+ *   - bullets as "  * " with the leading date bolded, word-wrapped to the
+ *     terminal width with a hanging indent so wrapped lines line up.
+ * Markdown noise (** and backticks) is stripped. */
+static void print_changelog_line(const char *line, size_t len, bool header) {
+    char out[2048];
+    size_t o = 0, date_len = 0;
+    size_t i = 0;
+
+    if (!header && len >= 2 && line[0] == '-' && line[1] == ' ') i = 2;
+
+    /* Leading "**Oct 2**" becomes a bold date. */
+    if (!header && i + 1 < len && line[i] == '*' && line[i + 1] == '*') {
+        size_t j = i + 2;
+        while (j + 1 < len && !(line[j] == '*' && line[j + 1] == '*')) j++;
+        if (j + 1 < len) {
+            for (size_t k = i + 2; k < j && o < sizeof(out) - 1; k++) out[o++] = line[k];
+            date_len = o;
+            i = j + 2;
+        }
+    }
+    for (; i < len && o < sizeof(out) - 1; i++) {
+        if (line[i] == '`') continue;
+        if (line[i] == '*' && i + 1 < len && line[i + 1] == '*') { i++; continue; }
+        out[o++] = line[i];
+    }
+    out[o] = '\0';
+
+    if (header) {
+        printf("\n%s%s%s\n", VFSC_BOLD, out, VFSC_RESET);
+        return;
+    }
+
+    const int width = changelog_width();
+    const int indent = 4;
+    printf("  * ");
+    int col = indent;
+    size_t pos = 0;
+    while (pos < o) {
+        while (pos < o && out[pos] == ' ') pos++;
+        if (pos >= o) break;
+        size_t ws_ = pos;
+        int wlen = 0;
+        while (pos < o && out[pos] != ' ') {
+            if (((unsigned char)out[pos] & 0xC0) != 0x80) wlen++; /* count code points */
+            pos++;
+        }
+        if (col > indent && col + 1 + wlen > width) {
+            printf("\n%*s", indent, "");
+            col = indent;
+        }
+        if (col > indent) { putchar(' '); col++; }
+        changelog_emit(out, ws_, pos, date_len);
+        col += wlen;
+    }
+    putchar('\n');
+}
+
+static bool show_update_changelog(const char *branch, const char *local_version) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "curl -fsS -m 5 '%s/%s/CHANGELOG.md' 2>/dev/null",
+             UPDATE_RAW_BASE_URL, branch);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+
+    char *buf = malloc(UPDATE_CL_MAX_BYTES + 1);
+    if (!buf) { pclose(fp); return false; }
+    size_t total = 0, n;
+    while (total < UPDATE_CL_MAX_BYTES &&
+           (n = fread(buf + total, 1, UPDATE_CL_MAX_BYTES - total, fp)) > 0) {
+        total += n;
+    }
+    buf[total] = '\0';
+    pclose(fp);
+    if (total == 0) { free(buf); return false; }
+
+    int local_code = parse_version_code(local_version);
+    printf("\n%sWhat's new%s\n", VFSC_BCYAN, VFSC_RESET);
+
+    int printed = 0, sections_shown = 0, section_bullets = 0;
+    bool in_section = false, show_section = false, same_version = false, truncated = false;
+    const char *p = buf;
+    while (*p && !truncated) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        size_t clen = len;
+        if (clen > 0 && p[clen - 1] == '\r') clen--;
+
+        if (clen >= 4 && strncmp(p, "## v", 4) == 0) {
+            int code = parse_version_code(p + 3);
+            in_section = true;
+            section_bullets = 0;
+            same_version = (code >= 0 && code == local_code && sections_shown == 0);
+            show_section = (code >= 0 && local_code >= 0 && code > local_code) || same_version;
+            if (show_section) {
+                print_changelog_line(p + 3, clen - 3, true);
+                sections_shown++;
+            } else if (code >= 0 && local_code >= 0 && code < local_code) {
+                break; /* newest-first: nothing older is relevant */
+            }
+        } else if (in_section && show_section && clen > 2 && strncmp(p, "- ", 2) == 0) {
+            if (printed >= UPDATE_CL_MAX_LINES ||
+                (same_version && section_bullets >= UPDATE_CL_BUILD_LINES)) {
+                truncated = true;
+            } else {
+                print_changelog_line(p, clen, false);
+                printed++;
+                section_bullets++;
+            }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+
+    if (sections_shown == 0) {
+        printf("No changelog entries found for this update.\n");
+    }
+    printf("\nFull changelog: %s/blob/%s/CHANGELOG.md\n\n", UPDATE_REPO_URL, branch);
+    free(buf);
+    return true;
+}
+
+/* Shared [A]/[Y]/[N] update prompt, used by the boot-time check, the
+ * live watcher, Settings [CU] and --check-updates. `live` only changes
+ * the wording (the update was published while the client was already
+ * open). With relaunch=true a successful update relaunches the client
+ * and never comes back; with relaunch=false (--check-updates) it
+ * installs, tells the user to run the client again, and returns. Also
+ * returns if the user declined or the update attempt failed. */
+static void run_update_prompt(const client_version_info_t *local,
+                              const client_version_info_t *remote, bool live, bool relaunch) {
+    printf("\n");
+    if (remote->critical) {
+        printf("%s[NEW | CRITICAL]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BRED, VFSC_RESET);
+    } else {
+        printf("%s[NEW]%s Update for Hackintosh TouchID was found!!!\n",
+               VFSC_BYELLOW, VFSC_RESET);
+    }
+    if (live) {
+        printf("A new version was published while the client was open.\n");
+    }
+    printf("You are currently running v%s (%s).\n", local->version, local->build);
+    printf("New version: v%s (%s)\n\n", remote->version, remote->build);
+
+    for (;;) {
+        printf("  [A] Show changelog\n  [Y] Download and install\n  [N] Cancel\n");
+        printf("Choice [A/Y/N]: ");
+        fflush(stdout);
+
+        char confirm[16];
+        if (!fgets(confirm, sizeof(confirm), stdin)) {
+            printf("\nSkipping update. Continuing with v%s (%s).\n\n", local->version, local->build);
+            return;
+        }
+        char c = confirm[0];
+        if (c == 'a' || c == 'A') {
+            if (!show_update_changelog(local->branch, local->version)) {
+                vfsc_warn("Couldn't fetch the changelog. See: %s/blob/%s/CHANGELOG.md\n\n",
+                          UPDATE_REPO_URL, local->branch);
+            }
+            continue;
+        }
+        if (c == 'y' || c == 'Y') break;
+        printf("Skipping update. Continuing with v%s (%s).\n\n", local->version, local->build);
+        return;
+    }
+
+    download_build_and_swap_update(local->branch, relaunch, remote->version, remote->build);
+}
+
+/* True if `remote` is a newer version, or the same version with a
+ * higher build number. Same rule as the boot-time check. */
+static bool remote_is_newer(const client_version_info_t *local, const client_version_info_t *remote) {
+    int local_code = parse_version_code(local->version);
+    int remote_code = parse_version_code(remote->version);
+    if (local_code < 0 || remote_code < 0) return false;
+    if (remote_code != local_code) return remote_code > local_code;
+    long local_build = parse_build_code(local->build);
+    long remote_build = parse_build_code(remote->build);
+    return local_build >= 0 && remote_build >= 0 && remote_build > local_build;
+}
+
+static void check_for_client_update(void) {
+    /* g_local_version_info is cached the first time it's needed --
+     * either by print_banner() (quiet mode, runs before this) or
+     * right here (verbose mode, where print_banner() is deliberately
+     * deferred to the end of boot -- see its call site's comment --
+     * so it hasn't run yet by the time we get here). Do NOT gate this
+     * on g_local_version_loaded already being true; that was the bug:
+     * in verbose/default mode (g_verbose_boot's default) this function
+     * always ran before print_banner() ever had a chance to set it,
+     * so the update check silently no-op'd on every single launch
+     * that didn't pass --q/--quiet. */
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) return;
+    const client_version_info_t local = g_local_version_info;
+
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) {
+        printf("\n");
+        vfsc_warn("Your system is currently disconnected from the internet -- "
+                  "we cannot verify if you are running the most up-to-date "
+                  "version with the latest patches. Please connect to the "
+                  "internet to update.\n");
+        printf("\n");
+        return;
+    }
+
+    int local_code = parse_version_code(local.version);
+    int remote_code = parse_version_code(remote.version);
+    if (local_code < 0 || remote_code < 0) return;
+
+    bool is_newer = remote_code > local_code;
+    if (!is_newer && remote_code == local_code) {
+        long local_build = parse_build_code(local.build);
+        long remote_build = parse_build_code(remote.build);
+        if (local_build >= 0 && remote_build >= 0 && remote_build > local_build) {
+            is_newer = true;
+        }
+    }
+    if (!is_newer) return;
+
+    run_update_prompt(&local, &remote, false, true);
+    /* Declined (or failed): remember this build so the live watcher
+     * doesn't announce the same one again a minute later. */
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
+    /* Only reachable if the update attempt failed -- already explained
+     * why above. Fall through and let the caller continue booting the
+     * current version. */
+}
+
+/* Shared by the two headless update modes below: reads the local
+ * VERSION.txt, fetches the branch's remote one, and compares them.
+ * Prints its own message and returns false when there is nothing to do
+ * (no internet, unreadable version, already current). Returns true with
+ * *local and *remote filled in when a newer version or build exists. */
+static bool headless_find_update(client_version_info_t *local, client_version_info_t *remote) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) {
+        printf("Unable to check for updates.\n");
+        return false;
+    }
+    *local = g_local_version_info;
+
+    if (!fetch_remote_version_file(local->branch, remote)) {
+        printf("Unable to check for updates.\n");
+        return false;
+    }
+
+    if (parse_version_code(local->version) < 0 || parse_version_code(remote->version) < 0) {
+        printf("Unable to check for updates.\n");
+        return false;
+    }
+
+    if (!remote_is_newer(local, remote)) {
+        printf("You are on the current release for this branch.\n");
+        return false;
+    }
+    return true;
+}
+
+/* run_check_updates_mode() -- headless "hack-touchid --check-updates".
+ * Same version-fetch/compare logic as check_for_client_update() above,
+ * but never lands in the interactive client:
+ *   - no internet / remote version unreachable -> "Unable to check
+ *     for updates."
+ *   - no newer version -> "You are on the current release for this
+ *     branch."
+ *   - newer version -> shows the usual [A] Show changelog / [Y]
+ *     Download and install / [N] Cancel prompt. [Y] downloads, builds
+ *     and installs it (relaunch=false), which prints its own "Update
+ *     was complete, please run sudo hack-touchid to launch the client."
+ *     on success rather than execv'ing into the new binary itself. */
+static void run_check_updates_mode(void) {
+    client_version_info_t local, remote;
+    if (!headless_find_update(&local, &remote)) return;
+    run_update_prompt(&local, &remote, false, false);
+}
+
+/* run_menu_updater_mode() -- headless "hack-touchid --menu-updater".
+ * What the menu bar app's "Update Client" button runs in a terminal.
+ * The same check as --check-updates, but with no prompt: a newer
+ * version or build is downloaded, built and installed immediately
+ * (relaunch=false, so it ends with the "please run sudo hack-touchid"
+ * line). If the update fails, the current install is left untouched. */
+static void run_menu_updater_mode(void) {
+    client_version_info_t local, remote;
+    if (!headless_find_update(&local, &remote)) return;
+    if (!download_build_and_swap_update(local.branch, false, remote.version, remote.build)) return;
+
+    /* The update removes the stale daemon and only a deploy puts one back,
+     * so do that now instead of leaving the person to find [3] Deploy.
+     * Runs the NEWLY installed binary (this process is still the old one),
+     * and HTID_NO_PAUSE stops --deploy-agent from waiting for Return a
+     * second time, since the menu bar's terminal window already does. */
+    printf("Redeploying the daemon with the new client...\n\n");
+    fflush(stdout);
+    char deploy_cmd[PATH_MAX + 64];
+    snprintf(deploy_cmd, sizeof(deploy_cmd), "HTID_NO_PAUSE=1 \"%s/hack-touchid\" --deploy-agent", g_exec_dir);
+    int deploy_rc = system(deploy_cmd);
+    if (deploy_rc != 0) {
+        vfsc_err("The daemon redeploy did not finish. Run: sudo hack-touchid --deploy-agent\n\n");
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Same gate as vfs5011_daemon.c -- kept as a separate copy here rather
+ * than a shared header, matching this project's existing pattern of
+ * self-contained client/daemon .c files. See the daemon's copy of this
+ * function for the full explanation of the NVRAM key, the version
+ * string format, and the ExposeSensitiveData caveat -- keep both
+ * copies in sync if either needs updating. As of v1.0.2, OpenCore
+ * 1.0.6 is the recommended MINIMUM version (no ceiling), RELEASE or
+ * DEBUG build both fine.
+ *
+ * FAILURE MODE: only refuses to run when the version genuinely can't
+ * be determined at all (not booted via OpenCore, NVRAM variable
+ * missing/unreadable, or unparseable value) -- that indicates
+ * something fundamentally broken, not just "old." If a version WAS
+ * successfully read and it's simply below 1.0.6, this warns loudly
+ * and lets the user proceed anyway -- on their own for any issues on
+ * OpenCore 1.0.5 or older. */
+#define REQUIRED_OC_VERSION_CODE 106 /* 1.0.6 minimum -- MAJOR*100+MINOR*10+PATCH, no ceiling */
+
+/* Returns true if the client should proceed (version OK, or version
+ * too low but the user's been warned), false only when the version
+ * genuinely could not be determined at all. */
+static bool check_opencore_version_requirement(void) {
+    io_registry_entry_t options = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/options");
+    if (options == MACH_PORT_NULL) {
+        vfsc_err("OpenCore version check FAILED: could not open IODeviceTree:/options "
+                 "(are you booted via OpenCore at all?). Refusing to run.\n");
+        return false;
+    }
+
+    CFStringRef key = CFSTR("4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version");
+    CFTypeRef value = IORegistryEntryCreateCFProperty(options, key, kCFAllocatorDefault, 0);
+    IOObjectRelease(options);
+
+    if (!value) {
+        vfsc_err("OpenCore version check FAILED: \"opencore-version\" NVRAM variable not found.\n");
+        vfsc_err("This means either (a) you're not booted via OpenCore, or (b) your config.plist's\n");
+        vfsc_err("NVRAM -> ExposeSensitiveData bitmask doesn't expose this variable.\n");
+        vfsc_err("This tool requires OpenCore 1.0.6 or newer -- refusing to run.\n");
+        return false;
+    }
+
+    char buf[128] = {0};
+    bool got_string = false;
+
+    if (CFGetTypeID(value) == CFDataGetTypeID()) {
+        CFDataRef data = (CFDataRef)value;
+        CFIndex len = CFDataGetLength(data);
+        if (len > 0 && (size_t)len < sizeof(buf)) {
+            CFDataGetBytes(data, CFRangeMake(0, len), (UInt8 *)buf);
+            buf[len] = '\0';
+            got_string = true;
+        }
+    } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+        got_string = CFStringGetCString((CFStringRef)value, buf, sizeof(buf), kCFStringEncodingUTF8);
+    }
+    CFRelease(value);
+
+    if (!got_string || buf[0] == '\0') {
+        vfsc_err("OpenCore version check FAILED: could not read \"opencore-version\" as text. Refusing to run.\n");
+        return false;
+    }
+
+    int found_code = -1;
+    size_t buf_len = strlen(buf);
+    for (size_t i = 0; i + 4 <= buf_len; i++) {
+        if (buf[i] == '-' && isdigit((unsigned char)buf[i+1]) && isdigit((unsigned char)buf[i+2])
+            && isdigit((unsigned char)buf[i+3])
+            && (i + 4 == buf_len || buf[i+4] == '-')) {
+            found_code = (buf[i+1] - '0') * 100 + (buf[i+2] - '0') * 10 + (buf[i+3] - '0');
+            break;
+        }
+    }
+
+    if (found_code < 0) {
+        vfsc_err("OpenCore version check FAILED: could not parse a version out of \"%s\".\n", buf);
+        vfsc_err("Expected a format like \"REL-106-2025-08-01\". If OpenCore's NVRAM string format\n");
+        vfsc_err("has changed, this parser needs updating -- refusing to run rather than guess.\n");
+        return false;
+    }
+
+    if (found_code < REQUIRED_OC_VERSION_CODE) {
+        vfsc_err("OpenCore v%d.%d.%d detected: Officially not supported, proceed at your own risk.\n",
+                 found_code / 100, (found_code / 10) % 10, found_code % 10);
+        return true;
+    }
+
+    vfsc_status_line_ok("OpenCore v%d.%d.%d detected: continue.",
+           found_code / 100, (found_code / 10) % 10, found_code % 10);
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Sensor presence check (startup gate, v1.0.5, generalized in v1.1)
+ * ------------------------------------------------------------------ *
+ * Runs detect_supported_sensor() once and stores the result in
+ * g_detected_sensor for the rest of the session -- the status line,
+ * do_deploy(), and check_daemon_version_gate() all read that instead
+ * of re-probing. Exits if nothing in supported_sensors.h is found;
+ * printed as a verbose loading line so it reads like part of the
+ * normal startup sequence rather than a silent hang. */
+static bool check_sensor_presence_gate(void) {
+    vfsc_status_line("Checking if Sensor is active / enabled...");
+
+    g_detected_sensor = detect_supported_sensor();
+    if (!g_detected_sensor) {
+        printf("Sensor not found. Launching Failed\n");
+        printf("No supported sensor was found. Check if it's enabled or\n");
+        printf("if you don't have one. Then quit this application.\n");
+        return false;
+    }
+
+    vfsc_status_line_ok("%s detected. continuing...", g_detected_sensor->display_name);
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Sensor dependency check (startup, Oct 4)
+ * ------------------------------------------------------------------ *
+ * supported_sensors.h lists, per sensor, which third-party tools it
+ * needs at run time (deps_runtime). Now that the build scripts only
+ * install what the chosen sensor needs, this is the matching safety
+ * net at launch: look at what is actually present for the detected
+ * sensor, and offer to install ONLY the missing pieces with Homebrew.
+ * Nothing is installed for sensors the user does not own.
+ *
+ * The client runs as root (sudo) but Homebrew refuses to run as root,
+ * so the install drops back to $SUDO_USER. Never blocks launch: the
+ * features that need a missing piece refuse with their own message. */
+
+static bool ht_file_exists(const char *path) {
+    return access(path, F_OK) == 0;
+}
+
+/* Checks the same two Homebrew prefixes the build scripts know about
+ * (Intel /usr/local first, then /opt/homebrew). */
+static bool ht_dep_present(unsigned bit) {
+    static const char *prefixes[] = { "/usr/local", "/opt/homebrew" };
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        switch (bit) {
+            case HT_DEP_LIBUSB:
+                snprintf(path, sizeof(path), "%s/lib/libusb-1.0.dylib", prefixes[i]);
+                break;
+            case HT_DEP_OPENSSL:
+                snprintf(path, sizeof(path), "%s/opt/openssl@3/lib/libssl.3.dylib", prefixes[i]);
+                break;
+            case HT_DEP_INNOEXTRACT:
+                snprintf(path, sizeof(path), "%s/bin/innoextract", prefixes[i]);
+                break;
+            default:
+                return true;
+        }
+        if (ht_file_exists(path)) return true;
+    }
+    /* sudo often strips Homebrew from PATH, so the file checks above are
+     * the real test; PATH is only a last resort for odd installs. */
+    if (bit == HT_DEP_INNOEXTRACT)
+        return system("command -v innoextract >/dev/null 2>&1") == 0;
+    return false;
+}
+
+static const char *ht_find_brew(void) {
+    if (ht_file_exists("/usr/local/bin/brew"))    return "/usr/local/bin/brew";
+    if (ht_file_exists("/opt/homebrew/bin/brew")) return "/opt/homebrew/bin/brew";
+    return NULL;
+}
+
+static bool check_sensor_dependencies(void) {
+    if (!g_detected_sensor) return true;
+
+    vfsc_status_line("Checking sensor dependencies...");
+
+#ifdef HT_NO_METALLICA
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_warn("This build has no Metallica MIS support (it was built for a different sensor).\n");
+        vfsc_warn("Pairing, calibration and records are unavailable. Rebuild with:\n");
+        vfsc_warn("  ./prep_and_build.sh --sensor metallica\n");
+        return true;
+    }
+#endif
+
+    unsigned missing = 0;
+    for (unsigned bit = 1; bit & HT_DEP_ALL; bit <<= 1) {
+        if ((g_detected_sensor->deps_runtime & bit) && !ht_dep_present(bit))
+            missing |= bit;
+    }
+
+    if (!missing) {
+        vfsc_status_line_ok("All dependencies for %s are installed.", g_detected_sensor->display_name);
+        return true;
+    }
+
+    char formulas[256] = "";
+    vfsc_warn("%s needs software that is not installed yet:\n", g_detected_sensor->display_name);
+    for (unsigned bit = 1; bit & HT_DEP_ALL; bit <<= 1) {
+        if (!(missing & bit)) continue;
+        printf("  - %s\n", ht_dep_label(bit));
+        size_t used = strlen(formulas);
+        snprintf(formulas + used, sizeof(formulas) - used, "%s%s", used ? " " : "", ht_dep_formula(bit));
+    }
+
+    const char *brew = ht_find_brew();
+    const char *sudo_user = getenv("SUDO_USER");
+    if (!brew) {
+        printf("Homebrew was not found. Install it, then run: brew install %s\n", formulas);
+        return true;
+    }
+    if (!isatty(STDIN_FILENO)) {
+        printf("Install with: brew install %s\n", formulas);
+        return true;
+    }
+
+    printf("Install only these now with Homebrew? [y/N] ");
+    fflush(stdout);
+    char answer[16] = "";
+    if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+        printf("Skipped. Install later with: brew install %s\n", formulas);
+        return true;
+    }
+
+    char cmd[512];
+    if (geteuid() == 0 && sudo_user && strcmp(sudo_user, "root") != 0) {
+        /* Homebrew refuses root: run it as the invoking user. */
+        snprintf(cmd, sizeof(cmd), "sudo -u \"%s\" -H \"%s\" install %s", sudo_user, brew, formulas);
+    } else {
+        snprintf(cmd, sizeof(cmd), "\"%s\" install %s", brew, formulas);
+    }
+    if (system(cmd) != 0) {
+        vfsc_warn("Homebrew could not finish the install. Run it yourself: brew install %s\n", formulas);
+        return true;
+    }
+
+    vfsc_status_line_ok("Dependencies installed.");
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Daemon version check (startup gate, v1.0.5, generalized in v1.1)
+ * ------------------------------------------------------------------ *
+ * The client and the installed daemon binary are two separately
+ * compiled artifacts that only stay in sync because prep_and_build.sh
+ * rebuilds/redeploys both together -- nothing stops someone from
+ * updating one and forgetting the other (e.g. `git pull` + rebuild
+ * just the client, or a Deploy that failed partway through). Running
+ * against a mismatched daemon is exactly the kind of thing that's
+ * hard to diagnose after the fact, so catch it here instead.
+ *
+ * Shells out to whichever daemon binary owns g_detected_sensor with
+ * --version, which (per each daemon's early argv check) just prints
+ * the version and exits(0) immediately -- no root re-exec, no
+ * OpenCore gate, no actual daemon startup, so this is cheap and
+ * side-effect-free even though the client is already running as root
+ * at this point. Must run after check_sensor_presence_gate(). */
+static bool check_daemon_version_gate(void) {
+    vfsc_status_line("Checking Daemon version...");
+
+    if (!g_detected_sensor) {
+        printf("No supported sensor detected -- skipping.\n");
+        return true;
+    }
+
+    char daemon_path[PATH_MAX];
+    get_daemon_install_path(daemon_path, sizeof(daemon_path));
+
+    if (access(daemon_path, F_OK) != 0) {
+        printf("No daemon installed yet -- skipping (run Deploy [3] first).\n");
+        return true;
+    }
+
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version", daemon_path);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_err("Failed to query installed daemon version: %s\n", strerror(errno));
+        return false;
+    }
+
+    char daemon_version[64] = {0};
+    bool got_line = (fgets(daemon_version, sizeof(daemon_version), fp) != NULL);
+    pclose(fp);
+
+    if (!got_line) {
+        printf("Could not read a version from the installed daemon. Stop launch\n");
+        return false;
+    }
+
+    size_t len = strlen(daemon_version);
+    while (len > 0 && (daemon_version[len-1] == '\n' || daemon_version[len-1] == '\r')) {
+        daemon_version[--len] = '\0';
+    }
+
+    if (strcmp(daemon_version, VFS5011_PROJECT_VERSION) != 0) {
+        printf("v%s detected... Stop launch\n", daemon_version);
+        printf("Installed daemon (v%s) doesn't match this client (v%s).\n",
+               daemon_version, VFS5011_PROJECT_VERSION);
+        printf("The client can't launch until they match. From outside\n");
+        printf("this client, run prep_and_build.sh (or the matching\n");
+        printf("<sensor>_agent_install.sh) to rebuild and reinstall the\n");
+        printf("daemon at the matching version, then relaunch.\n");
+        return false;
+    }
+
+    vfsc_status_line_ok("v%s detected continuing...", daemon_version);
+    return true;
+}
+
+/* ---- Diagnose helpers (read-only) ------------------------------- */
+
+#define DIAG_MAX_PROBLEMS 24
+
+static int  g_diag_ok = 0;
+static int  g_diag_problems = 0;
+static char g_diag_problem_list[DIAG_MAX_PROBLEMS][96];
+
+/* Records one pass/fail result for the summary block at the end of
+ * the report. Returns 'ok' unchanged so it can wrap a condition. */
+static bool diag_flag(bool ok, const char *what) {
+    if (ok) {
+        g_diag_ok++;
+    } else {
+        if (g_diag_problems < DIAG_MAX_PROBLEMS) {
+            snprintf(g_diag_problem_list[g_diag_problems],
+                     sizeof(g_diag_problem_list[0]), "%s", what);
+        }
+        g_diag_problems++;
+    }
+    return ok;
+}
+
+/* Runs a shell command and prints each non-empty output line with a
+ * prefix, capped at max_lines. Returns the number of lines printed
+ * (0 means the command failed or produced nothing). */
+static int diag_run_cmd(const char *prefix, const char *cmd, int max_lines) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char line[512];
+    int printed = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '\0') continue;
+        if (max_lines > 0 && printed >= max_lines) continue; /* drain */
+        printf("%s%s\n", prefix, line);
+        printed++;
+    }
+    pclose(fp);
+    return printed;
+}
+
+/* Prints "<label>: <value>" for a one-line command, or
+ * "<label>: (unavailable)" if it printed nothing. */
+static void diag_kv(const char *label, const char *cmd) {
+    FILE *fp = popen(cmd, "r");
+    char line[256] = {0};
+    bool got = fp && fgets(line, sizeof(line), fp) != NULL;
+    if (fp) pclose(fp);
+    if (got) {
+        line[strcspn(line, "\r\n")] = '\0';
+        printf("%s: %s\n", label, line[0] ? line : "(empty)");
+    } else {
+        printf("%s: (unavailable)\n", label);
+    }
+}
+
+/* The user whose launchd GUI session / home directory the agent lives
+ * in: $SUDO_USER when re-exec'd under sudo, else the current user. */
+static struct passwd *diag_target_user(void) {
+    const char *su = getenv("SUDO_USER");
+    if (su && *su && strcmp(su, "root") != 0) {
+        struct passwd *p = getpwnam(su);
+        if (p) return p;
+    }
+    return getpwuid(getuid());
+}
+
+/* stat() a path and print mode/owner/size/mtime. Returns false if the
+ * path does not exist. */
+static bool diag_print_file_info(const char *label, const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("%s: missing (%s)\n", label, path);
+        return false;
+    }
+    char when[32] = "?";
+    struct tm tmv;
+    if (localtime_r(&st.st_mtime, &tmv)) {
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tmv);
+    }
+    struct passwd *pw = getpwuid(st.st_uid);
+    printf("%s: %s\n", label, path);
+    printf("  mode %04o, owner %s, %lld bytes, modified %s\n",
+           (unsigned)(st.st_mode & 07777), pw ? pw->pw_name : "?",
+           (long long)st.st_size, when);
+    return true;
+}
+
+static const char *diag_usb_speed_name(int speed) {
+    switch (speed) {
+        case LIBUSB_SPEED_LOW:   return "low (1.5 Mbps)";
+        case LIBUSB_SPEED_FULL:  return "full (12 Mbps)";
+        case LIBUSB_SPEED_HIGH:  return "high (480 Mbps)";
+        case LIBUSB_SPEED_SUPER: return "super (5 Gbps)";
+        default:                 return "unknown";
+    }
+}
+
+/* Enumerates USB through libusb the same way the sensor detector does.
+ * Supported sensors get full detail (bus/address, speed, bcdDevice,
+ * string descriptors when the device can be opened). Every other
+ * device is listed compactly as VID:PID so a sensor that is present
+ * but missing from the supported table is still visible in the
+ * report. Serial numbers are deliberately NOT printed. */
+static int diag_print_usb_details(void) {
+    libusb_context *ctx = NULL;
+    if (libusb_init(&ctx) < 0) {
+        printf("USB enumeration: libusb init failed\n");
+        return 0;
+    }
+    libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(ctx, &list);
+    if (count < 0) {
+        printf("USB enumeration: libusb_get_device_list failed (%d)\n", (int)count);
+        libusb_exit(ctx);
+        return 0;
+    }
+
+    int supported_found = 0;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        const hack_touchid_sensor_t *known = NULL;
+        for (size_t s = 0; s < HACK_TOUCHID_SENSOR_COUNT; s++) {
+            if (desc.idVendor == HACK_TOUCHID_SENSORS[s].vid &&
+                desc.idProduct == HACK_TOUCHID_SENSORS[s].pid) {
+                known = &HACK_TOUCHID_SENSORS[s];
+                break;
+            }
+        }
+        if (!known) continue;
+        supported_found++;
+        printf("Supported sensor: %s (%04x:%04x)\n", known->display_name,
+               desc.idVendor, desc.idProduct);
+        printf("  bus %u, address %u, speed %s\n",
+               (unsigned)libusb_get_bus_number(list[i]),
+               (unsigned)libusb_get_device_address(list[i]),
+               diag_usb_speed_name(libusb_get_device_speed(list[i])));
+        printf("  bcdDevice %04x, bcdUSB %04x, configurations %u\n",
+               desc.bcdDevice, desc.bcdUSB, (unsigned)desc.bNumConfigurations);
+
+        libusb_device_handle *h = NULL;
+        int orc = libusb_open(list[i], &h);
+        if (orc == 0 && h) {
+            unsigned char sbuf[128];
+            if (desc.iManufacturer &&
+                libusb_get_string_descriptor_ascii(h, desc.iManufacturer, sbuf, sizeof(sbuf)) > 0)
+                printf("  manufacturer: %s\n", (char *)sbuf);
+            if (desc.iProduct &&
+                libusb_get_string_descriptor_ascii(h, desc.iProduct, sbuf, sizeof(sbuf)) > 0)
+                printf("  product: %s\n", (char *)sbuf);
+            libusb_close(h);
+        } else {
+            printf("  open failed: %s (string descriptors skipped)\n",
+                   libusb_error_name(orc));
+        }
+    }
+
+    printf("All USB devices (%d):\n", (int)count);
+    int shown = 0;
+    for (ssize_t i = 0; i < count && shown < 40; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        printf("  %04x:%04x (class %02x)\n", desc.idVendor, desc.idProduct,
+               desc.bDeviceClass);
+        shown++;
+    }
+    if (count > shown) printf("  ... %d more not shown\n", (int)count - shown);
+
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return supported_found;
+}
+
+/* run_diagnose_mode() -- shared by the interactive [D] Diagnose menu
+ * item and the headless "hack-touchid --diag-pid" launch flag. A
+ * plain-text health report meant to be copy-pasted straight into a
+ * GitHub issue or a debugging chat: report time and run context,
+ * client version and settings, macOS/hardware/SIP/boot-args, OpenCore
+ * version, detailed USB and sensor info, daemon install + launchd
+ * state, LaunchAgent plist, sudoers rule, template volume details,
+ * Accessibility grant, enrolled fingers, agent log tail, recent crash
+ * reports, and a pass/fail summary at the end.
+ *
+ * Deliberately READ-ONLY and never gates/refuses on a bad answer --
+ * unlike the interactive menu's startup gates, the whole point here
+ * is to surface a broken/missing piece clearly, not stop before
+ * reporting it. Each pass/fail result is recorded via diag_flag() for
+ * the summary block; nothing else inspects or acts on them. */
+static void run_diagnose_mode(void) {
+    g_diag_ok = 0;
+    g_diag_problems = 0;
+    struct passwd *target = diag_target_user();
+    char cmd[PATH_MAX + 512];
+
+    printf("%s=== Hackintosh Touch-ID Diagnostic Report ===%s\n\n", VFSC_BOLD, VFSC_RESET);
+
+    /* -------- Report -------- */
+    printf("-- Report --\n");
+    {
+        time_t now = time(NULL);
+        struct tm tmv;
+        char stamp[64] = "unknown";
+        if (localtime_r(&now, &tmv)) strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S %Z", &tmv);
+        printf("Generated: %s\n", stamp);
+        printf("Launched via: %s\n", g_diag_pid_mode ? "--diag-pid" : "menu [D]");
+        printf("Running as: uid %d, euid %d, invoking user %s\n",
+               (int)getuid(), (int)geteuid(),
+               target ? target->pw_name : "(unknown)");
+    }
+    printf("\n");
+
+    /* -------- Client -------- */
+    printf("-- Client --\n");
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (g_local_version_loaded && g_local_version_info.build[0] != '\0') {
+        printf("Version: v%s (%s)\n", VFS5011_PROJECT_VERSION, g_local_version_info.build);
+    } else {
+        printf("Version: v%s (build unknown)\n", VFS5011_PROJECT_VERSION);
+    }
+    printf("Install dir: %s\n", g_exec_dir[0] ? g_exec_dir : "(unknown)");
+    printf("Match threshold: %d\n", g_match_threshold);
+    diag_print_file_info("Threshold file", MATCH_THRESHOLD_CONF_PATH);
+    printf("\n");
+
+    /* -------- System -------- */
+    printf("-- System --\n");
+    {
+        char line[256];
+        FILE *fp;
+
+        fp = popen("sw_vers -productVersion 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf("macOS: %s", line);
+        } else {
+            printf("macOS: (could not determine)");
+        }
+        if (fp) pclose(fp);
+
+        fp = popen("sw_vers -buildVersion 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf(" (%s)\n", line);
+        } else {
+            printf("\n");
+        }
+        if (fp) pclose(fp);
+
+        fp = popen("sysctl -n hw.model 2>/dev/null", "r");
+        if (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            printf("Reported model (SMBIOS spoof): %s\n", line);
+        }
+        if (fp) pclose(fp);
+    }
+    diag_kv("Kernel", "uname -srm 2>/dev/null");
+    diag_kv("CPU", "sysctl -n machdep.cpu.brand_string 2>/dev/null");
+    diag_kv("RAM", "sysctl -n hw.memsize 2>/dev/null | awk '{printf \"%.0f GB\", $1/1073741824}'");
+    diag_kv("Uptime", "uptime 2>/dev/null | sed 's/^ *//'");
+    diag_kv("SIP", "csrutil status 2>/dev/null | sed 's/^System Integrity Protection status: *//'");
+    diag_kv("Boot args", "nvram boot-args 2>/dev/null | sed 's/^boot-args[[:space:]]*//'");
+    printf("\n");
+
+    /* -------- OpenCore -------- */
+    printf("-- OpenCore --\n");
+    diag_flag(check_opencore_version_requirement(), "OpenCore version requirement"); /* prints its own pass/fail line */
+    printf("\n");
+
+    /* -------- USB / Sensor -------- */
+    printf("-- USB --\n");
+    diag_print_usb_details();
+    printf("\n");
+
+    printf("-- Sensor --\n");
+    if (g_detected_sensor) {
+        printf("Detected: %s (%04x:%04x)\n", g_detected_sensor->display_name,
+               g_detected_sensor->vid, g_detected_sensor->pid);
+        printf("Capture backend: %s\n",
+               g_detected_sensor->backend_available ? "available" : "not yet implemented");
+        diag_flag(true, "Sensor detected");
+        diag_flag(g_detected_sensor->backend_available != 0, "Capture backend not implemented for this sensor");
+    } else {
+        printf("Detected: none\n");
+        diag_flag(false, "No supported sensor detected");
+    }
+    printf("\n");
+
+    /* -------- Daemon -------- */
+    printf("-- Daemon --\n");
+    if (!g_detected_sensor) {
+        printf("(no sensor detected -- skipping)\n");
+    } else {
+        char daemon_path[PATH_MAX];
+        get_daemon_install_path(daemon_path, sizeof(daemon_path));
+        if (access(daemon_path, F_OK) != 0) {
+            printf("Installed: no\n");
+            diag_flag(false, "Daemon not installed");
+        } else {
+            char vcmd[PATH_MAX + 16];
+            snprintf(vcmd, sizeof(vcmd), "\"%s\" --version", daemon_path);
+            FILE *fp = popen(vcmd, "r");
+            char daemon_version[64] = {0};
+            bool got_line = fp && fgets(daemon_version, sizeof(daemon_version), fp) != NULL;
+            if (fp) pclose(fp);
+            diag_flag(true, "Daemon installed");
+            if (got_line) {
+                daemon_version[strcspn(daemon_version, "\r\n")] = '\0';
+                printf("Installed: yes (v%s)\n", daemon_version);
+                if (strcmp(daemon_version, VFS5011_PROJECT_VERSION) != 0) {
+                    printf("  NOTE: daemon version does not match client version (v%s)\n",
+                           VFS5011_PROJECT_VERSION);
+                    diag_flag(false, "Daemon/client version mismatch");
+                }
+            } else {
+                printf("Installed: yes (version query failed)\n");
+                diag_flag(false, "Daemon version query failed");
+            }
+            diag_print_file_info("Binary", daemon_path);
+        }
+        bool running = is_auth_service_deployed() != 0;
+        printf("Running: %s\n", running ? "yes" : "no");
+        diag_flag(running, "Agent not running");
+
+        if (target) {
+            printf("launchd (gui/%d/%s):\n", (int)target->pw_uid, AGENT_LABEL);
+            snprintf(cmd, sizeof(cmd),
+                     "launchctl print \"gui/%d/%s\" 2>&1 | "
+                     "grep -E '^[[:space:]]*(state|pid|runs|last exit code|program|path) ' | "
+                     "sed 's/^[[:space:]]*//'",
+                     (int)target->pw_uid, AGENT_LABEL);
+            if (diag_run_cmd("  ", cmd, 8) == 0) {
+                printf("  (agent not loaded in this user's GUI session)\n");
+            }
+
+            char plist_path[PATH_MAX];
+            snprintf(plist_path, sizeof(plist_path),
+                     "%s/Library/LaunchAgents/%s.plist", target->pw_dir, AGENT_LABEL);
+            diag_flag(diag_print_file_info("LaunchAgent plist", plist_path),
+                      "LaunchAgent plist missing");
+        }
+
+        printf("sudoers rule(s) referencing install dir:\n");
+        if (diag_run_cmd("  ", "grep -l '" HTID_INSTALL_DIR "' /etc/sudoers.d/* 2>/dev/null", 5) == 0) {
+            printf("  (none)\n");
+        }
+    }
+    printf("\n");
+
+    /* -------- Template volume -------- */
+    printf("-- Template Volume --\n");
+    {
+        bool configured = is_volume_configured() != 0;
+        printf("Configured: %s\n", configured ? "yes" : "no");
+        diag_flag(configured, "Template volume not configured");
+        if (configured) {
+            snprintf(cmd, sizeof(cmd),
+                     "diskutil info \"%s\" 2>/dev/null | "
+                     "grep -E '(Device Node|Mounted|Mount Point|File System Personality|FileVault|Encrypted|Volume UUID):' | "
+                     "sed 's/^[[:space:]]*//'",
+                     VOLUME_NAME);
+            diag_run_cmd("  ", cmd, 8);
+        }
+        int dupes = count_store_volume_duplicates();
+        if (dupes > 1) {
+            printf("WARNING: %d volumes named \"%s\" found -- mounting is ambiguous by\n"
+                   "name until you clean up the extras (diskutil apfs deleteVolume).\n",
+                   dupes, VOLUME_NAME);
+            diag_flag(false, "Duplicate template volumes");
+        }
+    }
+    printf("\n");
+
+    /* -------- Accessibility -------- */
+    printf("-- Accessibility Grant --\n");
+    {
+        bool granted = is_accessibility_granted() != 0;
+        printf("Granted: %s\n", granted ? "yes" : "no");
+        diag_flag(granted, "Accessibility not granted");
+        printf("TCC database: %s\n", access(TCC_DB_PATH, F_OK) == 0 ? "present" : "missing");
+    }
+    printf("\n");
+
+    /* -------- Enrolled fingers -------- */
+    printf("-- Enrolled Fingers --\n");
+    if (g_finger_count < 0) refresh_finger_cache();
+    if (g_finger_count < 0) {
+        printf("Count: n/a (template volume not set up)\n");
+        diag_flag(false, "Could not read enrolled fingers");
+    } else {
+        printf("Count: %d\n", g_finger_count);
+        for (int i = 0; i < g_finger_count && i < MAX_ENROLLED_FINGERS; i++) {
+            printf("  - %s\n", g_finger_labels[i]);
+        }
+        diag_flag(g_finger_count > 0, "No fingers enrolled");
+    }
+    printf("\n");
+
+    /* -------- Logs -------- */
+    printf("-- Agent Log --\n");
+    if (diag_print_file_info("Log file", HTID_AGENT_LOG_PATH)) {
+        printf("Last 25 lines:\n");
+        snprintf(cmd, sizeof(cmd), "tail -n 25 \"%s\" 2>/dev/null", HTID_AGENT_LOG_PATH);
+        if (diag_run_cmd("  | ", cmd, 25) == 0) printf("  (log is empty)\n");
+    }
+    printf("\n");
+
+    printf("-- Recent Crash Reports --\n");
+    {
+        char home_reports[PATH_MAX] = "";
+        if (target) {
+            snprintf(home_reports, sizeof(home_reports),
+                     "%s/Library/Logs/DiagnosticReports", target->pw_dir);
+        }
+        snprintf(cmd, sizeof(cmd),
+                 "ls -t /Library/Logs/DiagnosticReports \"%s\" 2>/dev/null | "
+                 "grep -i -E 'vfs5011|hack-touchid|metallica|upek|htid' | head -5",
+                 home_reports);
+        if (diag_run_cmd("  ", cmd, 5) == 0) printf("(none found)\n");
+    }
+    printf("\n");
+
+    /* -------- Summary -------- */
+    printf("-- Summary --\n");
+    printf("Checks passed: %d\n", g_diag_ok);
+    printf("Problems found: %d\n", g_diag_problems);
+    if (g_diag_problems == 0) {
+        printf("No problems detected.\n");
+    } else {
+        for (int i = 0; i < g_diag_problems && i < DIAG_MAX_PROBLEMS; i++) {
+            printf("  ! %s\n", g_diag_problem_list[i]);
+        }
+    }
+    printf("\n");
+
+    printf("%s=== End of report ===%s\n", VFSC_DIM, VFSC_RESET);
+}
+
+/* run_diagnose_and_save() -- what [D] and --diag-pid actually call.
+ * Runs run_diagnose_mode() with stdout redirected into a temp file
+ * (colors and the fake verbose-boot timestamps switched off so the
+ * saved text is clean), then echoes the captured report to the
+ * terminal, saves it as hack-touchid-diag-<date>-<time>.txt in the
+ * invoking user's home directory (owned by that user, not root), and
+ * copies it to that user's clipboard via pbcopy. File save and
+ * clipboard copy are best-effort: a failure of either is reported
+ * but never hides the report itself. */
+static void run_diagnose_and_save(void) {
+    struct passwd *target = diag_target_user();
+    char tmp_path[] = "/tmp/hack-touchid-diag.XXXXXX";
+    int tmp_fd = mkstemp(tmp_path);
+    if (tmp_fd < 0) {
+        run_diagnose_mode(); /* can't capture; still show the report */
+        printf("(could not create a temp file, report was not saved: %s)\n", strerror(errno));
+        return;
+    }
+
+    /* Capture. */
+    fflush(stdout);
+    int saved_stdout = dup(STDOUT_FILENO);
+    int saved_color = g_color_enabled;
+    bool saved_verbose = g_verbose_boot;
+    if (saved_stdout < 0 || dup2(tmp_fd, STDOUT_FILENO) < 0) {
+        if (saved_stdout >= 0) close(saved_stdout);
+        close(tmp_fd);
+        unlink(tmp_path);
+        run_diagnose_mode();
+        printf("(could not capture the report, it was not saved)\n");
+        return;
+    }
+    g_color_enabled = 0;
+    g_verbose_boot = false;
+    run_diagnose_mode();
+    fflush(stdout);
+    g_color_enabled = saved_color;
+    g_verbose_boot = saved_verbose;
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+    close(tmp_fd);
+
+    /* Echo to the terminal, and write the saved copy. */
+    char out_path[PATH_MAX] = "";
+    FILE *in = fopen(tmp_path, "r");
+    FILE *out = NULL;
+    if (target) {
+        time_t now = time(NULL);
+        struct tm tmv;
+        char stamp[32] = "report";
+        if (localtime_r(&now, &tmv)) strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv);
+        snprintf(out_path, sizeof(out_path), "%s/hack-touchid-diag-%s.txt", target->pw_dir, stamp);
+        out = fopen(out_path, "w");
+    }
+    if (in) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+            fwrite(buf, 1, n, stdout);
+            if (out) fwrite(buf, 1, n, out);
+        }
+        fclose(in);
+    }
+    fflush(stdout);
+    bool saved_ok = false;
+    if (out) {
+        saved_ok = (fclose(out) == 0);
+        if (saved_ok) {
+            chmod(out_path, 0644);
+            if (geteuid() == 0) (void)chown(out_path, target->pw_uid, target->pw_gid);
+        }
+    }
+
+    printf("\n");
+    if (saved_ok) vfsc_ok("Report saved to %s\n", out_path);
+    else vfsc_warn("Could not save the report file.\n");
+
+    /* Clipboard: as root, hop into the user's GUI session, otherwise
+     * pbcopy would target root's (nonexistent) pasteboard. */
+    char cmd[PATH_MAX * 2 + 128];
+    if (geteuid() == 0 && target) {
+        snprintf(cmd, sizeof(cmd),
+                 "launchctl asuser %d sudo -u \"%s\" pbcopy < \"%s\" >/dev/null 2>&1",
+                 (int)target->pw_uid, target->pw_name, tmp_path);
+    } else {
+        snprintf(cmd, sizeof(cmd), "pbcopy < \"%s\" >/dev/null 2>&1", tmp_path);
+    }
+    if (system(cmd) == 0) vfsc_ok("Report copied to the clipboard, paste it into your issue/message.\n");
+    else vfsc_warn("Could not copy to the clipboard, attach the saved file instead.\n");
+
+    unlink(tmp_path);
+}
+
+/* run_deploy_agent_mode() -- headless "hack-touchid --deploy-agent",
+ * for the menu bar app's daemon-missing notification button to run
+ * from a freshly-launched Terminal window without ever entering the
+ * interactive menu. Runs just enough of normal startup to make
+ * do_deploy() safe to call (OpenCore gate, sensor detection) and
+ * deliberately SKIPS check_daemon_version_gate() -- that gate exists
+ * to stop the interactive menu from running against a stale-but-
+ * present daemon, but this mode's entire purpose is fixing a
+ * missing/stale daemon, so requiring a working daemon first would be
+ * circular. Prints a clean pass/fail and waits for Return before
+ * returning, so the Terminal window this was launched into doesn't
+ * vanish before the person can read the result. */
+/* Waits for Return so a Terminal window launched just for --deploy-agent
+ * does not vanish before the result can be read. Skipped when the caller
+ * (the menu bar updater, via --menu-updater) sets HTID_NO_PAUSE because it
+ * already holds the window open. */
+static void deploy_agent_pause(void) {
+    if (getenv("HTID_NO_PAUSE") != NULL) return;
+    printf("\nPress Return to close this window...");
+    fflush(stdout);
+    getchar();
+}
+
+static void run_deploy_agent_mode(void) {
+    printf("%shack-touchid --deploy-agent%s -- headless daemon (re)install\n\n",
+           VFSC_BOLD, VFSC_RESET);
+
+    if (!check_opencore_version_requirement()) {
+        deploy_agent_pause();
+        return;
+    }
+
+    if (!check_sensor_presence_gate()) {
+        deploy_agent_pause();
+        return;
+    }
+
+    bool ok = do_deploy();
+    if (ok) {
+        vfsc_ok("Daemon (re)install complete.\n");
+    } else {
+        vfsc_err("Daemon (re)install failed -- see output above.\n");
+    }
+
+    deploy_agent_pause();
+}
+
+/* Matches "--flag VALUE" or "--flag=VALUE" at argv[*i]. Returns 1 and sets
+ * *out (pointing into argv) on a match, advancing *i past the value for the
+ * two-argument form. Returns 0 if argv[*i] is not this flag, and -1 if the
+ * flag is present without a usable value. */
+static int match_value_flag(int argc, char **argv, int *i, const char *flag, const char **out) {
+    size_t n = strlen(flag);
+    const char *a = argv[*i];
+    if (strncmp(a, flag, n) != 0) return 0;
+    if (a[n] == '=') {
+        if (a[n + 1] == '\0') return -1;
+        *out = a + n + 1;
+        return 1;
+    }
+    if (a[n] != '\0') return 0;
+    if (*i + 1 >= argc || argv[*i + 1][0] == '\0') return -1;
+    *out = argv[++(*i)];
+    return 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Live update watcher (main menu only)
+ * ------------------------------------------------------------------ *
+ * read_menu_line() replaces the plain fgets() at the main menu prompt.
+ * While it waits for the user to type, it wakes up every
+ * UPDATE_WATCH_INTERVAL_SEC, compares the remote VERSION.txt on this
+ * install's branch with the local one, and if a newer build exists
+ * that it hasn't already announced, shows the normal [A]/[Y]/[N]
+ * prompt. A declined update isn't announced again until an even newer
+ * build is published. Network failures are silent here (the boot check
+ * already warns about being offline). Only active on a terminal and
+ * when Settings [U] is ON; otherwise it is exactly fgets(). */
+/* Returns true if it showed a prompt (so the caller redraws the menu). */
+static bool update_watch_check_now(void) {
+    if (!g_local_version_loaded) {
+        g_local_version_loaded = read_local_version_file(&g_local_version_info);
+    }
+    if (!g_local_version_loaded) return false;
+    const client_version_info_t local = g_local_version_info;
+
+    client_version_info_t remote;
+    if (!fetch_remote_version_file(local.branch, &remote)) return false;
+    if (!remote_is_newer(&local, &remote)) return false;
+    if (strcmp(remote.version, g_update_watch_seen_version) == 0 &&
+        strcmp(remote.build, g_update_watch_seen_build) == 0) {
+        return false;
+    }
+    snprintf(g_update_watch_seen_version, sizeof(g_update_watch_seen_version), "%s", remote.version);
+    snprintf(g_update_watch_seen_build, sizeof(g_update_watch_seen_build), "%s", remote.build);
+
+    /* Drop anything the user had half-typed at the menu prompt so it
+     * doesn't leak into the A/Y/N answer. */
+    tcflush(STDIN_FILENO, TCIFLUSH);
+    run_update_prompt(&local, &remote, true, true);
+    return true;
+}
+
+static char *read_menu_line(char *buf, size_t size) {
+    if (!g_live_update_check || !isatty(STDIN_FILENO)) {
+        return fgets(buf, (int)size, stdin);
+    }
+    if (g_update_watch_next == 0) {
+        g_update_watch_next = time(NULL) + UPDATE_WATCH_INTERVAL_SEC;
+    }
+    for (;;) {
+        time_t now = time(NULL);
+        if (now >= g_update_watch_next) {
+            bool prompted = update_watch_check_now();
+            g_update_watch_next = time(NULL) + UPDATE_WATCH_INTERVAL_SEC;
+            if (prompted) {
+                print_menu();
+                printf("<Hack-touchid> ");
+                fflush(stdout);
+            }
+            continue;
+        }
+        long wait_ms = (long)(g_update_watch_next - now) * 1000L;
+        if (wait_ms > 1000) wait_ms = 1000;
+        struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+        int r = poll(&pfd, 1, (int)wait_ms);
+        if (r > 0) return fgets(buf, (int)size, stdin);
+        if (r < 0 && errno != EINTR) return fgets(buf, (int)size, stdin);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Sensor yield: while Swipe to Lock is on, the daemon holds the sensor.
+ * Before Enroll, Verify or View Fingerprint the client asks the daemon
+ * to let go of it (same distributed-notification channel the menu bar
+ * app uses), waits for the daemon to confirm, and hands it back after.
+ * The names must match hack-touchid-menubar-ipc.h. If no daemon answers
+ * the client just carries on. The daemon also drops the yield by itself
+ * after a timeout, so a crashed client cannot leave Swipe to Lock off.
+ * ------------------------------------------------------------------ */
+#define YIELD_NOTIFY_BEGIN "com.vfs5011.hackintosh.request_yield_begin"
+#define YIELD_NOTIFY_END   "com.vfs5011.hackintosh.request_yield_end"
+#define YIELD_NOTIFY_READY "com.vfs5011.hackintosh.yield_ready"
+#define YIELD_WAIT_SEC     3.0
+
+static volatile bool g_yield_ready_seen = false;
+static bool g_sensor_yielded = false;
+
+static void yield_ready_callback(CFNotificationCenterRef center, void *observer,
+                                 CFStringRef name, const void *object,
+                                 CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    g_yield_ready_seen = true;
+}
+
+static void sensor_yield_end(void) {
+    if (!g_sensor_yielded) return;
+    g_sensor_yielded = false;
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                         CFSTR(YIELD_NOTIFY_END), NULL, NULL, TRUE);
+    usleep(100000); /* let the notification leave before a process exit */
+}
+
+static void sensor_yield_begin(void) {
+    if (g_sensor_yielded) return;
+    /* Swipe to Lock off (flag file absent) means the daemon is not holding the sensor. */
+    struct stat yield_st;
+    if (stat("/Library/Application Support/VFS5011/lockswipe_enabled", &yield_st) != 0) return;
+    CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
+    g_yield_ready_seen = false;
+    CFNotificationCenterAddObserver(center, &g_yield_ready_seen, yield_ready_callback,
+                                    CFSTR(YIELD_NOTIFY_READY), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterPostNotification(center, CFSTR(YIELD_NOTIFY_BEGIN), NULL, NULL, TRUE);
+    g_sensor_yielded = true;
+
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + YIELD_WAIT_SEC;
+    while (!g_yield_ready_seen && CFAbsoluteTimeGetCurrent() < until) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    }
+    CFNotificationCenterRemoveObserver(center, &g_yield_ready_seen, CFSTR(YIELD_NOTIFY_READY), NULL);
+    /* No answer just means no daemon (or Swipe to Lock off): the sensor is free. */
+    usleep(300000); /* let macOS settle the device before we open it */
+}
+
+int main(int argc, char **argv) {
+    /* Checked in its own pass, before anything else (including the
+     * sudo re-exec below) -- seeing -h/--help should never require a
+     * password prompt. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage();
+            return 0;
+        }
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--q") == 0 || strcmp(argv[i], "--quiet") == 0) {
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--deploy-agent") == 0) {
+            g_deploy_agent_mode = true;
+        }
+        if (strcmp(argv[i], "--diag-pid") == 0) {
+            g_diag_pid_mode = true;
+        }
+        if (strcmp(argv[i], "--check-updates") == 0) {
+            g_check_updates_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--menu-updater") == 0) {
+            g_menu_updater_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--post-update") == 0) {
+            g_post_update_mode = true;
+        }
+        if (strcmp(argv[i], "--daemon-removed") == 0) {
+            g_daemon_removed_by_update = true;
+        }
+        if (strcmp(argv[i], "--force-pair") == 0) {
+            g_metallica_mis_force_pair = 1;
+        }
+        if (strcmp(argv[i], "--debug") == 0 && g_metallica_mis_debug < 1) {
+            g_metallica_mis_debug = 1;
+        }
+        if (strcmp(argv[i], "--debug-full") == 0) {
+            g_metallica_mis_debug = 2;
+        }
+        if (strcmp(argv[i], "--list-records") == 0) {
+            g_records_list_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--wipe-records") == 0) {
+            g_records_wipe_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--enroll-test") == 0) {
+            g_enroll_test_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--verify-test") == 0) {
+            g_verify_test_mode = true;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
+            g_fpbootd_daemon_mode = true;
+        }
+        {
+            int r = match_value_flag(argc, argv, &i, "--host-product", &g_metallica_mis_host_product_override);
+            if (r < 0) {
+                vfsc_err("--host-product needs a value, e.g. --host-product \"20L5CTO1WW\"\n");
+                return 1;
+            }
+            if (r == 0) {
+                r = match_value_flag(argc, argv, &i, "--host-serial", &g_metallica_mis_host_serial_override);
+                if (r < 0) {
+                    vfsc_err("--host-serial needs a value, e.g. --host-serial \"PF1ABCDE\"\n");
+                    return 1;
+                }
+            }
+        }
+    }
+    srand((unsigned int)time(NULL));
+
+    /* Claiming the USB interface needs root on macOS. Re-exec the whole
+     * menu session under sudo up front, same approach as the original
+     * CLI, so options 1/2 don't each need their own privilege prompt.
+     *
+     * Counter-based instead of the old fixed 4-slot array -- now that
+     * --q/--quiet, --deploy-agent, --diag-pid, --check-updates,
+     * --menu-updater, --force-pair, and --fpbootd-daemon can all be present at once,
+     * the old hardcoded "sudo_argv[2] = flag or NULL" approach could
+     * only carry one flag through the re-exec. This builds the argv up
+     * to however many flags actually apply. */
+    if (geteuid() != 0) {
+        vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
+        char *sudo_argv[24];
+        int ai = 0;
+        sudo_argv[ai++] = "sudo";
+        sudo_argv[ai++] = argv[0];
+        if (!g_verbose_boot) sudo_argv[ai++] = "--q";
+        if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
+        if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
+        if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
+        if (g_menu_updater_mode) sudo_argv[ai++] = "--menu-updater";
+        if (g_metallica_mis_force_pair) sudo_argv[ai++] = "--force-pair";
+        if (g_metallica_mis_debug >= 2) sudo_argv[ai++] = "--debug-full";
+        else if (g_metallica_mis_debug == 1) sudo_argv[ai++] = "--debug";
+        if (g_records_list_mode) sudo_argv[ai++] = "--list-records";
+        if (g_records_wipe_mode) sudo_argv[ai++] = "--wipe-records";
+        if (g_enroll_test_mode) sudo_argv[ai++] = "--enroll-test";
+        if (g_verify_test_mode) sudo_argv[ai++] = "--verify-test";
+        if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
+        if (g_metallica_mis_host_product_override) {
+            sudo_argv[ai++] = "--host-product";
+            sudo_argv[ai++] = (char *)g_metallica_mis_host_product_override;
+        }
+        if (g_metallica_mis_host_serial_override) {
+            sudo_argv[ai++] = "--host-serial";
+            sudo_argv[ai++] = (char *)g_metallica_mis_host_serial_override;
+        }
+        sudo_argv[ai++] = NULL;
+        execvp("sudo", sudo_argv);
+        vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
+        return 1;
+    }
+
+    /* Needed so mount_template_volume()/unmount_template_volume() can
+     * find hack-touchid-volume-mount.sh / _unmount.sh by absolute path,
+     * regardless of what directory this was launched from. */
+    init_exec_dir(argv[0]);
+    ensure_path_symlink();
+    init_color_support();
+    g_match_threshold = load_match_threshold();
+
+    /* --diag-pid short-circuits straight to run_diagnose_mode(), same
+     * as --deploy-agent below -- before the boot flood/banner/menu.
+     * Unlike --deploy-agent, run_diagnose_mode() has no preconditions
+     * of its own to check first: it's read-only and its whole job is
+     * to report a broken/missing piece, not refuse to run because of
+     * one.
+     *
+     * IMPORTANT: g_detected_sensor is otherwise only ever populated by
+     * check_sensor_presence_gate() (called below, after this branch,
+     * for the interactive menu path). --diag-pid returns before that
+     * ever runs, so without probing here it's always NULL in this
+     * mode -- which made the report always print "Sensor: none",
+     * which cascades into "Daemon: (no sensor detected -- skipping)"
+     * AND a false "Accessibility Grant: no" (is_accessibility_granted()
+     * also short-circuits on !g_detected_sensor), regardless of the
+     * real hardware/grant state. Probe directly here -- deliberately
+     * NOT calling check_sensor_presence_gate() itself, since that
+     * prints its own "Launching Failed" refusal message and returns
+     * false on a genuine miss, which is gate/refusal behavior that
+     * doesn't belong in a read-only report. */
+    if (g_diag_pid_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_diagnose_and_save();
+        return 0;
+    }
+
+    /* --fpbootd-daemon short-circuits into the socket server loop,
+     * same before-the-banner dispatch as --diag-pid above, and for
+     * the same reason needs its own sensor probe here since it never
+     * reaches check_sensor_presence_gate(). run_fpbootd_daemon() never
+     * returns under normal operation (it's an accept() loop) -- the
+     * explicit return 0 below only fires if it somehow does. */
+    if (g_fpbootd_daemon_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_fpbootd_daemon();
+        return 0;
+    }
+
+    /* --check-updates short-circuits straight to run_check_updates_mode(),
+     * same before-the-banner dispatch as --diag-pid/--deploy-agent above.
+     * It DOES need its own sensor probe: the updater passes the detected
+     * family to prep_and_build.sh, and with g_detected_sensor left NULL it
+     * fell back to "all", which pulled in the Metallica-only Homebrew
+     * packages (openssl@3, innoextract) and compiled them from source on
+     * Intel Macs. */
+    if (g_check_updates_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_check_updates_mode();
+        return 0;
+    }
+
+    /* --menu-updater: same dispatch and sensor probe as --check-updates,
+     * but installs without asking. */
+    if (g_menu_updater_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_menu_updater_mode();
+        return 0;
+    }
+
+    if (g_metallica_mis_debug) {
+        fprintf(stderr, "[dbg] --debug is ON (level %d): every USB transfer, TLS command/reply and sensor "
+                         "DB call is printed to stderr. Capture everything with:\n"
+                         "[dbg]   sudo hack-touchid --debug ... 2>&1 | tee ~/htid-debug.log\n",
+                g_metallica_mis_debug);
+    }
+
+    /* --list-records / --wipe-records: headless Metallica MIS sensor
+     * database actions, same before-the-banner dispatch as the flags
+     * above. Needs its own sensor probe for the same reason as
+     * --diag-pid (this returns before check_sensor_presence_gate()). */
+    if (g_records_list_mode || g_records_wipe_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_records_mode();
+        return 0;
+    }
+
+    /* --enroll-test: headless Metallica MIS enrollment test, same
+     * before-the-banner dispatch and own sensor probe as above. */
+    if (g_enroll_test_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_enroll_test_mode();
+        return 0;
+    }
+
+    /* --verify-test: headless Metallica MIS verify test, same dispatch. */
+    if (g_verify_test_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_verify_test_mode();
+        return 0;
+    }
+
+    /* --deploy-agent short-circuits straight to run_deploy_agent_mode()
+     * here -- deliberately before the verbose boot flood / banner /
+     * update-check / interactive menu below, none of which this
+     * headless mode wants. run_deploy_agent_mode() runs its own
+     * OpenCore + sensor gates internally and returns when done. */
+    if (g_deploy_agent_mode) {
+        run_deploy_agent_mode();
+        return 0;
+    }
+
+    /* Quiet mode keeps the banner where it's always been (first thing
+     * shown) -- only verbose mode moves it to the end, after the log
+     * scroll, so it isn't quiet mode's problem too. */
+    if (!g_verbose_boot) {
+        print_banner();
+    }
+
+    /* The fun part -- a dense, ~10-second flood of fake kernel/IOKit
+     * log lines before the REAL startup checks below, so verbose
+     * mode actually reads like a Hackintosh's own -v boot instead of
+     * a handful of instantly-printed status lines. Purely decorative;
+     * see vfsc_verbose_boot_flood()'s own comment for why it's kept
+     * separate from the real checks. */
+    vfsc_verbose_boot_flood();
+
+    vfsc_boot_line("AppleACPIPlatform: enumerating hardware...");
+    vfsc_boot_line("IOKit: matching USB device tree...");
+    vfsc_boot_line("com.hack-touchid.client @ 0x0000 (v%s)", VFS5011_PROJECT_VERSION);
+    vfsc_boot_line("libusb-1.0: context initialized");
+
+    vfsc_boot_line("NVRAM: reading IODeviceTree:/options...");
+    if (!check_opencore_version_requirement()) {
+        return 1;
+    }
+
+    check_macos_version_warning();
+
+    g_live_update_check = load_live_update_setting();
+    vfsc_boot_line("Checking for updates...");
+    check_for_client_update();
+
+    vfsc_boot_line("USB: probing supported_sensors.h device table...");
+    if (!check_sensor_presence_gate()) {
+        return 1;
+    }
+    vfsc_boot_line("Sensor descriptor matched, claiming interface...");
+
+    check_sensor_dependencies();
+
+    vfsc_boot_line("launchd: querying installed daemon version...");
+    if (!check_daemon_version_gate()) {
+        return 1;
+    }
+
+    if (!check_fpov_version()) {
+        return 1;
+    }
+
+    vfsc_boot_line("HackTouchIDStore: mounting encrypted APFS volume...");
+    vfsc_boot_line("AX: checking Accessibility grant...");
+
+    /* Mount the template volume once up front to find out what's
+     * actually enrolled, so the status line below doesn't have to
+     * show "Unknown" until the user happens to hit Enroll/Verify.
+     * Failure here (e.g. volume not set up yet) just leaves the
+     * count at 0/unset -- Settings will explain why if relevant. */
+    vfsc_status_line("Checking enrolled fingers...");
+    refresh_finger_cache();
+    vfsc_boot_line("Template DB: %d enrolled", g_finger_count > 0 ? g_finger_count : 0);
+    vfsc_status_line_ok("hack-touchid: init complete");
+
+    /* Banner prints LAST in verbose mode, once the whole boot log has
+     * scrolled by -- reads as "boot finished, here's the app" rather
+     * than a logo sitting in the middle of a log stream. Quiet mode
+     * already printed it up front (see above), so skip it here to
+     * avoid a duplicate. */
+    if (g_verbose_boot) {
+        print_banner();
+    }
+
+    if (g_post_update_mode) {
+        printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
+        if (g_daemon_removed_by_update) {
+            printf("%sDaemon un-installed, Please run [3] Again.%s\n", VFSC_YELLOW, VFSC_RESET);
+        }
+        printf("\n");
+    }
+
+    printf("%sWelcome to HTID Client!%s\n\n", VFSC_BOLD, VFSC_RESET);
+
+    atexit(sensor_yield_end); /* hand the sensor back even if an action exits the process */
+
+    char line[64];
+    for (;;) {
+        print_menu();
+        printf("<Hack-touchid> ");
+        fflush(stdout);
+
+        if (!read_menu_line(line, sizeof(line))) {
+            printf("\n");
+            break;
+        }
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' || line[len-1] == ' ')) {
+            line[--len] = '\0';
+        }
+        if (len == 0) continue;
+
+        char cmd = line[0];
+        printf("\n");
+        bool ran_action = true;
+        switch (cmd) {
+            case '1': sensor_yield_begin(); do_enroll(); sensor_yield_end(); break;
+            case '2': sensor_yield_begin(); do_verify(); sensor_yield_end(); break;
+            case '3': do_deploy(); break;
+            case 'P': case 'p':
+                if (is_metallica_mis_sensor(g_detected_sensor)) {
+                    do_pair_metallica_mis();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'B': case 'b':
+                if (is_metallica_mis_sensor(g_detected_sensor)) {
+                    do_calibrate_metallica_mis();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'U': case 'u':
+                if (is_upek_sensor(g_detected_sensor)) {
+                    do_test_upek_capture();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'C': case 'c':
+                if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+                    sensor_yield_begin();
+                    do_view_fingerprint();
+                    sensor_yield_end();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'T': case 't':
+                if (g_detected_sensor && !is_metallica_mis_sensor(g_detected_sensor)) {
+                    sensor_yield_begin();
+                    do_sensor_test();
+                    sensor_yield_end();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
+            case 'F': case 'f':
+                do_fpbootd_stub();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'D': case 'd':
+                run_diagnose_and_save();
+                printf("\nPress Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'S': case 's': do_settings_menu(); break;
+            case 'A': case 'a':
+                print_about();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'H': case 'h':
+                print_usage();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'X': case 'x':
+                do_uninstall();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'Q': case 'q':
+                printf("Exiting Hack-TouchID Client.\n");
+                return 0;
+            default:
+                printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                ran_action = false;
+        }
+        if (ran_action) {
+            clear_screen_and_redraw_banner();
+        }
+    }
+    return 0;
+}

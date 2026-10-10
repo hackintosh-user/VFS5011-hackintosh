@@ -1,0 +1,46 @@
+:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--card:#161b22;--line:#30363d;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+@media (prefers-color-scheme:light){:root{--bg:#fff;--fg:#1f2328;--muted:#59636e;--card:#f6f8fa;--line:#d1d9e0;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:70px}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:0 20px}
+nav{border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+nav .wrap{display:flex;gap:18px;align-items:center;height:54px;overflow-x:auto;white-space:nowrap}
+nav .brand{font-weight:700;color:var(--fg);margin-right:auto}
+nav a.on{color:var(--fg);font-weight:600}
+.hero{padding:64px 0 40px;text-align:center}
+.hero h1{font-size:clamp(2rem,6vw,3.1rem);margin:0 0 12px;line-height:1.15}
+.hero p{color:var(--muted);max-width:660px;margin:0 auto 26px;font-size:1.1rem}
+.page-head{padding:44px 0 8px}.page-head h1{margin:0 0 6px;font-size:2rem}.page-head p{margin:0;color:var(--muted)}
+.btn{display:inline-block;padding:10px 20px;border-radius:8px;border:1px solid var(--line);font-weight:600;margin:4px;color:var(--fg)}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.badge{display:inline-block;font-size:.8rem;padding:2px 10px;border:1px solid var(--line);border-radius:99px;color:var(--muted);margin:0 3px 14px}
+section{padding:34px 0;border-top:1px solid var(--line)}
+h2{margin:0 0 16px;font-size:1.5rem}h3{margin:22px 0 8px;font-size:1.1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h3{margin:0 0 6px;font-size:1rem}.card p{margin:0;color:var(--muted);font-size:.95rem}
+a.card{color:var(--fg)}a.card:hover{border-color:var(--accent);text-decoration:none}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:.92rem}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em;background:var(--card);padding:1px 6px;border-radius:5px}
+pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto;margin:12px 0}
+pre code{background:none;padding:0}
+.ok{color:var(--ok)}.dev{color:var(--warn)}.plan{color:var(--muted)}.bad{color:var(--bad)}.tag{font-weight:600}
+.note,.warn{border-left:3px solid var(--accent);background:var(--card);padding:12px 16px;border-radius:0 8px 8px 0;color:var(--muted);margin:14px 0}
+.warn{border-color:var(--warn)}.note b,.warn b{color:var(--fg)}
+.steps{counter-reset:s;list-style:none;padding:0}
+.steps>li{counter-increment:s;position:relative;padding:0 0 18px 46px;margin:0}
+.steps>li::before{content:counter(s);position:absolute;left:0;top:0;width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:.9rem}
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
+.toc a{border:1px solid var(--line);border-radius:99px;padding:3px 12px;font-size:.9rem;color:var(--muted)}
+.commit{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:.92rem}
+.commit:last-child{border:0}.commit code{flex:none;align-self:flex-start}.commit small{color:var(--muted);display:block}
+.cl h3{margin:26px 0 6px;font-size:1.15rem;color:var(--accent)}.cl ul{padding-left:20px}.cl li{margin:6px 0}.cl hr{border:0;border-top:1px solid var(--line)}
+.muted{color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:.9rem;text-align:center;margin-top:30px}
+.fp{display:inline-block;width:24px;height:24px;margin-right:8px;vertical-align:-5px;background:currentColor;-webkit-mask:url(fingerprint.png) center/contain no-repeat;mask:url(fingerprint.png) center/contain no-repeat}
+nav .brand{display:flex;align-items:center}

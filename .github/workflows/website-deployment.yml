@@ -1,0 +1,42 @@
+name: Website-deployment
+
+# Checks the GitHub Pages site in docs/ before (and after) it deploys, so a
+# missing file, broken link or bad asset path gets caught in the PR instead
+# of on the live site. GitHub's own "pages build and deployment" run still
+# does the actual publishing. This workflow only verifies docs/.
+#
+# External (http/https) links are not fetched, since that makes CI flaky.
+
+on:
+  push:
+    branches: [main, active-development]
+    paths:
+      - "docs/**"
+      - ".github/scripts/check_website.py"
+      - ".github/workflows/website-deployment.yml"
+  pull_request:
+    branches: [main, active-development]
+    paths:
+      - "docs/**"
+      - ".github/scripts/check_website.py"
+      - ".github/workflows/website-deployment.yml"
+  workflow_dispatch:
+
+jobs:
+  website-check:
+    name: Website-deployment (files, links, assets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check pages, links, anchors and assets
+        run: python3 .github/scripts/check_website.py docs
+
+      - name: JavaScript syntax check
+        run: node --check docs/assets/site.js
+
+      - name: Check images are real PNG files
+        run: |
+          for f in docs/assets/*.png; do
+            file "$f" | grep -q "PNG image data" || { echo "::error::$f is not a valid PNG"; exit 1; }
+          done

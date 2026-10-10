@@ -1,85 +1,119 @@
 # Changelog
 
-All notable changes to the VFS5011 Hackintosh fingerprint authentication project are documented here.
+All notable changes to the Hackintosh-TouchID fingerprint authentication project are documented here.
 
 ---
+## v1.1.0 - Current Development Target
+**CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
 
-## v1.0.5 — August 18th, 2026 (1:50AM KSA time)
-
-**Daemon/client version sync**
-- New `VFS5011_PROJECT_VERSION` macro in `vfs5011_proto.h` — single source of truth for the version string, shared by both `vfs_client.c` and `vfs5011_daemon.c` so they can never silently drift apart.
-- Daemon gains a `--version` flag, checked before the root re-exec / OpenCore gate / daemon startup — just prints the version and exits(0). Cheap and side-effect-free.
-- Client startup now shells out to the installed daemon binary (`popen(... --version ...)`) and compares its version against its own. On mismatch, prints the daemon's detected version and blocks launch, pointing to `prep_and_build.sh` / `vfs5011_agent_install.sh` (run from outside the client) rather than the in-menu Deploy option, since the client has already exited by that point. Skips the check (and continues) if no daemon is installed yet.
-
-**Sensor presence gate**
-- Client startup now checks for the VFS5011 (VID `0x138a` / PID `0x0018`) on the USB bus before proceeding, printing a verbose "Checking if Sensor is active / enabled..." line.
-- If found: "continuing...". If not found: prints a "Sensor not found. Launching Failed" message with the VID:PID and blocks/exits the client entirely.
-- `vfs5011_agent_install.sh` independently hard-gates on sensor presence too (via `system_profiler`), since `prep_and_build.sh` calls it directly and bypasses the client's check.
-
-**Daemon install path**
-- Moved from `/Library/Application Support/VFSDaemon/vfs5011_daemon` to `/usr/local/libexec/vfs5011/vfs5011_daemon`.
-- The old path's embedded space was a recurring source of quoting bugs across the sudoers rule, plist generation, and the grant-accessibility script — the new path has none.
-- Updated in `vfs_client.c` (`DAEMON_INSTALL_PATH`), `vfs5011_agent_install.sh` (`BINARY_PATH`), and `vfs5011_grant_accessibility.sh` (default arg).
-
-**Confirmed working live on the DV6**: OpenCore check, sensor gate, and daemon version gate (v1.0.5 detected) all pass cleanly, landing on the main menu with the daemon Deployed and 2 fingers enrolled.
+- **Oct 10** - The menu bar's "Update Client" button now finishes the job: after `--menu-updater` installs an update, the client redeploys the daemon with the newly installed binary instead of leaving that to [3] Deploy (an update removes the stale daemon, so previously it stayed missing until you redeployed). Only runs after a successful install, a failed update changes nothing. It asks for Return once at the end, not twice. If the redeploy cannot start it prints `sudo hack-touchid --deploy-agent`. `--check-updates` is unchanged. The update that installs this build is still done by the old client, so the automatic redeploy starts with the update after it. No menu bar app change, it stays v1.4.0.
+- **Oct 10** - Metallica MIS: fixed calibration stopping after the first pass on real hardware (tester log, 06cb:009a). From the second pass on, the capture command carries the previous pass's calibration data and is about 13.6 KB, but the command and scratch buffers were 4 KB and 8 KB, so building it failed. They are now 32 KB and 64 KB in both `metallica_mis_daemon.c` and `metallica_mis_enroll.c`. The TLS layer also encrypted through a fixed 4 KB buffer, so a command that size could not have been sent either, and it now uses the heap. Build 26B261. Experimental, the rest of calibration and enroll have not run on real hardware yet. Metallica MIS is not part of the v1.1.0 release candidate.
+- **Oct 10** - Metallica MIS: first native verify, as the tester flag `--verify-test` (a C port of python-validity's `identify()` and `match_finger()`, added to `metallica_mis_enroll.c/.h`). It lists the prints on the sensor, calibrates with the finger off, asks for one touch, and the sensor says whether it matches a print saved by `--enroll-test` (match in the sensor, nothing is stored on the Mac). It reports `MATCH` with the user record and finger subtype, or `NO MATCH`, and refuses to run when the sensor holds no prints. It changes nothing on the sensor. Experimental and not yet run on real hardware, so run it with `--debug` and send the whole output. Metallica MIS is not part of the v1.1.0 release candidate.
+- **Oct 10** - The update's build step now shows a progress bar instead of `Building [0/3]`. The step count follows your sensor family (a VFS5011 build makes 2 binaries, so it no longer shows a fixed 3), and the bar moves as each binary starts building, so it is an estimate.
+- **Oct 10** - The client's Settings menu is now grouped by purpose: Fingerprint & Authentication, Storage & System Integration, Swipe to Lock, and Updates & Notifications. The keys and what they do are unchanged.
+- **Oct 9** - Metallica MIS: fixed `--enroll-test` stopping at calibration. The sensor answers the calibration command with about 2 KB (1966 bytes seen on a 06cb:009a) and the reply buffer only held 256 bytes. It is now 16 KB.
+- **Oct 9** - Menu bar app v1.4.0: it now checks for client updates. About 15 seconds after launch, then every hour and after waking from sleep, it compares your client's `VERSION.txt` with the same branch on GitHub. When a newer version or build exists it posts a notification with an **Update Client** button, once per published build. The button opens your default terminal and runs `hack-touchid --menu-updater`. If the client has not been run yet (no `hack-touchid` in your PATH) the check stays quiet.
+- **Oct 9** - New launch argument `--menu-updater`: checks for a client update and installs it right away, with no prompts. It is what the menu bar app's Update Client button runs. If the build fails, the current install is left untouched.
+- **Oct 9** - `--check-updates` no longer installs on its own. When an update exists it now shows the same `[A]` Show changelog / `[Y]` Download and install / `[N]` Cancel prompt as the launch check, and `[Y]` installs it and tells you to run the client again.
+- **Oct 9** - Fixed `--check-updates` (and the update it ran) building for every sensor family when a sensor was plugged in. That mode never probed the USB bus, so the updater fell back to building everything and asked Homebrew for the Metallica MIS packages (openssl@3, innoextract), which compile from source on Intel Macs and look like a hang. It now detects your sensor first. `prep_and_build.sh` also never installs packages on the build-everything fallback anymore: it builds only the families whose packages are already installed and says what it skipped.
+- **Oct 9** - Metallica MIS: first native enroll, as the tester flag `--enroll-test` (a C port of python-validity's enroll sequence, new `metallica_mis_enroll.c/.h`). It lists the prints on the sensor, calibrates with the finger off, asks for several touches of the same finger, saves the print on the sensor and lists again. Nothing is saved on the Mac, and there is no verify or identify yet. Every wait has a time limit, and it stops after 4 bad touches in a row or 30 attempts. A `0x04c3` rejection points at `--wipe-records` and nothing is wiped automatically. Experimental and not yet run on hardware. The sensor's secure reply buffer also grew from 8192 bytes to 128 KB, because template replies are tens of KB (this affects every secure command).
+- **Oct 7** - Fixed the update build hanging on a prompt nobody could see. The updater runs `prep_and_build.sh` with its output captured, so the "which sensor do you have?" and "install with Homebrew?" questions were invisible and the update sat at `Building [0/3]`. The updater now names the detected sensor family, answers yes to installs and closes stdin, and `prep_and_build.sh` never asks when its output is not a terminal.
+- **Oct 7** - Swipe to Lock: the daemon now retries once, on a freshly opened device, when the sensor's init sequence stalls with `LIBUSB_ERROR_PIPE` (the first arm after a daemon start sometimes did).
+- **Oct 7** - Fixed lines of the fingerprint image shifting after a capture read timed out. A read that timed out could still return part of a chunk, and those bytes were dropped. They are now kept and joined to the next read.
+- **Oct 7** - Sensor yield: while Swipe to Lock is on the daemon holds the sensor, which used to make the client's `[1]` Enroll, `[2]` Verify and `[C]` View Fingerprint fail to open it. The client now asks the daemon (through the menu bar IPC) to let go of the sensor for the duration and to re-arm afterwards. Swipe to Lock stays on as a setting. The daemon lets go within one read timeout, stops capture retries at once, and drops the yield by itself if the client dies without finishing.
+- **Oct 7** - Settings `[L]` Swipe to Lock Sensitivity: sets the minimum swipe height (20 to 400 rows, default 60) that counts as a lock swipe, saved in `lockswipe_min_height.conf`. The daemon re-reads it on every lock swipe, so a change applies to the next swipe with no restart.
+- **Oct 7** - New main-menu `[T]` Sensor Test: swipe as often as you like and see, per swipe, the image height (what Swipe to Lock compares) and the minutiae count (what the weak-swipe check compares). Nothing is saved. After at least 3 swipes it suggests a sensitivity and can save it to `[L]`.
+- **Oct 6** - Menu bar app v1.3.1: a swipe that is too weak now gets its own notification, "Swipe was too weak, please try again 🔻". The daemon tells the app when a swipe has too few minutiae to be scored. The client's Enroll and Verify are not affected.
+- **Oct 6** - Lockout after 4 failed swipes (lock screen and padlock prompts). After four scored swipes that do not match during one prompt, the daemon stops scanning so the password field takes over, logs `Swipe failed 4 times in a row -> giving up, use the password.`, and the menu bar app shows "Authentication failed, use your password ❌". Weak swipes that were never scored do not count. The counter resets for each new prompt and on unlock.
+- **Oct 6** - Menu bar app: the swipe notifications now end with 🔻 (swipe prompt), ✅ (success) and ❌ (failure). The app's `Info.plist` version now matches the release (it still said 1.0.0), and the greyed `Reported macOS Version` menu line now starts with a capital R.
+- **Oct 6** - Swipe to Lock (macOS Tahoe only) now survives a reboot. The daemon could not save its on/off flag when `/Library/Application Support/VFS5011` did not exist yet, so the setting was lost and Swipe to Lock came back off after a cold boot. The folder is now created before the flag is written, which also fixes the same problem for the scanning pause flag. The daemon now announces its Swipe to Lock state at startup, and logs why it did not arm (for example the screen is locked, or no sensor is present).
+- **Oct 6** - Fixed the password sometimes not being typed on the lock screen after a Swipe to Lock. A swipe right after locking could match before the password field was ready, so the characters were dropped while Return still went through. The daemon now waits until 1.5 seconds after the lock screen appears before typing, and clears the Ctrl+Cmd modifier flags on the typed events. A lock-screen episode left over after the screen is already unlocked (for example after signing in by typing) is now cleared after about 3 seconds, so it cannot block Swipe to Lock.
+- **Oct 6** - Menu bar app v1.3.0: swipe notifications are now removed from Notification Center 10 seconds after success or failure, before each new swipe prompt, and at launch, so they no longer pile up. The "daemon missing" alert is kept. The app also asks the daemon for its state again 2, 5, 10 and 20 seconds after launch, so starting before the daemon after a cold boot no longer leaves the menu out of sync. Swipe to Lock is macOS Tahoe only.
+- **Oct 6** - Website: added Swipe to Lock (macOS Tahoe only) to the home page and the menu bar app section of the Guide.
+- **Oct 6** - Fixed two shellcheck warnings that were failing CI: an unused-variable warning in `ht_env.sh` (SC2034) and an `ls` loop in `fpbootd-authplugin-uninstall.sh` (SC2045), now a glob that still picks the newest clean backup.
+- **Oct 5** - macOS Tahoe only, VFS5011: new Swipe to Lock. Turn it on from the menu bar app ("Enable Swipe to Lock", shown on Tahoe only) and the daemon keeps the sensor armed; one swipe locks the screen (Ctrl+Cmd+Q). It never matches a finger or types a password, and it steps aside for the real lock-screen and padlock authentication, then re-arms. The setting survives daemon restarts. While armed the sensor stays lit and the client's Enroll and Verify cannot open it, so turn it off first.
+- **Oct 5** - The client's main-menu Status section now shows `Reported macOS Version`, for example `26.7.1 Tahoe (Darwin: 25.6.0)`. The menu bar app shows the same line.
+- **Oct 5** - `prep_and_build.sh` now rebuilds its sensor helper (`.ht_sensor_tool`) on every run instead of only when the source looked newer. After an update the old helper could survive (file timestamps from a zip, web upload or the updater can be older than the existing binary), so sensor auto-detect kept using the previous version and asked which sensor you have even though one was plugged in.
+- **Oct 4** - Fixed `--deploy-agent` (and the Deploy menu option) refusing to install on Tahoe with "No VFS5011 sensor detected on the USB bus" while the sensor was present and working. `hack-touchid-agent-install.sh` re-checked the hardware with `system_profiler`, which relied on one exact field order that Tahoe's output no longer matches. The client now tells the installer it already confirmed the sensor over libusb (`HT_SENSOR_VERIFIED=1`), and a standalone run checks `ioreg` per USB device, then `system_profiler`, both without depending on field order. `ht_sensor_tool detect` got the same order-independent matching.
+- **Oct 4** - Sensor-driven dependencies: `prep_and_build.sh` now asks which sensor you have (or detects it over USB) and only installs and builds what that sensor needs. A VFS5011 or UPEK user no longer installs OpenSSL or innoextract. Use `--sensor <family|VID:PID>`, `--list`, `--yes` or `--no-install`. The per-sensor dependency list lives in `supported_sensors.h` (new `family`, `deps_build` and `deps_runtime` fields), read by the scripts through the new `ht_sensor_tool.c`. `build.sh`, `build_client.sh`, `build_daemon.sh` and `build_metallica_mis.sh` follow the same selection, use the Homebrew prefix instead of a hard-coded `/usr/local`, and a bare run still builds everything. A client built without the Metallica family links `ht_sensor_stubs.c` instead of the Metallica and OpenSSL code. At launch the client now checks the detected sensor's run-time dependencies and offers to install only the missing ones with Homebrew (as your user, since Homebrew refuses root).
+- **Oct 3** - Fpbootd: the authorization plugin is now the Stage C version, which asks the daemon for a real capture at the login screen and speaks the result (accepted, try again, use password). It always falls through to the normal password field. Skipping the password field was tried at two mechanism positions and is not possible from a third-party plugin, so the compiled-in username experiment was removed. The plugin is registered right after `builtin:auto-login,privileged`. `fpbootd-authplugin-install.sh` now keeps only clean backups and refuses to guess a position in an unexpected rule. `fpbootd-authplugin-uninstall.sh` now removes the plugin from the live login rule instead of restoring the latest backup, which could re-add it after a second install run and leave the rule pointing at a deleted bundle.
+- **Oct 3** - Metallica MIS: `--list-records` / `--wipe-records` no longer fail with the bogus status `0x0315` after an interrupted earlier run. The sensor can stay inside its TLS session and answers the first plaintext command with a TLS alert. HTID now detects that, resets the USB device, reopens it and retries (up to 2 times), and tells you to unplug and replug the sensor if it is still stuck.
+- **Oct 3** - Settings `[CU]` Check for Updates Now: checks the branch's `VERSION.txt` on demand and shows the usual `[A]` / `[Y]` / `[N]` update prompt when a newer version or build exists. It also says when you are already up to date or when GitHub can't be reached. A build declined here is not re-announced by the live update notifications.
+- **Oct 3** - Live update notifications: while the client sits at the main menu it re-checks the branch's `VERSION.txt` every minute. If a newer version or build is published while it is open, it shows the usual `[A]` / `[Y]` / `[N]` update prompt, and a declined build is not announced again until an even newer one appears. New Settings `[U]` toggles it (on by default, saved across launches). The check at launch is unchanged.
+- **Oct 3** - Updater: the download line now names the update instead of the branch, for example `Downloading HTID Update v1.1.0 26B240...`, using the version and build from the remote `VERSION.txt`.
+- **Oct 3** - Updater: `[A] Show changelog` is now readable in the terminal. Entries are word-wrapped to the window width with a hanging indent and a bold date, instead of long lines that broke mid-word.
+- **Oct 3** - Metallica MIS: clearer `--force-pair` and `0x0404` messages. The `--force-pair` banner and `--help` no longer claim it wipes a paired sensor. They now say a sensor that is already paired refuses unauthenticated flash writes (status `0x0404`) and point to `--host-product` / `--host-serial`. The `0x0404` status name and the partition write failure line carry the same hint.
+- **Oct 2** - Metallica MIS TLS fix: the "client finished" and "server finished" PRF labels were hashed with a trailing NUL byte (16 bytes instead of 15), so the Finished verify data never matched python-validity's and the sensor rejected the handshake with `illegal_parameter`. Found by comparing the handshake against python-validity's `tls.py` after the tester's `--list-records` log showed the alert. This was the first run of the secure handshake on real hardware. Confirmed on hardware: with the fix, `--list-records` completes the TLS handshake and lists the sensor's records.
+- **Oct 2** - Metallica MIS debug log: the PSK keys in `[diag]` lines (pairing, calibration session and the `handle_priv()` failure line) are now redacted and shown as a short fingerprint (`<redacted, fp=xxxxxxxx>`) that still lets two runs be compared. Earlier `--debug` logs printed the keys in full, so the Oct 1 note that key material is never logged was wrong until this change. A TLS alert from the sensor is now decoded (level and name, for example `illegal_parameter`) instead of a generic handshake parse failure.
+- **Oct 2** - Updater: after a successful update build the client now removes the installed daemon (LaunchAgent, daemon binary and its Accessibility grant) and prints `Daemon un-installed, Please run [3] Again.`, so a stale daemon never keeps running or blocks the client from launching. Enrolled fingers and the encrypted volume are kept.
+- **Oct 2** - New launch arguments `--host-product` and `--host-serial` (Metallica MIS). They replace the spoofed Mac model and serial that HTID uses to derive the sensor's pairing key. For a sensor paired on Linux or Windows, pass the laptop's real DMI `product_name` and `product_serial` so `--list-records` and `--wipe-records` can open a session without re-pairing.
+- **Oct 2** - Tester finding (Metallica MIS): `--force-pair` cannot wipe a sensor that is already paired to another host identity. The partition write goes out in plaintext and the sensor rejects it with `0x0404`. Record listing fails the HMAC check because HTID derives its key from the spoofed Mac identity while Linux used the real one.
+- **Oct 2** - Website: new "Releases" section on the home page (current release v1.0.5, upcoming v1.1.0) and a Fpbootd section in the guide.
+- **Oct 2** - Project website: a GitHub Pages site (served from `docs/`) with a home page, a documentation page (live changelog plus the latest 5 commits on every branch), a usage guide, the security policy and the contributing guide ("Help grow this!").
+- **Oct 1** - Metallica MIS: new sensor record DB layer (`metallica_mis_db.c/.h`), a C port of python-validity's `db.py`. Can list and wipe the prints stored on the sensor, and verifies a wipe by re-reading afterwards. The enroll path is not built yet.
+- **Oct 1** - New launch arguments: `--debug` (logs every USB transfer, TLS command and DB call with timestamps and hex dumps, plus libusb's own debug log, key material is never logged, keys show only as `<redacted, fp=...>`) and `--debug-full` (removes the payload size cap). Known sensor status words such as `04c3` and `04b3` are named in the log.
+- **Oct 1** - New launch arguments `--list-records` (read only) and `--wipe-records` (asks you to type WIPE, deletes every print on the sensor, does not touch HTID's saved templates on the Mac).
+- **Oct 1** - Build scripts and CI source lists updated for the new Metallica MIS files.
+- **Oct 1** — Updater: when an update is found it now offers `[A]` Show changelog / `[Y]` Download and install / `[N]` Cancel. `[A]` fetches `CHANGELOG.md` from your branch and prints what's new since your version, so you no longer need GitHub to see what an update contains.
+- **Sep 30** - Tester finding: the Metallica MIS `04c3` enroll failure is caused by a print already stored on the sensor for that user. Deleting it first lets enrollment succeed, which is what the new record DB layer is for.
+- **Sep 30** - `[D] Diagnose` / `--diag-pid` report expanded with more system, USB and daemon detail, can now be saved to a file, and `[X] Uninstall` also cleans up the agent log.
+- **Sep 30** - Release ETA updated to mid October 2026.
+- **Sep 29** - `[X] Uninstall` implemented natively: removes the daemon for any sensor. The `[A] About` screen no longer clears instantly (added a Press Return pause). CLI menu example and supported sensor statuses updated in the README.
+- **Sep 25** - Menu polish: help, Uninstall and Fpbootd entries, status rows, and fixed the `H`/`X`/`A`/`FP` options flashing before the screen clears.
+- **Sep 23-24** - README gains an ETA disclaimer and a credits section, CONTRIBUTING.md updated.
+- **Sep 21-22** - Fpbootd (pre-login authentication) spike code committed: base resources, `Info.plist`, a test harness, and install/uninstall scripts. Fixed its clang build issues. `prep_and_build.sh` now mentions `fpbootd-install.sh` when it finishes.
+- **Sep 15** - Metallica MIS pairing root cause found: `init_flash()` returned early whenever the sensor already reported partitions, so `[P] Pair` silently did nothing on an already-paired sensor. Added `--force-pair`, which runs the full fresh-pairing sequence in the correct order.
+- **Sep 14** — Metallica MIS pairing bug: pinpointed the decrypt failure to the HMAC check specifically (not key derivation, which is now confirmed correct). Added a write-then-immediate-readback diagnostic to isolate whether the write or the post-write reboot is at fault. Root cause still open.
+- **Sep 13** — Universal rebrand: `VFSStore` volume renamed to `HackTouchIDStore`, 10 `vfs5011_*` files renamed to `hack-touchid-*` (core VFS5011-specific daemon files kept their names on purpose). Verified nothing broke end-to-end post-rename.
+- **Sep 13** — macOS floor raised from Ventura 13 to Sonoma 14 (Homebrew wasn't practically usable on Ventura).
+- **Sep 13** — Auto-updater gets real progress bars for download/extract/build instead of a garbled spinner.
+- **Sep 13** — `MATCH_THRESHOLD` raised 20 → 40; added `--q`/`--quiet` flag and verbose launch mode.
+- **Sep 13** — Metallica MIS calibrate bug traced to `parse_tls_flash()` returning a generic failure for every error case; added per-check diagnostics so the real failure mode is now visible in logs.
+- **Sep 12** — Fixed a real pairing bug: `do_pairing()` was reporting success before the sensor actually finished re-enumerating post-reboot. Now polls for real re-enumeration before declaring pairing done.
+- **Sep 11-12** — Found and fixed the root cause of Metallica MIS calibrate failing with status `0x0404`: on an already-paired device, the secure session was never actually being established, so commands were silently sent in plaintext. Ported `read_flash`/`read_tls_flash` and wired up session re-establishment to fix it.
+- **Sep 10** — Added `[D] Diagnose` menu item + `--diag-pid` flag: prints a copy-paste-friendly health report (versions, sensor/backend status, daemon state, template setup, Accessibility grant).
+- **Sep 8-9** — Menu bar app gains daemon-health checks + a "Reinstall Daemon" notification action (`--deploy-agent` flag). Project folder renamed `Vfs5011-menubar` → `Hackintosh-TouchID-Menubar` across all references.
+- **Sep 8** — Fixed a real Metallica MIS calibrate bug: two transcribed-wrong hex tables were garbling chunk boundaries. Replaced with verified-correct upstream data.
+- **Sep 7** — Client can now self-add to `PATH` (self-healing symlink); fixed a latent path-resolution bug this exposed.
+- **Sep 7** — Fixed the update-checker silently never firing in default (verbose) boot mode.
+- **Sep 7** — Metallica MIS `calibrate()` orchestration loop ported and wired into the client, plus several build-system/compile bugs found and fixed along the way.
+- **Aug 30** — Fixed a real-hardware pairing failure (over-strict status check that upstream doesn't have). Added a diagnostic sensor-identify probe to pairing.
+- **Aug 29-30** — UPEK and Metallica MIS backends brought up to parity with VFS5011 (open/close/presence-check).
+- **Aug 29** — UPEK capture wired into the client (test-only, not full Enroll/Verify yet). Added the verbose boot flood + `[ OK ]` status styling.
+- **Aug 28** — Metallica MIS pairing wired into the client.
 
 ---
+## v1.0.5 — August 18th, 2026
+- Daemon/client version sync (shared version macro, `--version` flag, client blocks launch on mismatch).
+- Added a sensor-presence gate on client startup.
+- Moved daemon install path to avoid a recurring space-in-path quoting bug.
+- Confirmed working end-to-end on real hardware.
 
+---
 ## v1.0.4 — August 16th, 2026
-
-**macOS floor lowered to Ventura 13**
-- Whole stack (daemon, client, menu bar app) lowered from a Sequoia 15 floor to Ventura 13 (Darwin 22.0.0+), after confirming via source review that no actual Sequoia/Sonoma-only API is used anywhere.
-- `check_macos_version_warning()` in `vfs_client.c` now warns rather than blocks below Darwin 22.
-- Root cause of the menu bar app's real blocker wasn't `Info.plist` (which already said `LSMinimumSystemVersion 13.0`) — it was `build_menubar_app.sh`'s `swiftc` invocation missing a `-target` flag, so the compiled binary's `LC_BUILD_VERSION` silently inherited the build host's toolchain default (~15.0 on the Sequoia dev machine). Fixed by adding `-target x86_64-apple-macosx13.0`, making the build deterministic regardless of build host OS.
-- Confirmed working end-to-end on Sonoma 14 real hardware (second DV6, "Sandy," build 7080ee).
-
-**No-sensor false-notification fix**
-- The daemon previously had no sensor-presence check at all — `arm_polling_for_trigger()` fired the "Swipe to authenticate!" notification on every lock/auth-prompt regardless of whether a sensor was attached, only discovering "Device not found" later inside capture. On a no-sensor install this meant a notification + automatic failure notification on every single lock, forever.
-- Fixed with `vfs5011_sensor_is_present()` — a cheap, non-invasive USB enumeration check (its own short-lived libusb context, VID/PID comparison only, never opens/claims the device) — called fresh on every trigger before any notification fires, so it self-recovers if a sensor is plugged in mid-session with no daemon restart needed. Also added a one-time non-fatal startup warning if no sensor is detected at launch.
-
-**Pre-login (login-window) fingerprint auth: investigated and closed**
-- Fully investigated across two approaches and abandoned as not worth pursuing:
-  - **AX-based**: Built `ax_probe_loginwindow` + a TCC.db insert to pre-grant Accessibility pre-login. `AXIsProcessTrusted()` confirmed `TRUE` at genuine pre-login boot (3 separate tests) — but even fully trusted, `AXUIElementCreateApplication` on `loginwindow.app` returned only an empty root element every time. The login screen's UI isn't exposed via a normal AX tree at all — an architectural wall, not a permissions problem.
-  - **IOHIDUserDevice (virtual HID keyboard)**: Failed at `IOHIDUserDeviceCreate` with "not entitled" — requires an `amfi_get_out_of_my_way=1` boot-arg (a system-wide entitlement-verification bypass) to work around illegitimately. Explicitly rejected as not worth that tradeoff.
-- **Decision**: closed/abandoned. The existing post-login lock-screen flow (LaunchAgent + AX) remains the sole supported auth surface.
+- Lowered macOS floor from Sequoia 15 to Ventura 13 across the whole stack; fixed the menu bar app's actual version-floor bug (missing `swiftc -target` flag).
+- Fixed a false-notification bug: the daemon would fire a swipe prompt (and automatic failure) on every lock even with no sensor attached.
+- Investigated and closed pre-login (login-window) fingerprint auth — architecturally blocked on both approaches tried; decision is to not pursue it further.
 
 ---
-
 ## v1.0.3 — August 15th, 2026
-
-**Instant swipe-prompt fix**
-- Diagnosed and fixed a 3–5 second delay between screen-lock and the sensor lighting up / "swipe now" prompt appearing.
-- Root cause: `arm_polling_for_trigger()` called the template loader synchronously — a full encrypted APFS volume mount/decrypt/read/unmount — *before* setting `STATE_POLLING` and firing the swipe-requested notification, so the entire disk+crypto round trip sat in the critical path before the user saw anything.
-- Fix: the trigger handler now sets `STATE_POLLING` and fires the notification immediately, then spawns a detached background thread to do the actual mount/load. A new `g_templates_ready` atomic + `g_templates_lock` mutex hold/synchronize a real swipe that comes in before templates finish loading, rather than discarding it. Verified live on the DV6: lock-to-match went from a felt 3–5s delay to instant.
-
-**CI**
-- Added GitHub Actions CI (`.github/workflows/ci.yml`) with 5 jobs: shellcheck, cppcheck, build-daemon-and-client, matcher-unit-tests, build-menubar-app. All green.
-
-**Menu bar companion app**
-- Built a Swift/AppKit status-bar app using `CFNotificationCenterGetDistributedCenter` (matching the daemon's proven lock/unlock IPC pattern across the root/user boundary).
-- Custom fingerprint-glyph icon, working enable/disable toggle. Restart Daemon button still a no-op stub at this point.
+- Fixed a 3-5 second delay between screen-lock and the swipe prompt appearing (template loading moved off the critical path onto a background thread).
+- Added GitHub Actions CI (5 jobs, all green).
+- Built the Swift/AppKit menu bar companion app.
 
 ---
-
 ## v1.0.2 — August 13th, 2026
-
-- Confirmed (via empirical `ax_probe.c`-driven methodology) that Passwords.app and Keychain Access (`coreautha`) are valid auth surfaces for the existing post-login flow.
-- Added an OpenCore minimum-version NVRAM gate — warns (no hard block) if the detected OpenCore version is below 1.0.6.
+- Confirmed Passwords.app and Keychain Access as valid auth surfaces.
+- Added an OpenCore minimum-version warning gate.
 
 ---
-
 ## v1.0.1 - August 10th, 2026
-
-- Fixed the daemon to load templates from the `fingers/` directory, enabling proper multi-finger support (previously only read a single template location).
+- Fixed multi-finger support (daemon now reads all templates in `fingers/`, not just one).
 
 ---
-
 ## v1.0.0 — Initial release | August 5th 2026
-
-- Built the full capture + matching pipeline from scratch: USB enumeration, the sensor's 77-step init handshake, swipe capture with offset-correlation alignment, and NBIS (`mindtct`/`bozorth3`) minutiae extraction and matching.
-- Enrollment: `ENROLL_SWIPES=5` with a self-consistency gate (`MIN_SELF_CONSISTENCY=15`); matching threshold `MATCH_THRESHOLD=20`.
-- Deployed as a LaunchAgent + NOPASSWD sudoers rule. Confirmed working end-to-end on real hardware: lock → swipe → match → password auto-typed → unlock.
-- USB stability fixes (retry logic, per-swipe open/close cycle).
-- Fixed an exit code 78 (`EX_CONFIG`) issue caused by a root-owned log file preventing `launchd`'s pre-exec file open.
-- Template storage on an encrypted APFS volume ("VFSStore"), with the volume passphrase kept in the system keychain.
-- Licensed BSD 3-Clause, with credit to NIST/NBIS and to Arseniy Lartsev + AceLan Kao for the original libfprint VFS5011 driver (LGPL 2.1).
+- Built the full capture + matching pipeline from scratch (USB enumeration, sensor init handshake, swipe capture, NBIS minutiae matching).
+- Enrollment/matching thresholds set; deployed as a LaunchAgent + NOPASSWD sudoers rule.
+- Confirmed working end-to-end on real hardware.
+- Template storage on an encrypted APFS volume ("VFSStore"), passphrase in the system keychain.
+- Licensed BSD 3-Clause, with credit to NIST/NBIS and to Arseniy Lartsev + AceLan Kao for the original libfprint VFS5011 driver.
