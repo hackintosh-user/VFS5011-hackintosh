@@ -231,12 +231,14 @@ static size_t session_unpad(const unsigned char *in, size_t in_len) {
 static int aes256_cbc_raw(int encrypt, const unsigned char key[32], const unsigned char iv[16],
                            const unsigned char *in, size_t in_len, bb_t *out) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    unsigned char buf[4096 + 32]; /* scratch; handshake/app messages here are small */
+    unsigned char *buf = NULL; /* heap: cmd_02 with prior calibration data is ~16 KB */
     int len1 = 0, len2 = 0;
     int rc = -1;
 
     if (!ctx) return -1;
-    if (in_len > sizeof(buf) - 32) { EVP_CIPHER_CTX_free(ctx); return -1; } /* TODO: chunk for larger payloads if ever needed */
+    if (in_len > 65536) { EVP_CIPHER_CTX_free(ctx); return -1; }
+    buf = malloc(in_len + 32);
+    if (!buf) { EVP_CIPHER_CTX_free(ctx); return -1; }
 
     EVP_CIPHER_CTX_set_padding(ctx, 0); /* both padding schemes here are hand-rolled */
 
@@ -254,6 +256,7 @@ static int aes256_cbc_raw(int encrypt, const unsigned char key[32], const unsign
     rc = 0;
 
 done:
+    free(buf);
     EVP_CIPHER_CTX_free(ctx);
     return rc;
 }
