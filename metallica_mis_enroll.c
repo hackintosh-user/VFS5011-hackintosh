@@ -129,8 +129,8 @@ typedef struct {
 static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_capture_mode_t mode) {
     const char *mname = (mode == MMIS_CAPTURE_IDENTIFY) ? "IDENTIFY" : "ENROLL";
     char what[64];
-    static uint8_t cmd_buf[4096];
-    static uint8_t scratch[8192];
+    static uint8_t cmd_buf[32768];   /* cmd_02 with prior calib data is ~16 KB */
+    static uint8_t scratch[65536];
     static unsigned char rsp[REPLY_MAX];
     unsigned char intr[1024];
     int rc = -1;
