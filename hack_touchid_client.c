@@ -774,6 +774,12 @@ static bool g_records_wipe_mode = false;
  * Survives the sudo re-exec like the other flags. */
 static bool g_enroll_test_mode = false;
 
+/* Set by argv parsing in main() when "--verify-test" is passed. Same
+ * headless pattern as --enroll-test: calibrate, one touch, and the sensor
+ * says whether it matches a print saved by --enroll-test
+ * (metallica_mis_do_verify_test()). Survives the sudo re-exec. */
+static bool g_verify_test_mode = false;
+
 /* Set by argv parsing in main() when "--check-updates" is passed.
  * Same headless-dispatch pattern as g_diag_pid_mode/g_deploy_agent_mode
  * above -- routes into run_check_updates_mode() instead of the
@@ -2017,6 +2023,8 @@ static void print_usage(void) {
     printf("  --wipe-records      Delete ALL prints stored on a Metallica MIS sensor and exit\n");
     printf("  --enroll-test       Metallica MIS: calibrate, enroll one finger on the sensor and exit\n");
     printf("                      (experimental, tester tool, run with --debug)\n");
+    printf("  --verify-test       Metallica MIS: calibrate, touch once, match against a print saved by\n");
+    printf("                      --enroll-test and exit (experimental, run with --debug)\n");
     printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
     printf("  --host-serial X     Metallica MIS: use X as the host serial instead of this Mac's\n");
     printf("                      (for a sensor paired on Linux/Windows: pass the laptop's real\n");
@@ -2574,6 +2582,26 @@ static void run_enroll_test_mode(void) {
         g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
     if (metallica_mis_do_enroll_test() != 0) {
         vfsc_err("\nEnroll test failed. Re-run with --debug and send the full output.\n\n");
+        return;
+    }
+    vfsc_ok("\nDone.\n\n");
+}
+
+/* run_verify_test_mode() -- headless "--verify-test" for Metallica MIS
+ * sensors: match-in-sensor against a print saved by --enroll-test. */
+static void run_verify_test_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_err("No Metallica MIS sensor detected. --verify-test only applies to that sensor family.\n\n");
+        return;
+    }
+    vfsc_warn(
+        "\nExperimental: this runs a real verify on %s {0x%04X:0x%04X}.\n"
+        "It calibrates first (keep your finger OFF the sensor), then asks for one touch\n"
+        "and the sensor says whether it matches a print saved by --enroll-test.\n"
+        "Nothing is changed on the sensor. Run it with --debug and send the whole output.\n\n",
+        g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+    if (metallica_mis_do_verify_test() != 0) {
+        vfsc_err("\nVerify test did not match or failed. Re-run with --debug and send the full output.\n\n");
         return;
     }
     vfsc_ok("\nDone.\n\n");
@@ -6153,6 +6181,10 @@ int main(int argc, char **argv) {
             g_enroll_test_mode = true;
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--verify-test") == 0) {
+            g_verify_test_mode = true;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
@@ -6200,6 +6232,7 @@ int main(int argc, char **argv) {
         if (g_records_list_mode) sudo_argv[ai++] = "--list-records";
         if (g_records_wipe_mode) sudo_argv[ai++] = "--wipe-records";
         if (g_enroll_test_mode) sudo_argv[ai++] = "--enroll-test";
+        if (g_verify_test_mode) sudo_argv[ai++] = "--verify-test";
         if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
         if (g_metallica_mis_host_product_override) {
             sudo_argv[ai++] = "--host-product";
@@ -6304,6 +6337,13 @@ int main(int argc, char **argv) {
     if (g_enroll_test_mode) {
         g_detected_sensor = detect_supported_sensor();
         run_enroll_test_mode();
+        return 0;
+    }
+
+    /* --verify-test: headless Metallica MIS verify test, same dispatch. */
+    if (g_verify_test_mode) {
+        g_detected_sensor = detect_supported_sensor();
+        run_verify_test_mode();
         return 0;
     }
 
