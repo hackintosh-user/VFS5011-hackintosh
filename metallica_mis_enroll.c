@@ -124,9 +124,11 @@ typedef struct {
     size_t calib_len;
 } enroll_ctx_t;
 
-/* python Sensor.capture(CaptureMode.ENROLL). Returns 0 ok, -2 if the finger
- * never came (timeout), -1 on any other failure. */
-static int capture_enroll(metallica_mis_tls_t *tls, enroll_ctx_t *ctx) {
+/* python Sensor.capture(mode), mode = ENROLL or IDENTIFY. Returns 0 ok, -2 if
+ * the finger never came (timeout), -1 on any other failure. */
+static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_capture_mode_t mode) {
+    const char *mname = (mode == MMIS_CAPTURE_IDENTIFY) ? "IDENTIFY" : "ENROLL";
+    char what[64];
     static uint8_t cmd_buf[4096];
     static uint8_t scratch[8192];
     static unsigned char rsp[REPLY_MAX];
@@ -134,7 +136,7 @@ static int capture_enroll(metallica_mis_tls_t *tls, enroll_ctx_t *ctx) {
     int rc = -1;
 
     size_t cmd_len = mmis_build_cmd_02(
-        MMIS_CAPTURE_ENROLL, ctx->prog, ctx->prog_len,
+        mode, ctx->prog, ctx->prog_len,
         METALLICA_TYPE0199_BYTES_PER_LINE, METALLICA_TYPE0199_CALIBRATION_FRAMES, ctx->lines_per_frame,
         METALLICA_TYPE0199_REPEAT_MULTIPLIER, METALLICA_TYPE0199_KEY_CALIBRATION_LINE,
         ctx->factory, ctx->factory_len,
@@ -143,12 +145,13 @@ static int capture_enroll(metallica_mis_tls_t *tls, enroll_ctx_t *ctx) {
         METALLICA_TYPE0199_CALIB_BLOB, sizeof(METALLICA_TYPE0199_CALIB_BLOB),
         cmd_buf, sizeof(cmd_buf), scratch, sizeof(scratch));
     if (cmd_len == 0) {
-        fprintf(stderr, "metallica_mis_enroll: build_cmd_02(ENROLL) failed\n");
+        fprintf(stderr, "metallica_mis_enroll: build_cmd_02(%s) failed\n", mname);
         return -1;
     }
 
-    int n = app_cmd(tls, "capture: cmd_02 (ENROLL)", cmd_buf, cmd_len, rsp, sizeof(rsp));
-    if (n < 0 || status_ok("capture: cmd_02 (ENROLL)", rsp, n) != 0) goto done;
+    snprintf(what, sizeof(what), "capture: cmd_02 (%s)", mname);
+    int n = app_cmd(tls, what, cmd_buf, cmd_len, rsp, sizeof(rsp));
+    if (n < 0 || status_ok(what, rsp, n) != 0) goto done;
 
     /* start: first interrupt must be type 0 */
     int w = metallica_mis_wait_interrupt(intr, sizeof(intr), WAIT_START_MS);
@@ -221,6 +224,10 @@ done:
         metallica_mis_tls_cmd(tls, stop, sizeof(stop), stop_rsp, sizeof(stop_rsp));
     }
     return rc;
+}
+
+static int capture_enroll(metallica_mis_tls_t *tls, enroll_ctx_t *ctx) {
+    return capture_mode(tls, ctx, MMIS_CAPTURE_ENROLL);
 }
 
 /* python enrollment_update_start(key): 0x68, u32 key, u32 0 -> new key, then wait_int() */
@@ -551,5 +558,181 @@ int metallica_mis_do_enroll_test(void) {
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("enroll: end, rc=%d", rc);
+    return rc == 0 ? 0 : -1;
+}
+
+/* ---- verify (match in the sensor) ---- */
+
+/* python Sensor.parse_dict(): repeated <HH tag, len> + data. Fills vals/lens
+ * for tags 0..7 (pointers into buf). */
+static int parse_dict(const unsigned char *buf, size_t len, const unsigned char **vals, size_t *lens, int ntags) {
+    for (int i = 0; i < ntags; i++) { vals[i] = NULL; lens[i] = 0; }
+    while (len > 0) {
+        if (len < 4) return -1;
+        uint16_t t = rd16(buf), l = rd16(buf + 2);
+        buf += 4; len -= 4;
+        if (l > len) return -1;
+        if (t < ntags) { vals[t] = buf; lens[t] = l; }
+        buf += l; len -= l;
+    }
+    return 0;
+}
+
+/* python Sensor.match_finger(): 0x5e match command, one interrupt (type 3 =
+ * recognised), 0x60 to fetch the result, 0x62 cleanup. Returns 0 and fills
+ * the outputs on a match, 1 if the sensor did not recognise the finger,
+ * -1 on any failure. */
+static int match_finger(metallica_mis_tls_t *tls, uint32_t *usr_id, uint16_t *subtype, size_t *hash_len) {
+    static unsigned char rsp[REPLY_MAX];
+    unsigned char intr[1024];
+    unsigned char cmd[13];
+    int rc = -1;
+
+    /* pack('<BBBHHHHH', 0x5e, 2, 0xff, stg_id=0, usr_id=0, 1, 0, 0) */
+    cmd[0] = 0x5e; cmd[1] = 2; cmd[2] = 0xff;
+    wr16(cmd + 3, 0); wr16(cmd + 5, 0); wr16(cmd + 7, 1); wr16(cmd + 9, 0); wr16(cmd + 11, 0);
+
+    int n = app_cmd(tls, "match: 0x5e", cmd, sizeof(cmd), rsp, sizeof(rsp));
+    if (n < 0 || status_ok("match: 0x5e", rsp, n) != 0) goto done;
+
+    int w = metallica_mis_wait_interrupt(intr, sizeof(intr), WAIT_UPDATE_MS);
+    if (w <= 0) {
+        fprintf(stderr, "metallica_mis_enroll: match: no interrupt after the match command (%s)\n",
+                w == 0 ? "timed out" : "USB error");
+        goto done;
+    }
+    if (intr[0] != 3) {
+        mmis_dbg("match: interrupt type 0x%02x, finger not recognised", intr[0]);
+        rc = 1;
+        goto done;
+    }
+
+    {
+        static const unsigned char get_result[5] = { 0x60, 0x00, 0x00, 0x00, 0x00 };
+        n = app_cmd(tls, "match: get result (0x60)", get_result, sizeof(get_result), rsp, sizeof(rsp));
+        if (n < 0 || status_ok("match: get result (0x60)", rsp, n) != 0) goto done;
+        if (n < 4) { fprintf(stderr, "metallica_mis_enroll: match: result reply too short\n"); goto done; }
+        uint16_t l = rd16(rsp + 2);
+        if ((size_t)l != (size_t)n - 4) {
+            fprintf(stderr, "metallica_mis_enroll: match: response size does not match (%u vs %d)\n", l, n - 4);
+            goto done;
+        }
+        const unsigned char *v[8]; size_t vl[8];
+        if (parse_dict(rsp + 4, (size_t)n - 4, v, vl, 8) != 0) {
+            fprintf(stderr, "metallica_mis_enroll: match: result dictionary is malformed\n");
+            goto done;
+        }
+        if (!v[1] || vl[1] < 4 || !v[3] || vl[3] < 2) {
+            fprintf(stderr, "metallica_mis_enroll: match: result is missing the user id or subtype\n");
+            goto done;
+        }
+        *usr_id = rd32(v[1]);
+        *subtype = rd16(v[3]);
+        *hash_len = vl[4];
+    }
+    rc = 0;
+
+done:
+    {
+        /* python: finally: tls.app(unhexlify('6200000000')), errors ignored */
+        static const unsigned char cleanup[5] = { 0x62, 0x00, 0x00, 0x00, 0x00 };
+        static unsigned char c_rsp[64];
+        metallica_mis_tls_cmd(tls, cleanup, sizeof(cleanup), c_rsp, sizeof(c_rsp));
+    }
+    return rc;
+}
+
+int metallica_mis_do_verify_test(void) {
+    static enroll_ctx_t ctx;
+    metallica_mis_tls_t tls;
+    int rc = -1;
+    bool device_open = false;
+
+    mmis_dbg("verify: begin");
+
+    if (metallica_mis_open_device() != 0) {
+        fprintf(stderr, "metallica_mis: verify: could not open the sensor\n");
+        return -1;
+    }
+    device_open = true;
+    if (metallica_mis_send_init() != 0) {
+        fprintf(stderr, "metallica_mis: verify: plaintext bootstrap failed\n");
+        goto done;
+    }
+    if (metallica_mis_open_calibration_session(&tls) != 0) {
+        fprintf(stderr, "metallica_mis: verify: could not establish a secure session "
+                         "(sensor not paired/loaded yet? run Pair Sensor first)\n");
+        goto done;
+    }
+
+    printf("Prints on the sensor now:\n");
+    int users = 0;
+    if (mmis_db_list(&tls, &users) != 0) {
+        fprintf(stderr, "metallica_mis: verify: could not read the sensor's records, stopping\n");
+        goto done;
+    }
+    if (users == 0) {
+        fprintf(stderr, "\nmetallica_mis: verify: the sensor holds no user records, nothing to match against.\n"
+                         "Run --enroll-test first.\n");
+        goto done;
+    }
+
+    metallica_type0199_build_prog(ctx.prog, &ctx.prog_len);
+    if (!mmis_get_lines_per_frame(ctx.prog, ctx.prog_len, METALLICA_TYPE0199_REPEAT_MULTIPLIER,
+                                  &ctx.lines_per_frame)) {
+        fprintf(stderr, "metallica_mis: verify: mmis_get_lines_per_frame() failed\n");
+        goto done;
+    }
+    if (!metallica_mis_get_factory_calibration_values(&tls, ctx.factory, sizeof(ctx.factory), &ctx.factory_len)) {
+        fprintf(stderr, "metallica_mis: verify: get_factory_calibration_values() failed\n");
+        goto done;
+    }
+
+    printf("\nStep 1 of 2: calibrating. Keep your finger OFF the sensor until this is done.\n");
+    fflush(stdout);
+    if (metallica_mis_do_calibrate_ex(&tls, ctx.calib, sizeof(ctx.calib), &ctx.calib_len) != 0) {
+        fprintf(stderr, "metallica_mis: verify: calibration failed, cannot verify without it\n");
+        goto done;
+    }
+    mmis_dbg("verify: calibration data %zu bytes", ctx.calib_len);
+
+    printf("\nStep 2 of 2: verifying. Touch the sensor with the enrolled finger.\n");
+    fflush(stdout);
+
+    int attempts = 0, bad_in_a_row = 0;
+    bool matched = false, not_recognised = false;
+    uint32_t usr_id = 0; uint16_t subtype = 0; size_t hash_len = 0;
+
+    simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
+    while (attempts < ENROLL_MAX_ATTEMPTS && bad_in_a_row < ENROLL_MAX_BAD_IN_A_ROW) {
+        attempts++;
+        int cap = capture_mode(&tls, &ctx, MMIS_CAPTURE_IDENTIFY);
+        if (cap == 0) {
+            int m = match_finger(&tls, &usr_id, &subtype, &hash_len);
+            if (m == 0) { matched = true; break; }
+            if (m == 1) { not_recognised = true; break; }
+            printf("  The match step failed, try again.\n");
+        } else if (cap == -2) {
+            printf("  No finger detected in time.\n");
+        } else {
+            printf("  That touch was not usable, try again.\n");
+        }
+        bad_in_a_row++;
+    }
+    simple_app(&tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
+
+    if (matched) {
+        printf("\nMATCH: user record %u, finger subtype 0x%02x (hash %zu bytes).\n", usr_id, subtype, hash_len);
+        rc = 0;
+    } else if (not_recognised) {
+        printf("\nNO MATCH: the sensor captured the touch but did not recognise the finger.\n");
+        rc = 1;
+    } else {
+        fprintf(stderr, "\nmetallica_mis: verify: stopped after %d attempt(s) without a usable result.\n", attempts);
+    }
+
+done:
+    if (device_open) metallica_mis_close_device();
+    mmis_dbg("verify: end, rc=%d", rc);
     return rc == 0 ? 0 : -1;
 }
