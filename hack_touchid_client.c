@@ -5098,7 +5098,21 @@ static void run_check_updates_mode(void) {
 static void run_menu_updater_mode(void) {
     client_version_info_t local, remote;
     if (!headless_find_update(&local, &remote)) return;
-    download_build_and_swap_update(local.branch, false, remote.version, remote.build);
+    if (!download_build_and_swap_update(local.branch, false, remote.version, remote.build)) return;
+
+    /* The update removes the stale daemon and only a deploy puts one back,
+     * so do that now instead of leaving the person to find [3] Deploy.
+     * Runs the NEWLY installed binary (this process is still the old one),
+     * and HTID_NO_PAUSE stops --deploy-agent from waiting for Return a
+     * second time, since the menu bar's terminal window already does. */
+    printf("Redeploying the daemon with the new client...\n\n");
+    fflush(stdout);
+    char deploy_cmd[PATH_MAX + 64];
+    snprintf(deploy_cmd, sizeof(deploy_cmd), "HTID_NO_PAUSE=1 \"%s/hack-touchid\" --deploy-agent", g_exec_dir);
+    int deploy_rc = system(deploy_cmd);
+    if (deploy_rc != 0) {
+        vfsc_err("The daemon redeploy did not finish. Run: sudo hack-touchid --deploy-agent\n\n");
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -5957,21 +5971,28 @@ static void run_diagnose_and_save(void) {
  * circular. Prints a clean pass/fail and waits for Return before
  * returning, so the Terminal window this was launched into doesn't
  * vanish before the person can read the result. */
+/* Waits for Return so a Terminal window launched just for --deploy-agent
+ * does not vanish before the result can be read. Skipped when the caller
+ * (the menu bar updater, via --menu-updater) sets HTID_NO_PAUSE because it
+ * already holds the window open. */
+static void deploy_agent_pause(void) {
+    if (getenv("HTID_NO_PAUSE") != NULL) return;
+    printf("\nPress Return to close this window...");
+    fflush(stdout);
+    getchar();
+}
+
 static void run_deploy_agent_mode(void) {
     printf("%shack-touchid --deploy-agent%s -- headless daemon (re)install\n\n",
            VFSC_BOLD, VFSC_RESET);
 
     if (!check_opencore_version_requirement()) {
-        printf("\nPress Return to close this window...");
-        fflush(stdout);
-        getchar();
+        deploy_agent_pause();
         return;
     }
 
     if (!check_sensor_presence_gate()) {
-        printf("\nPress Return to close this window...");
-        fflush(stdout);
-        getchar();
+        deploy_agent_pause();
         return;
     }
 
@@ -5982,9 +6003,7 @@ static void run_deploy_agent_mode(void) {
         vfsc_err("Daemon (re)install failed -- see output above.\n");
     }
 
-    printf("\nPress Return to close this window...");
-    fflush(stdout);
-    getchar();
+    deploy_agent_pause();
 }
 
 /* Matches "--flag VALUE" or "--flag=VALUE" at argv[*i]. Returns 1 and sets
