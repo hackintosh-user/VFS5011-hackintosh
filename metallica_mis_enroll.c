@@ -165,7 +165,7 @@ static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_captur
         goto done;
     }
 
-    printf("  Touch the sensor with the finger now...\n");
+    printf("  Touch the sensor now (light is on), then lift your finger. Waiting up to 30 seconds...\n");
     fflush(stdout);
 
     /* wait for the finger: interrupt type 2 (anything else is skipped, as upstream) */
@@ -483,11 +483,14 @@ int metallica_mis_do_enroll_test(void) {
     res.tid_len = 0;
 
     if (enrollment_flag(&tls, "create_enrollment", 1) != 0) goto done;
-    simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
 
     while (!done_enrolling && attempts < ENROLL_MAX_ATTEMPTS && bad_in_a_row < ENROLL_MAX_BAD_IN_A_ROW) {
         attempts++;
-        printf("\nTouch %d:\n", good + 1);
+        printf("\nTouch %d (the sensor usually needs about 10 good touches):\n", good + 1);
+        /* python: glow_start_scan() is the first thing in every pass of its
+         * enroll loop. The sensor's light goes out after each capture, so it
+         * has to be relit before every touch or the person is left guessing. */
+        simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
         int cap = capture_enroll(&tls, &ctx);
         bool ok = false;
         if (cap == 0) {
@@ -502,7 +505,7 @@ int metallica_mis_do_enroll_test(void) {
                 }
             }
         } else if (cap == -2) {
-            printf("  No finger detected in time.\n");
+            printf("  No finger detected in time. The light comes back on for the next try.\n");
         } else {
             printf("  That touch was not usable, try again.\n");
         }
@@ -703,9 +706,9 @@ int metallica_mis_do_verify_test(void) {
     bool matched = false, not_recognised = false;
     uint32_t usr_id = 0; uint16_t subtype = 0; size_t hash_len = 0;
 
-    simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
     while (attempts < ENROLL_MAX_ATTEMPTS && bad_in_a_row < ENROLL_MAX_BAD_IN_A_ROW) {
         attempts++;
+        simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
         int cap = capture_mode(&tls, &ctx, MMIS_CAPTURE_IDENTIFY);
         if (cap == 0) {
             int m = match_finger(&tls, &usr_id, &subtype, &hash_len);
