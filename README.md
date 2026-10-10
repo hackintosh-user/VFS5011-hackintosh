@@ -2,27 +2,27 @@
   <img src="vfs_client_logo.svg" alt="VFS Client — Validity VFS5011 Fingerprint Auth" width="560">
 </p>
 
-<h3 align="center">VFS5011 Fingerprint Daemon for macOS</h3>
+<h3 align="center">Hackintosh Touch-ID, Fingerprint authentication for macOS</h3>
 
 <p align="center">
-  A libusb-based capture pipeline and NBIS matcher bringing Validity VFS5011
+  A libusb-based capture pipeline and NBIS matcher bringing Fingerprint sensors
   fingerprint authentication to macOS on unsupported (Hackintosh) hardware —
   lock screen unlock and System Settings authentication prompts, driven by
   a real fingerprint sensor instead of a password.
   
-  * Current version: v1.0.5 | August 18th 2026
-  * Current version in active development: v1.1.0 | October 2026.
-  * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/main/CHANGELOG.md)
-  * Please note that the ```main``` Branch only gets Commits for the Current Version. If you wish to see the current working development towards upcoming versions please head into the ```active-development``` branch!
+  * Current version: ```v1.1.0```
+  * Current Menubar app version: ```v1.4.0```
+  * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/CHANGELOG.md)
+  * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development#supported-sensors)
+  * Current Set ETA: **Mid October 2026**: Please keep in mind that this is only an ETA and not confirmed release date. Stuff could happen, it could release earlier or later on!
+  * [link to the GitHub page](https://hackintosh-user.github.io/VFS5011-hackintosh/index.html)
 </p>
-
 
 ---
 
 ## Overview
 
-This project ports the USB capture protocol for the Validity Sensors
-VFS5011 fingerprint reader (USB VID `138A`, PID `0018`) to standalone
+This project ports the USB capture protocol for supported fingerprint sensors to a standalone
 macOS C code, and pairs it with NIST's NBIS fingerprint matching suite
 (`mindtct` for minutiae extraction, `bozorth3` for matching) to provide
 working fingerprint authentication on Hackintosh hardware that shipped
@@ -34,10 +34,27 @@ Accessibility APIs, captures a fingerprint swipe on demand, matches it
 against enrolled templates, and — on a match — types the stored password
 into the prompt automatically.
 
-Confirmed working end-to-end on macOS Sequoia and macOS Tahoe, on an
-Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint Sensor) And Confirmed Working on Sonoma on another DV6 (Sandy bridge with VFS5011 fingerprint Sensor)
 
+## Supported Sensors
+
+This Table will have the currently Supported Sensors or sensors in **Development** or **Planned Support**. Please keep your expectations in check, this is a hobby project.
+| Sensor Name / Model    | VID  | PID  | Support status                                                  | Supported Features |
+|------------------------|------|------|---------------------------------------------------------------- |--------------------|
+| Validity VFS5011       | 138A | 0018 | **Supported & Confirmed working on a DV6-7070ex with VFS5011**  | **Fully Supported**| 
+| Synaptics Metallica MIS| 006cb| 009a | **Developing & actively Testing**                               |                    |
+| Prometheus 97          | 138A | 0097 | **Developing & planned testing**                                |                    |
+| Prometheus 9d          | 138A | 009d | **Developing / Supposed to work according to python-validty**   |                    |
+| UPEK TouchStrip        | 147e | 2016 | **Developing & Soon testing**                                   |                    | 
+| Validity VFS101        | 138A | 0001 | **Planned / only plans until i get access to the device**       |                    | 
+
+ * Please Keep in Mind that some sensor names are **too long to fit in the table** the VID:PID for each currently or planned sensor will be in the table and regardless the client itself checks if your sensor is supported.
+ * Please also keep in mind that when you want to open a **Github Issue** that the sensor VID:PID is **Required**. I won't be able to help if you open an issue and say my sensor doesnt work.
 ## Features
+
+Please Keep in mind some features for other sensors may be **broken** or **buggy** this project isnt maintained by a **full Dev-Ops team.** So i would love if you encounter any issues to Open a **Github Issue** with as much information provided in the issue so i can work on the fix. Thanks! :)
+
+
+Features with Hackintosh Touch-ID:
 
 - Fingerprint capture and matching entirely native to macOS, no Linux
   kernel driver or libfprint dependency at runtime
@@ -45,19 +62,28 @@ Ivy Bridge Hackintosh laptop. (HP Pavilion dv6-7070ex with a VFS5011 Fingerprint
 - Lock screen unlock via fingerprint swipe
 - System Settings / System Preferences authentication sheet ("padlock")
   unlock via fingerprint swipe
-- Passwords.app lock screen unlock via fingerprint swipe
+- Authentication for Finder password prompts.
+- Works with browsers (Currently confirmed working with Orion but I'm not sure for others)
+- Passwords.app Padlock unlock via fingerprint swipe
 - Keychain Access "confidential information" consent prompt unlock via fingerprint swipe
 - Enrolled templates and the stored password are kept on a dedicated,
   encrypted APFS volume, not in plaintext on the boot volume
 - Self-elevating daemon with a narrowly scoped, single-purpose sudoers
   rule rather than a blanket NOPASSWD grant
-- Interactive terminal client (`vfs_client`) for enrollment, verification,
-  and one-command deployment of the background daemon
+- Interactive terminal client (`hack-touchid_client`) for enrollment, verification, and one-command deployment of the background daemon
 -  **Optional** Menu bar Application for disabling, enabling, Restarting the Daemon + sends notifications when authentication is ready if Sensor light is too dim / too slow
+-  Growing supported sensor list with testers.
+-  Auto Updating Client that auto extracts, runs chmod, re-launches new update, and deletes the old files
+- [D] Diagnose option for debugging issues, and opening issues on github
+- Multi operating system (macOS) support on one APFS encrypted volume
+- Multiple Launch-arguments for easier access like --q or --diag-pid, there's more [Read about them here](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
+- **macOS Tahoe only**: Swipe to lock with the menubar app!
+
  
 ## Menu Bar Companion App (optional)
 
-`vfs5011-menubar/` contains an optional menu bar app that surfaces the
+
+`Hackintosh-TouchID-Menubar/` contains an optional menu bar app that surfaces the
 daemon's auth events as real notifications — useful since the sensor's
 LED can be too dim to notice on its own.
 
@@ -65,31 +91,31 @@ LED can be too dim to notice on its own.
   authenticate! 🫆"), then whether it succeeded or failed
 - One-click toggle to pause/resume fingerprint auth without touching Terminal
 - Registers itself as a login item automatically on first launch (macOS
-  13+, via `SMAppService` — no manual LaunchAgent setup needed)
-- "About VFS5011" menu item with a short project summary and a link back
+  14+, via `SMAppService` — no manual LaunchAgent setup needed)
+- "About hackintosh Touch-ID" menu item with a short project summary and a link back
   here
 
 Completely optional — the daemon works identically with or without it
 running.
 
 ### Installing
-A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/) but if you prefer to compile, here's the commands to run:
+A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/latest) but if you prefer to compile, here's the commands to run:
 
 ```bash
-cd vfs5011-menubar
+cd Hackintosh-TouchID-Menubar
 chmod +x build_menubar_app.sh
 ./build_menubar_app.sh
-open "build/VFS5011 Menu Bar.app"
+open "build/Hackintosh Touch-ID.app"
 ```
 
-Requires:
-* Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-and `iconutil`.
-*  **macOS 13 Ventura and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on Monterey and older.
+Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
+and `iconutil`. No other dependencies. And it needs **macOS 14 Sonoma and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
+
+**IMPORTANT NOTE**: the Swipe to Lock feature is ment and will always be for **macOS 26 Tahoe only**.
 
 First launch will be blocked by Gatekeeper since this is ad-hoc signed,
 not notarized with a paid Apple Developer account — right-click the app →
-**Open** → **Open** again, or run `xattr -cr "VFS5011 Menu Bar.app"` once.
+**Open** → **Open** again, or run `xattr -cr "Hackintosh Touch-ID.app"` once.
 
 ### Wiring it to the daemon
 
@@ -97,7 +123,8 @@ The menu bar app talks to the daemon over macOS distributed
 notifications — the same mechanism the daemon already uses for its own
 `screenIsLocked`/`screenIsUnlocked` handling. **The daemon needs a small
 patch to actually send those events**; see
-[`vfs5011-menubar/daemon-patch/README.md`](Vfs5011-menubar/daemon-patch/README.md)
+[it's own README](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md)
+
 for the exact 6-line diff against `vfs5011_daemon.c`. Without the patch,
 the app runs standalone and just never receives anything — harmless, but
 silent.
@@ -108,62 +135,82 @@ Known limitations:
   recognized prompt at once (lock screen, padlock, Finder, pkg installer,
   Time Machine, Apple ID's local password step), not just one surface.
 - Not notarized (see Gatekeeper note above).
+- Pre-Login is not a simple workaround. Could takes months or years to fix.
+- Requires you to go into System settings -> notfifications -> show Previews: set to ```Always``` otherwise it will show up but wont tell you if its ready to swipe or a failed the swipe test.
 
 
-
-## Requirements 
-- A Validity Sensors VFS5011 fingerprint reader (USB `138A:0018`)
-- **macOS 13 Ventura and later** (older versions may work, but I offer **0 support for them**)
+## Requirements
+- **macOS 14 Sonoma and later** (older versions may work, but I offer **0 support for them**)
+- **macOS 15 Sequoia and later is the recommended version for Hackintosh Touch-ID** 
 - Xcode Command Line Tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
-- `libusb` (`brew install libusb`)
+- Dependencies depend on your sensor. `prep_and_build.sh` installs only what yours needs (run `./prep_and_build.sh --list` to see it):
+  - `libusb` (`brew install libusb`), every sensor
+  - `openssl@3` (`brew install openssl@3`), Metallica MIS only [will be Deprecated on Novemeber 1st 2026 but should work fine still]
+  - `innoextract` (`brew install innoextract`), Metallica MIS only
 - Accessibility permission granted to the daemon (handled automatically
   by the deploy script, see below)
-- OpenCore v1.0.6 or later (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
+- ```OpenCore v1.0.6 or later``` (For maximum Security | Release or Debug are fine) but on older versions of OpenCore will work but I don't support it. You are on your own if you use v1.0.5 or older.
 
 ## Building
 
 ```bash
 git clone https://github.com/hackintosh-user/VFS5011-hackintosh.git
-cd /path/to/vfs5011-hackintosh-main
+cd /path/to/vfs5011-hackintosh-active-development
 chmod +x prep_and_build.sh
-./prep_and_build.sh
+./prep_and_build.sh                    # detects your sensor over USB
+./prep_and_build.sh --sensor vfs5011   # or name it: vfs5011, upek, metallica, or a VID:PID
 ```
 
-This produces two binaries in the project directory:
+Only the dependencies for that sensor are installed and built. Add `--yes` to skip the install prompt or `--no-install` to only report what is missing.
 
-- `vfs_client` — the interactive menu used for enrollment, verification,
-  and deployment
-- `vfs5011_daemon` — the background daemon that watches for
-  authentication prompts and performs the fingerprint check
+This produces the needed binaries for running the client and each sensor's Daemon + other needed files. 
 
-`ax_probe`, a standalone Accessibility-API diagnostic tool used during
-development, is not built by `build.sh`. It has no dependency on
-`libusb` or NBIS and can be built on its own if needed:
-
-```bash
-clang ax_probe.c -o ax_probe -framework CoreFoundation -framework ApplicationServices
-```
 
 ## Usage
 
-**WARINING 1**: On macOS 12 Monterey And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 13 Ventura and later** you are on your own for any issues that may arise on this version of macOS.
+**WARINING 1**: On macOS 13 Ventura And older you will be shown a message that clearly states there is **0 Support for any OS older than macOS 14 Sonoma and later** you are on your own for any issues that may arise on this version of macOS.
 
 **WARNING 2**: Same goes for the OpenCore Boot loader: the minimum version is OpenCore v1.0.6 or later. v1.0.5 and older are officially not supported. You are on your own if you encounter any issues on v1.0.5 or older.
 
 Run the client with this command:
 
 ```bash
-sudo ./vfs_client
+sudo ./hack-touchid
 ```
-Then, you should be greeted with this **interactive CLI menu for VFS client**
-```
-[1] Enroll a Finger
-[2] Verify Fingerprint Match [Score / 20]
-[3] Deploy VFS Client for Authentication Services
 
+* Upon running this you will be presented with the Verbose launch, which you can skip via:
+  ```bash
+  sudo ./hack-touchid --q
+  ```
+  Or:
+  
+  ```bash
+  sudo ./hack-touchid --quiet
+  ```
+* After the first launch, the Client will add itself to ```$PATH``` That way you can simply launch a fresh terminal without Cd'ing into the folder where the repo is located and simply run:
+```bash
+sudo hack-touchid
+```
+or with its [launch-arguments!](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
+
+Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
+```
+Actions
+[1] Enroll a Finger
+[2] Verify Fingerprint Match [Score / x ]
+[3] Deploy Authentication Services
+[C] View Fingerprint (capture preview, nothing saved)
+[P] (ONLY FOR METALLICA MIS SENSORS) Pair
+[U] (ONLY FOR UPEK 147e:2016) capture .pgm
+[B] Capture (experimental, Only for Metallica MIS Sensors)
+[FP] Fpbootd, Pre-Login Auth (coming soon)
+
+Utilities
+[D] Diagnose (generate a report for troubleshooting)
 [S] Settings
 [A] About
+[X] Uninstall
 [Q] Quit
 ```
 
@@ -174,7 +221,7 @@ Then, you should be greeted with this **interactive CLI menu for VFS client**
 - **Verify Fingerprint Match** — a standalone test of the capture and
   matching pipeline, independent of the daemon, useful for confirming
   the sensor and templates are working before deploying.
-- **Deploy VFS Client for Authentication Services** — rebuilds the
+- **Deploy Authentication Services** — rebuilds the
   daemon from source, installs it as a per-user LaunchAgent, re-signs it
   and regenerates its Accessibility permission grant, and installs a
   narrowly scoped sudoers rule so the daemon can self-elevate when it
@@ -186,9 +233,26 @@ lock screen, or when a System Settings authentication sheet appears, it
 prompts for a fingerprint swipe and, on a match, types the stored
 password automatically.
 
+## Launch Arguments
+
+**NOTICE** This list is set to change accordingly, there will be new launch-arguments which I will Mention in the Changelog!! Always keep up to date about these launch-args as they could heavily benefit your use-case.
+
+* ```--q```: launches the Client without presenting the Verbose boot / launch
+* ```--quiet```: same like the one before, launches the client without presenting the Verbose logs.
+* ```--deploy-agent```: Runs the [3] Deploy authentication services without entering the client. This is also used when the Menubar detects the Daemon isn't installed / after a macOS update
+* ```--diag-pid```: Runs the [D] Diagnostic steps but without launching the client.
+* ```--check-updates```: checks for updates without launching the client. If there is one, shows the [A] Show changelog / [Y] Download and install / [N] Cancel prompt.
+* ```--menu-updater```: checks for updates and installs one right away, with no prompts. The menu bar app's "Update Client" notification button runs this in a terminal.
+* ```--debug```: Makes the client print every log for better debugging.
+* ```--list-records```: Read-only. Lists the storage, users and enrolled fingers stored on the sensor, plus database size and free space.
+* ```--wipe-records```: Deletes all enrolled prints stored on the sensor. Destructive, cannot be undone.
+* ```--force-pair```: Experimental. Tries to pair the sensor by writing its identity partitions. A sensor that is already paired refuses this (error `0x0404`), so use the two host flags below instead.
+* ```--host-product "<name>"```: Overrides the product name HTID uses to derive the pairing key. Use the laptop's real value, not the spoofed Mac one. Use together with `--host-serial`. Applies to this run only, nothing is saved.
+* ```--host-serial "<serial>"```: Overrides the serial HTID uses to derive the pairing key. Use the laptop's real value. Use together with `--host-product`. Applies to this run only, nothing is saved. 
+
 ## How it works
 
-- **Capture**: the VFS5011's raw USB protocol (initialization sequence,
+- **Capture**: the raw USB protocol (initialization sequence,
   swipe capture, image reassembly) is implemented directly against
   `libusb`, without going through any Linux-specific driver stack.
 - **Matching**: captured swipes are run through NIST's `mindtct` for
@@ -207,33 +271,29 @@ password automatically.
   specific operations that require it (accessing the USB device). It is
   not installed as a system-wide LaunchDaemon.
 
-## Tested configurations
-
-| macOS Version | Result |
-|---|---|
-| Sequoia| Lock screen and padlock unlock confirmed working |
-| Tahoe  | Lock screen and padlock unlock confirmed working (separate test volume) |
-| Sonoma | lock screen And padlock confirmed working on DV6-7080ee Sandy bridge.   |
-| Ventura| Remains to be TESTED.                                                   |
-
-Tested on an Intel Ivy Bridge Hackintosh laptop (HP Pavilion DV6/EliteBook
-class hardware) with the VFS5011 sensor at USB `138A:0018`.
-
 ## Limitations
+
+These are limitations that are either not possible to fix or currently **Planned / Fixes for later**. As before, please keep your expectations in check, this is a hobby project maintained by one person, not a **Dev-Ops Development team**.
+
+List as goes:
 
 - macOS only. This is not a libfprint driver and is not intended to run
   on Linux — if you're on Linux with this sensor, use the existing
   open-source libfprint driver directly instead (see Acknowledgments).
-- Targets macOS 13 Ventura and later only; the client prints a warning if
+- Targets macOS 14 Sonoma and later only; the client prints a warning if
   run on an older Darwin version.
 - No PAM module exists for `sudo` in a terminal. An Accessibility-based
   approach for `sudo` prompts was prototyped during development and
   intentionally removed to keep scope limited to lock screen and System
-  Settings authentication.
+  Settings authentication. (there are still plans to attempt implementing this. But unknown if Modern macOS allows this type of access within the user space-range)
 - Ad hoc code signing is used for the daemon binary and its
   Accessibility grant, both regenerated on every deploy. There is no
   notarization or Developer ID signing.
-- a Cold boot sign in is not supported yet.
+- a Cold boot sign in is not supported:
+  
+ Explanation: 
+ * Modern macOS Does not allow this level of access required to implement such thing into the Login window before the user has logged in. As such this
+  is only a For now impossible, could happen one day but could take months or even *years* of active development towards this feat of macOS engineering.
 
 ## Acknowledgments
 
@@ -254,13 +314,22 @@ This project would not exist without the following prior work:
   informed by that original driver's protocol logic.
   https://github.com/ars3niy/fprint_vfs5011
 
-If you are on Linux and have a VFS5011 sensor, the libfprint driver
+If you are on Linux and have a Fingerprint sensor, the libfprint driver
 linked above is the right tool to use directly — this project exists
 specifically to bring the same capability to macOS, where no equivalent
 driver exists.
 
+
+
+## Credits
+
+* @Hackintosh-user: Main Lead developer
+* @ilikehackintosh: Documentation handler
+* [u/p0cketl1nt](https://www.reddit.com/user/p0cketl1nt/): Main tester for Metallica MIS 006cb:009a & Prometheus 97 138a:0097 (massive thank you!)
+* [u/dCold_Salamander7764](https://www.reddit.com/user/Cold_Salamander7764/): Main tester for UPEK touch-Strip 147e:2016 (massive thank you!)
+
 ## License
 
-Released under the BSD 3-Clause License. See [LICENSE](LICENSE) for
+Released under the BSD 3-Clause License. See [LICENSE](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development?tab=License-1-ov-file) for
 the full text, including third-party attribution for NBIS and the
 VFS5011 capture protocol.
