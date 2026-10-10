@@ -22,14 +22,25 @@
  *   6. list the records again to show the result
  *
  * NOT YET VERIFIED against real hardware: this port is only checked
- * against the python reference by reading it. Verify and identify (the
- * match half) are NOT in here yet, so a finished enroll is proven by the
- * record listing afterwards and by Windows/Linux seeing the print.
+ * against the python reference by reading it. The match half lives in
+ * metallica_mis_do_verify_test() below (--verify-test).
  *
  * Returns 0 on success (a finger record was saved), -1 on failure. On
  * failure it says which step stopped, and for a rejected save (status
  * 0x04c3) it points at --wipe-records. Does not wipe anything itself.
  */
 int metallica_mis_do_enroll_test(void);
+
+/*
+ * metallica_mis_do_verify_test(): first native verify on a Metallica MIS
+ * sensor, a C port of python-validity's Sensor.identify() / match_finger()
+ * (capture in IDENTIFY mode, then 0x5e match, 0x60 result, 0x62 cleanup).
+ * Match-in-sensor: it needs a print saved by --enroll-test. Calibrates,
+ * asks for one touch, and reports MATCH (user record, subtype) or NO MATCH.
+ *
+ * NOT YET VERIFIED against real hardware, and it cannot be until enroll
+ * completes there. Returns 0 on MATCH, -1 on NO MATCH or any failure.
+ */
+int metallica_mis_do_verify_test(void);
 
 #endif /* __METALLICA_MIS_ENROLL_H */
