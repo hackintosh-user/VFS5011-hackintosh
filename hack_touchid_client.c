@@ -2606,6 +2606,7 @@ static void mmis_host_identity_load_saved(void) {
 }
 
 static int mmis_host_identity_save(void) {
+    (void)mkdir("/usr/local/libexec", 0755);
     (void)mkdir("/usr/local/libexec/hack-touchid", 0755);
     int fd = open(MMIS_HOST_ID_CONF_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return -1;
@@ -2685,6 +2686,17 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
     int rc = mmis_call_action(action);
     if (rc != MMIS_SESSION_FAILED) return rc;
 
+    /* A session that was left half open (a previous run, a crash) fails the same way a wrong
+     * host identity does, so give the sensor a moment and try the same identity once more
+     * before asking anyone for anything. */
+    if (!g_mmis_id_from_cli) {
+        printf("The sensor didn't accept the session, trying once more...\n");
+        fflush(stdout);
+        sleep(3);
+        rc = mmis_call_action(action);
+        if (rc != MMIS_SESSION_FAILED) return rc;
+    }
+
     if (g_mmis_id_from_cli) {
         vfsc_err("\nThe sensor refused the host identity given with --host-product / --host-serial.\n"
                   "Check both values against the other operating system.\n");
@@ -2722,6 +2734,26 @@ static int mmis_replace_prompt(int users) {
 
 static int mmis_enroll_action(void) {
     return metallica_mis_do_enroll_guided(mmis_replace_prompt);
+}
+
+static int mmis_verify_action(void) { return metallica_mis_do_verify_guided(); }
+
+static void do_verify_metallica(void) {
+    printf("The sensor does the matching itself.\n"
+           "Keep your finger OFF the sensor until it asks for a touch.\n\n");
+    fflush(stdout);
+    g_mmis_stderr_to_log = true;
+    int rc = mmis_run_with_host_identity(mmis_verify_action);
+    g_mmis_stderr_to_log = false;
+    if (rc == 0) {
+        vfsc_ok("\nVerified.\n\n");
+    } else if (rc == MMIS_VERIFY_NO_MATCH) {
+        vfsc_warn("\nNot recognised.\n\n");
+    } else {
+        vfsc_err("\nVerification didn't finish. Details are in %s\n"
+                  "(or run with --debug to see everything on screen).\n"
+                  "If the sensor holds no prints yet, run [1] Enroll first.\n\n", MMIS_ENROLL_LOG_PATH);
+    }
 }
 
 static void do_enroll_metallica(void) {
@@ -3194,6 +3226,12 @@ static int do_verify(void) {
     if (!g_detected_sensor) {
         vfsc_err("No supported sensor detected. Can't verify without one.\n\n");
         return 1;
+    }
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        printf("Declaring sensor type...\n%s %04x:%04x detected, proceeding with the agent.\n\n",
+               g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
+        do_verify_metallica();
+        return 0;
     }
     if (!g_detected_sensor->backend_available) {
         vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
@@ -4724,6 +4762,10 @@ static bool download_with_progress(const char *url, const char *out_path) {
  *
  * Only returns on failure -- success means execv() replaced this
  * process image and never came back here. */
+/* Set by the update prompt's [X] Update & Re-Deploy: the caller prints the final message
+ * itself once the daemon has been redeployed, so the update step stays quiet about being done. */
+static bool g_update_defer_done_message = false;
+
 static bool download_build_and_swap_update(const char *branch, bool relaunch,
                                            const char *new_version, const char *new_build) {
     char tmp_dir[PATH_MAX];
@@ -4927,6 +4969,7 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
 
     if (!relaunch) {
         printf("Update installed.\n");
+        if (g_update_defer_done_message) return true;
         printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
         printf("Update was complete, please run sudo hack-touchid to launch the client.\n\n");
         return true;
@@ -5122,7 +5165,24 @@ static bool show_update_changelog(const char *branch, const char *local_version)
     return true;
 }
 
-/* Shared [A]/[Y]/[N] update prompt, used by the boot-time check, the
+/* After an update the stale daemon is gone and only a deploy puts one back. Runs the NEWLY
+ * installed binary (this process is still the old one) with --deploy-agent. HTID_NO_PAUSE stops
+ * that run from waiting for Return, since the caller's terminal is already being watched.
+ * Shared by [X] Update & Re-Deploy and the menu bar updater. */
+static bool redeploy_daemon_with_new_client(void) {
+    printf("Redeploying the daemon with the new client...\n\n");
+    fflush(stdout);
+    char deploy_cmd[PATH_MAX + 64];
+    snprintf(deploy_cmd, sizeof(deploy_cmd), "HTID_NO_PAUSE=1 \"%s/hack-touchid\" --deploy-agent", g_exec_dir);
+    int deploy_rc = system(deploy_cmd);
+    if (deploy_rc != 0) {
+        vfsc_err("The daemon redeploy did not finish. Run: sudo hack-touchid --deploy-agent\n\n");
+        return false;
+    }
+    return true;
+}
+
+/* Shared [A]/[Y]/[X]/[N] update prompt, used by the boot-time check, the
  * live watcher, Settings [CU] and --check-updates. `live` only changes
  * the wording (the update was published while the client was already
  * open). With relaunch=true a successful update relaunches the client
@@ -5145,9 +5205,10 @@ static void run_update_prompt(const client_version_info_t *local,
     printf("You are currently running v%s (%s).\n", local->version, local->build);
     printf("New version: v%s (%s)\n\n", remote->version, remote->build);
 
+    bool redeploy = false;
     for (;;) {
-        printf("  [A] Show changelog\n  [Y] Download and install\n  [N] Cancel\n");
-        printf("Choice [A/Y/N]: ");
+        printf("  [A] Show changelog\n  [Y] Download and install\n  [X] Update & Re-Deploy\n  [N] Cancel\n");
+        printf("Choice [A/Y/X/N]: ");
         fflush(stdout);
 
         char confirm[16];
@@ -5164,11 +5225,45 @@ static void run_update_prompt(const client_version_info_t *local,
             continue;
         }
         if (c == 'y' || c == 'Y') break;
+        if (c == 'x' || c == 'X') { redeploy = true; break; }
         printf("Skipping update. Continuing with v%s (%s).\n\n", local->version, local->build);
         return;
     }
 
-    download_build_and_swap_update(local->branch, relaunch, remote->version, remote->build);
+    if (!redeploy) {
+        download_build_and_swap_update(local->branch, relaunch, remote->version, remote->build);
+        return;
+    }
+
+    /* [X]: install without relaunching, redeploy the daemon from the new client, then do what
+     * the caller wanted (relaunch into the new client, or tell the person to run it). */
+    g_update_defer_done_message = true;
+    bool updated = download_build_and_swap_update(local->branch, false, remote->version, remote->build);
+    g_update_defer_done_message = false;
+    if (!updated) return;
+
+    bool deployed = redeploy_daemon_with_new_client();
+    if (!relaunch) {
+        printf("%sUpdate was successfully deployed & installed! :)%s\n", VFSC_YELLOW, VFSC_RESET);
+        printf("Update was complete, please run sudo hack-touchid to launch the client.\n\n");
+        return;
+    }
+
+    printf("Relaunching...\n\n");
+    fflush(stdout);
+    char new_path[PATH_MAX];
+    snprintf(new_path, sizeof(new_path), "%s/hack-touchid", g_exec_dir);
+    char *new_argv[5];
+    int nai = 0;
+    new_argv[nai++] = new_path;
+    if (!g_verbose_boot) new_argv[nai++] = (char *)"--q";
+    new_argv[nai++] = (char *)"--post-update";
+    if (!deployed) new_argv[nai++] = (char *)"--daemon-removed"; /* lets the new client show its usual "daemon needs deploying" notice */
+    new_argv[nai++] = NULL;
+    execv(new_path, new_argv);
+    vfsc_err("Update installed, but relaunch failed: %s\n", strerror(errno));
+    vfsc_err("Please run hack-touchid manually.\n\n");
+    exit(1);
 }
 
 /* True if `remote` is a newer version, or the same version with a
@@ -5296,19 +5391,9 @@ static void run_menu_updater_mode(void) {
     if (!headless_find_update(&local, &remote)) return;
     if (!download_build_and_swap_update(local.branch, false, remote.version, remote.build)) return;
 
-    /* The update removes the stale daemon and only a deploy puts one back,
-     * so do that now instead of leaving the person to find [3] Deploy.
-     * Runs the NEWLY installed binary (this process is still the old one),
-     * and HTID_NO_PAUSE stops --deploy-agent from waiting for Return a
-     * second time, since the menu bar's terminal window already does. */
-    printf("Redeploying the daemon with the new client...\n\n");
-    fflush(stdout);
-    char deploy_cmd[PATH_MAX + 64];
-    snprintf(deploy_cmd, sizeof(deploy_cmd), "HTID_NO_PAUSE=1 \"%s/hack-touchid\" --deploy-agent", g_exec_dir);
-    int deploy_rc = system(deploy_cmd);
-    if (deploy_rc != 0) {
-        vfsc_err("The daemon redeploy did not finish. Run: sudo hack-touchid --deploy-agent\n\n");
-    }
+    /* The update removes the stale daemon and only a deploy puts one back, so do that now
+     * instead of leaving the person to find [3] Deploy. */
+    (void)redeploy_daemon_with_new_client();
 }
 
 /* ------------------------------------------------------------------ *
