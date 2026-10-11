@@ -57,6 +57,17 @@ int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
  * recognise the finger. 0 is a match, MMIS_SESSION_FAILED and -1 are as above. */
 #define MMIS_VERIFY_NO_MATCH 1
 
+/* Which finger a new print is stored as: the Windows biometric numbering, 1 to 5 right thumb,
+ * index, middle, ring, little, 6 to 10 the same on the left hand. Set before enrolling;
+ * the default is 2 (right index). The sensor keeps it with the print. */
+void metallica_mis_set_enroll_subtype(uint16_t subtype);
+
+/* Name for such a number ("right index finger"), NULL when it is not 1 to 10. */
+const char *metallica_mis_finger_name(uint16_t subtype);
+
+/* Finger number of the print the last metallica_mis_do_verify_*() matched, -1 if none. */
+int metallica_mis_last_match_subtype(void);
+
 /* The verification behind menu item [2]: same steps as metallica_mis_do_verify_test() with
  * plain-language output. */
 int metallica_mis_do_verify_guided(void);

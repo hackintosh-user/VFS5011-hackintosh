@@ -14,6 +14,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Placeholder for metallica_mis_tls_t, which needs OpenSSL headers. The
  * client only ever passes a pointer to it, and the stubs never read it. */
@@ -29,6 +30,9 @@ typedef int (*mmis_replace_cb)(int users_on_sensor);
 int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
 #define MMIS_VERIFY_NO_MATCH 1
 int metallica_mis_do_verify_guided(void);
+void metallica_mis_set_enroll_subtype(uint16_t subtype);
+const char *metallica_mis_finger_name(uint16_t subtype);
+int metallica_mis_last_match_subtype(void);
 extern int g_metallica_mis_debug;
 
 int metallica_mis_open_device(void);

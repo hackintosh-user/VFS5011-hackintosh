@@ -2686,17 +2686,6 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
     int rc = mmis_call_action(action);
     if (rc != MMIS_SESSION_FAILED) return rc;
 
-    /* A session that was left half open (a previous run, a crash) fails the same way a wrong
-     * host identity does, so give the sensor a moment and try the same identity once more
-     * before asking anyone for anything. */
-    if (!g_mmis_id_from_cli) {
-        printf("The sensor didn't accept the session, trying once more...\n");
-        fflush(stdout);
-        sleep(3);
-        rc = mmis_call_action(action);
-        if (rc != MMIS_SESSION_FAILED) return rc;
-    }
-
     if (g_mmis_id_from_cli) {
         vfsc_err("\nThe sensor refused the host identity given with --host-product / --host-serial.\n"
                   "Check both values against the other operating system.\n");
@@ -2738,6 +2727,33 @@ static int mmis_enroll_action(void) {
 
 static int mmis_verify_action(void) { return metallica_mis_do_verify_guided(); }
 
+/* The menu clears the screen as soon as an action returns, which hid the result. */
+static void mmis_press_return(void) {
+    printf("Press Return to go back to the main menu...");
+    fflush(stdout);
+    getchar();
+}
+
+/* Asks which finger is being enrolled (Windows biometric numbering, which is what the sensor
+ * stores and what Windows Hello and Linux prints use too). Enter keeps right index. */
+static void mmis_choose_finger(void) {
+    printf("Which finger are you enrolling?\n"
+           "  Right hand: [1] thumb  [2] index  [3] middle  [4] ring  [5] little\n"
+           "  Left hand:  [6] thumb  [7] index  [8] middle  [9] ring  [10] little\n"
+           "Number (Enter = 2, right index): ");
+    fflush(stdout);
+    char raw[32];
+    int n = 2;
+    if (fgets(raw, sizeof(raw), stdin)) {
+        char *end = NULL;
+        long v = strtol(raw, &end, 10);
+        if (end != raw && v >= 1 && v <= 10) n = (int)v;
+        else if (raw[0] != '\n' && raw[0] != '\0') printf("Not a number from 1 to 10, using right index.\n");
+    }
+    metallica_mis_set_enroll_subtype((uint16_t)n);
+    printf("\n");
+}
+
 static void do_verify_metallica(void) {
     printf("The sensor does the matching itself.\n"
            "Keep your finger OFF the sensor until it asks for a touch.\n\n");
@@ -2746,7 +2762,11 @@ static void do_verify_metallica(void) {
     int rc = mmis_run_with_host_identity(mmis_verify_action);
     g_mmis_stderr_to_log = false;
     if (rc == 0) {
-        vfsc_ok("\nVerified.\n\n");
+        const char *name = NULL;
+        int st = metallica_mis_last_match_subtype();
+        if (st >= 0) name = metallica_mis_finger_name((uint16_t)st);
+        if (name) vfsc_ok("\nVerified: %s.\n\n", name);
+        else vfsc_ok("\nVerified.\n\n");
     } else if (rc == MMIS_VERIFY_NO_MATCH) {
         vfsc_warn("\nNot recognised.\n\n");
     } else {
@@ -2754,12 +2774,14 @@ static void do_verify_metallica(void) {
                   "(or run with --debug to see everything on screen).\n"
                   "If the sensor holds no prints yet, run [1] Enroll first.\n\n", MMIS_ENROLL_LOG_PATH);
     }
+    mmis_press_return();
 }
 
 static void do_enroll_metallica(void) {
     printf("The print is stored on the sensor itself, nothing is saved on this Mac.\n"
            "Keep your finger OFF the sensor until it asks for a touch.\n\n");
     fflush(stdout);
+    mmis_choose_finger();
     g_mmis_stderr_to_log = true;
     int rc = mmis_run_with_host_identity(mmis_enroll_action);
     if (rc != 0 && rc != MMIS_ENROLL_CANCELLED && g_metallica_mis_session_rebooted) {
@@ -2780,6 +2802,7 @@ static void do_enroll_metallica(void) {
     } else {
         vfsc_ok("\nDone. Your finger is enrolled on the sensor.\n\n");
     }
+    mmis_press_return();
 }
 
 /* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS

@@ -37,6 +37,26 @@
  * the tester's right-index print that python-validity enrolled earlier. */
 #define ENROLL_DEFAULT_SUBTYPE   0x02
 
+/* Finger numbering the sensor stores as the print's subtype. It is the Windows biometric
+ * (WinBio) numbering that Windows Hello and python-validity use, so prints made on those
+ * systems get a name too: 1-5 right thumb..little, 6-10 left thumb..little. */
+static uint16_t s_enroll_subtype = ENROLL_DEFAULT_SUBTYPE;
+static int s_last_match_subtype = -1;
+
+void metallica_mis_set_enroll_subtype(uint16_t subtype) { s_enroll_subtype = subtype; }
+
+const char *metallica_mis_finger_name(uint16_t subtype) {
+    static const char *const names[] = {
+        "right thumb", "right index finger", "right middle finger", "right ring finger",
+        "right little finger", "left thumb", "left index finger", "left middle finger",
+        "left ring finger", "left little finger"
+    };
+    if (subtype >= 1 && subtype <= 10) return names[subtype - 1];
+    return NULL;
+}
+
+int metallica_mis_last_match_subtype(void) { return s_last_match_subtype; }
+
 /* python sensor.py glow_start_scan() / glow_end_scan(): LED patterns, sent
  * as app commands. Copied byte for byte from upstream. */
 static const unsigned char GLOW_START_SCAN[125] = {
@@ -174,6 +194,7 @@ static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_captur
     if (w <= 0) {
         fprintf(stderr, "metallica_mis_enroll: capture: no start interrupt from the sensor (%s)\n",
                 w == 0 ? "timed out" : "USB error");
+        if (w == 0) rc = -2;
         goto done;
     }
     if (intr[0] != 0) {
@@ -563,7 +584,7 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
 
     printf("\nStep 3 of 3: saving the print on the sensor...\n");
     fflush(stdout);
-    size_t tinfo_len = make_finger_data(ENROLL_DEFAULT_SUBTYPE, res.template_, res.template_len,
+    size_t tinfo_len = make_finger_data(s_enroll_subtype, res.template_, res.template_len,
                                         res.tid, res.tid_len, tinfo, sizeof(tinfo));
     if (tinfo_len == 0) {
         fprintf(stderr, "metallica_mis: enroll: finger data does not fit its buffer\n");
@@ -597,7 +618,7 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
         printf("\nPrint saved on the sensor.\n");
     } else {
         printf("\nSaved: user record %u, finger record %u (subtype 0x%02x).\n\nPrints on the sensor now:\n",
-               user_dbid, finger_dbid, ENROLL_DEFAULT_SUBTYPE);
+               user_dbid, finger_dbid, s_enroll_subtype);
         mmis_db_list(&tls, NULL);
     }
     rc = 0;
@@ -632,7 +653,7 @@ static int parse_dict(const unsigned char *buf, size_t len, const unsigned char 
 /* python Sensor.match_finger(): 0x5e match command, one interrupt (type 3 =
  * recognised), 0x60 to fetch the result, 0x62 cleanup. Returns 0 and fills
  * the outputs on a match, 1 if the sensor did not recognise the finger,
- * -1 on any failure. */
+ * -2 if the sensor gave no answer at all (timed out), -1 on any other failure. */
 static int match_finger(metallica_mis_tls_t *tls, uint32_t *usr_id, uint16_t *subtype, size_t *hash_len) {
     static unsigned char rsp[REPLY_MAX];
     unsigned char intr[1024];
@@ -700,6 +721,7 @@ static int verify_impl(bool guided) {
     bool device_open = false;
 
     mmis_dbg("verify: begin");
+    s_last_match_subtype = -1;
 
     if (metallica_mis_open_device() != 0) {
         fprintf(stderr, "metallica_mis: verify: could not open the sensor\n");
@@ -763,10 +785,13 @@ static int verify_impl(bool guided) {
         simple_app(&tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
         int cap = capture_mode(&tls, &ctx, MMIS_CAPTURE_IDENTIFY);
         if (cap == 0) {
+            printf("  Touch captured, matching...\n");
+            fflush(stdout);
             int m = match_finger(&tls, &usr_id, &subtype, &hash_len);
             if (m == 0) { matched = true; break; }
             if (m == 1) { not_recognised = true; break; }
-            printf("  The match step failed, try again.\n");
+            if (m == -2) printf("  The sensor gave no answer for that touch. Lift your finger and touch again.\n");
+            else printf("  The match step failed, try again.\n");
         } else if (cap == -2) {
             printf("  No finger detected in time.\n");
         } else {
@@ -777,6 +802,7 @@ static int verify_impl(bool guided) {
     simple_app(&tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
 
     if (matched) {
+        s_last_match_subtype = subtype;
         if (guided) printf("\nMatch. The sensor recognised your finger.\n");
         else printf("\nMATCH: user record %u, finger subtype 0x%02x (hash %zu bytes).\n", usr_id, subtype, hash_len);
         rc = 0;

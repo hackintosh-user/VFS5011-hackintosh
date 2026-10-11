@@ -34,6 +34,9 @@ int metallica_mis_do_records(bool wipe) { (void)wipe; not_built(); return -1; }
 int metallica_mis_do_enroll_test(void) { not_built(); return -1; }
 int metallica_mis_do_verify_test(void) { not_built(); return -1; }
 int metallica_mis_do_verify_guided(void) { not_built(); return -1; }
+void metallica_mis_set_enroll_subtype(uint16_t subtype) { (void)subtype; }
+const char *metallica_mis_finger_name(uint16_t subtype) { (void)subtype; return NULL; }
+int metallica_mis_last_match_subtype(void) { return -1; }
 int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb) { (void)replace_cb; not_built(); return -1; }
 
 bool metallica_mis_firmware_is_present(void) { return false; }
