@@ -2565,6 +2565,126 @@ static void run_records_mode(void) {
     vfsc_ok("\nDone.\n\n");
 }
 
+/* ---- Metallica MIS host identity: saved value + one-time prompt ----
+ *
+ * A sensor paired by Windows or Linux derives its session keys from the
+ * laptop's REAL product name and serial. On a Hackintosh macOS only sees the
+ * spoofed Mac values, so that sensor refuses the session. The flow:
+ *   1. Use the default (a sensor HTID paired itself needs nothing else).
+ *   2. If the session fails, ask once for the two values, with a hint on how
+ *      to read them from Windows or Linux, and retry.
+ *   3. Save them (root only) so nobody is asked again.
+ * --host-product / --host-serial on the command line always win. */
+#define MMIS_HOST_ID_CONF_PATH "/usr/local/libexec/hack-touchid/metallica_host_identity.conf"
+#define MMIS_HOST_ID_MAX 120
+
+static char g_mmis_id_product[MMIS_HOST_ID_MAX + 1];
+static char g_mmis_id_serial[MMIS_HOST_ID_MAX + 1];
+static bool g_mmis_id_from_cli = false;
+static bool g_mmis_id_from_saved = false;
+
+static void mmis_host_identity_load_saved(void) {
+    if (g_metallica_mis_host_product_override || g_metallica_mis_host_serial_override) {
+        g_mmis_id_from_cli = true;
+        return;
+    }
+    FILE *f = fopen(MMIS_HOST_ID_CONF_PATH, "r");
+    if (!f) return;
+    char line[256];
+    g_mmis_id_product[0] = g_mmis_id_serial[0] = '\0';
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "product=", 8) == 0) snprintf(g_mmis_id_product, sizeof(g_mmis_id_product), "%s", line + 8);
+        else if (strncmp(line, "serial=", 7) == 0) snprintf(g_mmis_id_serial, sizeof(g_mmis_id_serial), "%s", line + 7);
+    }
+    fclose(f);
+    if (g_mmis_id_product[0] && g_mmis_id_serial[0]) {
+        g_metallica_mis_host_product_override = g_mmis_id_product;
+        g_metallica_mis_host_serial_override = g_mmis_id_serial;
+        g_mmis_id_from_saved = true;
+    }
+}
+
+static int mmis_host_identity_save(void) {
+    (void)mkdir("/usr/local/libexec/hack-touchid", 0755);
+    int fd = open(MMIS_HOST_ID_CONF_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return -1;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); return -1; }
+    fprintf(f, "product=%s\nserial=%s\n", g_mmis_id_product, g_mmis_id_serial);
+    return fclose(f) == 0 ? 0 : -1;
+}
+
+/* Reads one trimmed line into out. Returns 0 on a usable value, -1 otherwise. */
+static int mmis_read_value(const char *label, char *out, size_t cap) {
+    printf("%s: ", label);
+    fflush(stdout);
+    char raw[256];
+    if (!fgets(raw, sizeof(raw), stdin)) return -1;
+    raw[strcspn(raw, "\r\n")] = '\0';
+    char *p = raw;
+    while (*p == ' ' || *p == '\t') p++;
+    size_t n = strlen(p);
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) p[--n] = '\0';
+    if (n == 0 || n >= cap) return -1;
+    snprintf(out, cap, "%s", p);
+    return 0;
+}
+
+static int mmis_host_identity_prompt(void) {
+    printf(
+        "\nThis sensor was paired on another operating system, so it needs this laptop's real\n"
+        "product name and serial number. macOS can't read them on a Hackintosh (it only sees\n"
+        "the spoofed Mac values), so they have to be copied from Windows or Linux once:\n\n"
+        "  Windows (PowerShell): Get-CimInstance Win32_ComputerSystemProduct | Select Name,IdentifyingNumber\n"
+        "  Windows (older):      wmic csproduct get name,identifyingnumber\n"
+        "  Linux:                cat /sys/class/dmi/id/product_name /sys/class/dmi/id/product_serial\n\n"
+        "Name is the product name, IdentifyingNumber is the serial. They are saved on this Mac\n"
+        "(root only) so you won't be asked again. Leave a line empty to cancel.\n\n");
+    char product[MMIS_HOST_ID_MAX + 1], serial[MMIS_HOST_ID_MAX + 1];
+    if (mmis_read_value("Product name", product, sizeof(product)) != 0) return -1;
+    if (mmis_read_value("Serial number", serial, sizeof(serial)) != 0) return -1;
+    snprintf(g_mmis_id_product, sizeof(g_mmis_id_product), "%s", product);
+    snprintf(g_mmis_id_serial, sizeof(g_mmis_id_serial), "%s", serial);
+    g_metallica_mis_host_product_override = g_mmis_id_product;
+    g_metallica_mis_host_serial_override = g_mmis_id_serial;
+    if (mmis_host_identity_save() != 0) {
+        vfsc_warn("Couldn't save the values, so you'll be asked again next time.\n");
+    }
+    printf("\n");
+    return 0;
+}
+
+/* Runs a session-opening Metallica action (enroll or verify). If the secure session
+ * can't be opened because of the host identity, asks for it once and retries once. */
+static int mmis_run_with_host_identity(int (*action)(void)) {
+    int rc = action();
+    if (rc != MMIS_SESSION_FAILED) return rc;
+
+    if (g_mmis_id_from_cli) {
+        vfsc_err("\nThe sensor refused the host identity given with --host-product / --host-serial.\n"
+                  "Check both values against the other operating system.\n");
+        return -1;
+    }
+    if (g_mmis_id_from_saved) {
+        vfsc_err("\nThe sensor refused the saved host identity. Enter the values again.\n");
+    }
+    if (mmis_host_identity_prompt() != 0) {
+        printf("Cancelled.\n");
+        return -1;
+    }
+    g_mmis_id_from_saved = true;
+    rc = action();
+    if (rc == MMIS_SESSION_FAILED) {
+        vfsc_err("\nThe sensor still refused the session. Double-check the product name and serial,\n"
+                  "then run this again (you'll be asked for them once more).\n");
+        (void)unlink(MMIS_HOST_ID_CONF_PATH);
+        g_mmis_id_from_saved = false;
+        return -1;
+    }
+    return rc;
+}
+
 /* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS
  * sensors: the first native enrollment (see metallica_mis_enroll.h). It
  * saves the print on the sensor, so it needs the sensor to be paired
@@ -2580,7 +2700,7 @@ static void run_enroll_test_mode(void) {
         "the sensor several times with the SAME finger, and saves the print on the sensor.\n"
         "Nothing is saved on this Mac. Run it with --debug and send the whole output.\n\n",
         g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
-    if (metallica_mis_do_enroll_test() != 0) {
+    if (mmis_run_with_host_identity(metallica_mis_do_enroll_test) != 0) {
         vfsc_err("\nEnroll test failed. Re-run with --debug and send the full output.\n\n");
         return;
     }
@@ -2600,7 +2720,7 @@ static void run_verify_test_mode(void) {
         "and the sensor says whether it matches a print saved by --enroll-test.\n"
         "Nothing is changed on the sensor. Run it with --debug and send the whole output.\n\n",
         g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
-    if (metallica_mis_do_verify_test() != 0) {
+    if (mmis_run_with_host_identity(metallica_mis_do_verify_test) != 0) {
         vfsc_err("\nVerify test did not match or failed. Re-run with --debug and send the full output.\n\n");
         return;
     }
@@ -6340,6 +6460,10 @@ int main(int argc, char **argv) {
                          "[dbg]   sudo hack-touchid --debug ... 2>&1 | tee ~/htid-debug.log\n",
                 g_metallica_mis_debug);
     }
+
+    /* Saved host identity (see mmis_host_identity_load_saved()); a no-op unless a
+     * Metallica sensor was asked for one. Runs as root here, after the sudo re-exec. */
+    mmis_host_identity_load_saved();
 
     /* --list-records / --wipe-records: headless Metallica MIS sensor
      * database actions, same before-the-banner dispatch as the flags

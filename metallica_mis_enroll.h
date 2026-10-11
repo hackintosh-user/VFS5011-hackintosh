@@ -31,6 +31,13 @@
  */
 int metallica_mis_do_enroll_test(void);
 
+/* Return value shared by metallica_mis_do_enroll_test() and metallica_mis_do_verify_test():
+ * 0 success, -1 failure, MMIS_SESSION_FAILED (-2) when the secure session could not be
+ * opened and the sensor did not just reboot after a fresh pairing, which usually means
+ * the host identity (product name + serial) does not match the one the sensor was paired
+ * with. The client reacts by asking for that identity once. */
+#define MMIS_SESSION_FAILED (-2)
+
 /*
  * metallica_mis_do_verify_test(): first native verify on a Metallica MIS
  * sensor, a C port of python-validity's Sensor.identify() / match_finger()

@@ -22,6 +22,8 @@ typedef struct { int unused; } metallica_mis_tls_t;
 extern int g_metallica_mis_force_pair;
 extern const char *g_metallica_mis_host_product_override;
 extern const char *g_metallica_mis_host_serial_override;
+extern int g_metallica_mis_session_rebooted;
+#define MMIS_SESSION_FAILED (-2)
 extern int g_metallica_mis_debug;
 
 int metallica_mis_open_device(void);

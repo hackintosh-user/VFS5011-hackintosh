@@ -439,6 +439,7 @@ int metallica_mis_do_enroll_test(void) {
     if (metallica_mis_open_calibration_session(&tls) != 0) {
         fprintf(stderr, "metallica_mis: enroll: could not establish a secure session "
                          "(sensor not paired/loaded yet? run Pair Sensor first)\n");
+        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
         goto done;
     }
 
@@ -561,7 +562,7 @@ int metallica_mis_do_enroll_test(void) {
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("enroll: end, rc=%d", rc);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
 }
 
 /* ---- verify (match in the sensor) ---- */
@@ -665,6 +666,7 @@ int metallica_mis_do_verify_test(void) {
     if (metallica_mis_open_calibration_session(&tls) != 0) {
         fprintf(stderr, "metallica_mis: verify: could not establish a secure session "
                          "(sensor not paired/loaded yet? run Pair Sensor first)\n");
+        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
         goto done;
     }
 
@@ -737,5 +739,5 @@ int metallica_mis_do_verify_test(void) {
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("verify: end, rc=%d", rc);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
 }

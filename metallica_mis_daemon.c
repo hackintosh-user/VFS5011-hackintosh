@@ -136,6 +136,10 @@ int g_metallica_mis_force_pair = 0;
 const char *g_metallica_mis_host_product_override = NULL;
 const char *g_metallica_mis_host_serial_override = NULL;
 
+/* Set to 1 by metallica_mis_open_calibration_session() when it had to pair
+ * the sensor or load firmware and rebooted it. See metallica_mis_daemon.h. */
+int g_metallica_mis_session_rebooted = 0;
+
 /*
  * open_device() -- transport open/claim is genuinely reusable in
  * shape from vfs5011_daemon.c's open_device(), same libusb calls,
@@ -1327,6 +1331,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     }
     fprintf(stderr, "metallica_mis: [diag] open_calibration_session() host identity: product=\"%s\" serial=\"%s\"\n",
             product_name, serial_number);
+    g_metallica_mis_session_rebooted = 0;
     mmis_dbg("open_session: begin (vid:pid %04x:%04x)", g_detected_vid, g_detected_pid);
 
     if (metallica_mis_tls_init(tls_out, mis_transport, NULL, product_name, serial_number) != 0) {
@@ -1363,6 +1368,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     }
 
     if (rebooted) {
+        g_metallica_mis_session_rebooted = 1;
         fprintf(stderr, "metallica_mis: open_calibration_session(): device was not fully "
                          "paired/loaded yet -- pairing and/or firmware upload just ran for "
                          "real and the device has rebooted. The session is no longer usable "

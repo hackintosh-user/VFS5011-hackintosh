@@ -51,6 +51,11 @@ extern int g_metallica_mis_force_pair;
 extern const char *g_metallica_mis_host_product_override;
 extern const char *g_metallica_mis_host_serial_override;
 
+/* 1 when the last metallica_mis_open_calibration_session() failed only because it
+ * had just paired the sensor / loaded firmware and rebooted it (not a wrong host
+ * identity). The client uses it to tell "run again" from "ask for the identity". */
+extern int g_metallica_mis_session_rebooted;
+
 /* Opens the sensor over libusb and claims its interface. Tries each
  * known Metallica MIS identity (06cb:009a, 138a:0097, 138a:009d) in
  * turn. Returns 0 on success, -1 on failure (already prints its own
