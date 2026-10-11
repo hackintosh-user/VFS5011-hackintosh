@@ -124,6 +124,22 @@ typedef struct {
     size_t calib_len;
 } enroll_ctx_t;
 
+/* Daemon use: s_agent_mode keeps capture_mode() quiet, and s_abort_cb lets the daemon stop a
+ * wait for the finger (screen unlocked, sensor yielded) within about 300 ms. */
+static bool s_agent_mode = false;
+static int (*s_abort_cb)(void) = NULL;
+#define MMIS_WAIT_ABORTED (-4)
+
+static int wait_finger_interrupt(unsigned char *buf, size_t cap, int total_ms) {
+    if (!s_abort_cb) return metallica_mis_wait_interrupt(buf, cap, total_ms);
+    for (int waited = 0; waited < total_ms; waited += 300) {
+        if (s_abort_cb()) return MMIS_WAIT_ABORTED;
+        int w = metallica_mis_wait_interrupt(buf, cap, 300);
+        if (w != 0) return w;
+    }
+    return 0;
+}
+
 /* python Sensor.capture(mode), mode = ENROLL or IDENTIFY. Returns 0 ok, -2 if
  * the finger never came (timeout), -1 on any other failure. */
 static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_capture_mode_t mode) {
@@ -165,12 +181,15 @@ static int capture_mode(metallica_mis_tls_t *tls, enroll_ctx_t *ctx, mmis_captur
         goto done;
     }
 
-    printf("  Touch the sensor now (light is on), then lift your finger. Waiting up to 30 seconds...\n");
-    fflush(stdout);
+    if (!s_agent_mode) {
+        printf("  Touch the sensor now (light is on), then lift your finger. Waiting up to 30 seconds...\n");
+        fflush(stdout);
+    }
 
     /* wait for the finger: interrupt type 2 (anything else is skipped, as upstream) */
     for (;;) {
-        w = metallica_mis_wait_interrupt(intr, sizeof(intr), WAIT_FINGER_MS);
+        w = wait_finger_interrupt(intr, sizeof(intr), WAIT_FINGER_MS);
+        if (w == MMIS_WAIT_ABORTED) { rc = MMIS_WAIT_ABORTED; goto done; }
         if (w == 0) { rc = -2; goto done; }
         if (w < 0) goto done;
         if (intr[0] == 2) break;
@@ -765,4 +784,82 @@ done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("verify: end, rc=%d", rc);
     return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
+}
+
+/* ---- daemon API: keep one secure session, identify on demand ---- */
+
+static metallica_mis_tls_t s_agent_tls;
+static enroll_ctx_t s_agent_ctx;
+static bool s_agent_open = false;
+static bool s_agent_calibrated = false;   /* calibration data kept in memory across reopen */
+static int s_agent_prints = 0;
+
+void metallica_mis_agent_set_abort_cb(int (*cb)(void)) { s_abort_cb = cb; }
+
+int metallica_mis_agent_open(void) {
+    if (s_agent_open) return 0;
+    s_agent_mode = true;
+    g_mmis_db_quiet = 1;
+    int rc = -1;
+    bool device_open = false;
+
+    if (metallica_mis_open_device() != 0) goto fail;
+    device_open = true;
+    if (metallica_mis_send_init() != 0) goto fail;
+    if (metallica_mis_open_calibration_session(&s_agent_tls) != 0) {
+        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
+        goto fail;
+    }
+    int users = 0;
+    if (mmis_db_list(&s_agent_tls, &users) != 0) goto fail;
+    s_agent_prints = users;
+
+    if (!s_agent_calibrated) {
+        metallica_type0199_build_prog(s_agent_ctx.prog, &s_agent_ctx.prog_len);
+        if (!mmis_get_lines_per_frame(s_agent_ctx.prog, s_agent_ctx.prog_len, METALLICA_TYPE0199_REPEAT_MULTIPLIER,
+                                      &s_agent_ctx.lines_per_frame)) goto fail;
+        if (!metallica_mis_get_factory_calibration_values(&s_agent_tls, s_agent_ctx.factory,
+                                                          sizeof(s_agent_ctx.factory), &s_agent_ctx.factory_len)) goto fail;
+        if (metallica_mis_do_calibrate_ex(&s_agent_tls, s_agent_ctx.calib, sizeof(s_agent_ctx.calib),
+                                          &s_agent_ctx.calib_len) != 0) goto fail;
+        s_agent_calibrated = true;
+    }
+    s_agent_open = true;
+    g_mmis_db_quiet = 0;
+    return 0;
+
+fail:
+    g_mmis_db_quiet = 0;
+    if (device_open) metallica_mis_close_device();
+    return rc;
+}
+
+int metallica_mis_agent_prints(void) { return s_agent_prints; }
+
+void metallica_mis_agent_close(void) {
+    if (!s_agent_open) return;
+    simple_app(&s_agent_tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
+    metallica_mis_close_device();
+    s_agent_open = false;
+}
+
+int metallica_mis_agent_identify(uint32_t *usr_id, uint16_t *subtype) {
+    if (!s_agent_open) return MMIS_AGENT_ERROR;
+    simple_app(&s_agent_tls, "glow_start_scan", GLOW_START_SCAN, sizeof(GLOW_START_SCAN));
+    int cap = capture_mode(&s_agent_tls, &s_agent_ctx, MMIS_CAPTURE_IDENTIFY);
+    int result = MMIS_AGENT_ERROR;
+    if (cap == 0) {
+        uint32_t id = 0; uint16_t st = 0; size_t hl = 0;
+        int m = match_finger(&s_agent_tls, &id, &st, &hl);
+        if (m == 0) { if (usr_id) *usr_id = id; if (subtype) *subtype = st; result = MMIS_AGENT_MATCH; }
+        else if (m == 1) result = MMIS_AGENT_NO_MATCH;
+    } else if (cap == -2) {
+        result = MMIS_AGENT_NO_FINGER;
+    } else if (cap == MMIS_WAIT_ABORTED) {
+        result = MMIS_AGENT_ABORTED;
+    }
+    /* an aborted or failed capture can leave a command pending: the caller must close and reopen */
+    if (result == MMIS_AGENT_MATCH || result == MMIS_AGENT_NO_MATCH || result == MMIS_AGENT_NO_FINGER)
+        simple_app(&s_agent_tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
+    return result;
 }

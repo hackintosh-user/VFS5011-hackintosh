@@ -1,6 +1,8 @@
 #ifndef __METALLICA_MIS_ENROLL_H
 #define __METALLICA_MIS_ENROLL_H
 
+#include <stdint.h>
+
 /*
  * metallica_mis_enroll.h
  *
@@ -62,5 +64,29 @@ int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
  * completes there. Returns 0 on MATCH, -1 on NO MATCH or any failure.
  */
 int metallica_mis_do_verify_test(void);
+
+/* ---- daemon API (lock screen / padlock unlock) ----
+ * One secure session is kept open for a lock episode; calibration is done once per process
+ * and kept in memory. Not thread-safe: call from the single polling thread. */
+#define MMIS_AGENT_MATCH      0
+#define MMIS_AGENT_NO_MATCH   1
+#define MMIS_AGENT_NO_FINGER (-2)   /* nobody touched the sensor in time */
+#define MMIS_AGENT_ABORTED   (-4)   /* the abort callback fired: close and reopen before reuse */
+#define MMIS_AGENT_ERROR     (-1)   /* close and reopen before reuse */
+
+/* Polled while waiting for a finger (about every 300 ms). Return non-zero to stop waiting. */
+void metallica_mis_agent_set_abort_cb(int (*cb)(void));
+
+/* Opens the sensor, secure session, counts stored prints, calibrates (first call only).
+ * Returns 0, -1, or MMIS_SESSION_FAILED when the host identity is wrong. */
+int metallica_mis_agent_open(void);
+
+/* Number of prints the sensor held when the session was opened. */
+int metallica_mis_agent_prints(void);
+
+/* Relights the sensor, waits up to 30 s for a touch, asks the sensor to match it. */
+int metallica_mis_agent_identify(uint32_t *usr_id, uint16_t *subtype);
+
+void metallica_mis_agent_close(void);
 
 #endif /* __METALLICA_MIS_ENROLL_H */
