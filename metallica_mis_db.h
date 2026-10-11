@@ -119,6 +119,9 @@ int mmis_db_list(metallica_mis_tls_t *tls, int *user_count_out);
  * shows zero users left. */
 int mmis_db_wipe_users(metallica_mis_tls_t *tls, int *deleted_out);
 
+/* Set to 1 to keep mmis_db_list() from printing (it still returns the user count). */
+extern int g_mmis_db_quiet;
+
 /* ---- enroll-side helpers (used by metallica_mis_enroll.c) ----
  * mmis_db_ensure_storage(): returns the dbid of the "StgWindsor" storage,
  *   creating it first if the sensor has none. 0 = ok, -1 = failure.

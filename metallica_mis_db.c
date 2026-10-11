@@ -212,12 +212,14 @@ cleanup:
     return rc;
 }
 
+int g_mmis_db_quiet = 0;
+
 int mmis_db_list(metallica_mis_tls_t *tls, int *user_count_out) {
     if (user_count_out) *user_count_out = 0;
 
     mmis_db_info_t info;
     if (mmis_db_info(tls, &info) == 0) {
-        printf("Sensor database: %u bytes total, %u used, %u free, %u records\n",
+        if (!g_mmis_db_quiet) printf("Sensor database: %u bytes total, %u used, %u free, %u records\n",
                info.total, info.used, info.free_bytes, info.records);
     }
 
@@ -225,20 +227,20 @@ int mmis_db_list(metallica_mis_tls_t *tls, int *user_count_out) {
     int rc = mmis_db_get_user_storage(tls, 0, MMIS_DB_STORAGE_NAME, &stg);
     if (rc < 0) return -1;
     if (rc == 1) {
-        printf("No \"%s\" storage on this sensor: nothing enrolled.\n", MMIS_DB_STORAGE_NAME);
+        if (!g_mmis_db_quiet) printf("No \"%s\" storage on this sensor: nothing enrolled.\n", MMIS_DB_STORAGE_NAME);
         return 0;
     }
 
-    printf("Storage \"%s\" (dbid %u): %d user record(s)\n", stg.name, stg.dbid, stg.user_count);
+    if (!g_mmis_db_quiet) printf("Storage \"%s\" (dbid %u): %d user record(s)\n", stg.name, stg.dbid, stg.user_count);
     for (int i = 0; i < stg.users_stored; i++) {
         mmis_db_user_t u;
         if (mmis_db_get_user(tls, stg.users[i].dbid, &u) != 0) {
-            printf("  user dbid %u: could not be read\n", stg.users[i].dbid);
+            if (!g_mmis_db_quiet) printf("  user dbid %u: could not be read\n", stg.users[i].dbid);
             continue;
         }
-        printf("  user dbid %u: %d finger(s)\n", u.dbid, u.finger_count);
+        if (!g_mmis_db_quiet) printf("  user dbid %u: %d finger(s)\n", u.dbid, u.finger_count);
         for (int f = 0; f < u.fingers_stored; f++) {
-            printf("    finger dbid %u, subtype 0x%02x, %u bytes\n",
+            if (!g_mmis_db_quiet) printf("    finger dbid %u, subtype 0x%02x, %u bytes\n",
                    u.fingers[f].dbid, u.fingers[f].subtype, u.fingers[f].value_size);
         }
     }

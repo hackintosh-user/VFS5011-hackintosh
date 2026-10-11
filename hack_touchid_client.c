@@ -2655,10 +2655,34 @@ static int mmis_host_identity_prompt(void) {
     return 0;
 }
 
+/* [1] Enroll keeps the screen clean: the library's diagnostic lines (stderr) go to a log
+ * file instead, unless --debug is on. Set by do_enroll_metallica(). */
+#define MMIS_ENROLL_LOG_PATH "/var/log/htid-metallica-enroll.log"
+static bool g_mmis_stderr_to_log = false;
+
+static int mmis_call_action(int (*action)(void)) {
+    if (!g_mmis_stderr_to_log || g_metallica_mis_debug) return action();
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    int fd = open(MMIS_ENROLL_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
+    if (saved < 0 || fd < 0) {
+        if (saved >= 0) close(saved);
+        if (fd >= 0) close(fd);
+        return action();
+    }
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    int rc = action();
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    return rc;
+}
+
 /* Runs a session-opening Metallica action (enroll or verify). If the secure session
  * can't be opened because of the host identity, asks for it once and retries once. */
 static int mmis_run_with_host_identity(int (*action)(void)) {
-    int rc = action();
+    int rc = mmis_call_action(action);
     if (rc != MMIS_SESSION_FAILED) return rc;
 
     if (g_mmis_id_from_cli) {
@@ -2674,7 +2698,7 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
         return -1;
     }
     g_mmis_id_from_saved = true;
-    rc = action();
+    rc = mmis_call_action(action);
     if (rc == MMIS_SESSION_FAILED) {
         vfsc_err("\nThe sensor still refused the session. Double-check the product name and serial,\n"
                   "then run this again (you'll be asked for them once more).\n");
@@ -2683,6 +2707,47 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
         return -1;
     }
     return rc;
+}
+
+/* ---- [1] Enroll for Metallica MIS sensors ---- */
+static int mmis_replace_prompt(int users) {
+    printf("\nThis sensor already has %d print%s stored. Replacing deletes ALL prints on it,\n"
+           "including ones made on Windows (Windows Hello) or Linux.\n"
+           "Replace? [y/N]: ", users, users == 1 ? "" : "s");
+    fflush(stdout);
+    char a[8];
+    if (!fgets(a, sizeof(a), stdin)) return 0;
+    return a[0] == 'y' || a[0] == 'Y';
+}
+
+static int mmis_enroll_action(void) {
+    return metallica_mis_do_enroll_guided(mmis_replace_prompt);
+}
+
+static void do_enroll_metallica(void) {
+    printf("The print is stored on the sensor itself, nothing is saved on this Mac.\n"
+           "Keep your finger OFF the sensor until it asks for a touch.\n\n");
+    fflush(stdout);
+    g_mmis_stderr_to_log = true;
+    int rc = mmis_run_with_host_identity(mmis_enroll_action);
+    if (rc != 0 && rc != MMIS_ENROLL_CANCELLED && g_metallica_mis_session_rebooted) {
+        /* A sensor nobody had paired yet: the session open just did the one-time setup and
+         * the sensor restarted. Give it time to re-enumerate, then enroll for real. */
+        printf("The sensor needed its one-time setup and restarted. Waiting for it to come back...\n\n");
+        fflush(stdout);
+        sleep(8);
+        rc = mmis_run_with_host_identity(mmis_enroll_action);
+    }
+    g_mmis_stderr_to_log = false;
+
+    if (rc == MMIS_ENROLL_CANCELLED) {
+        printf("\nEnrollment cancelled. Nothing was changed.\n\n");
+    } else if (rc != 0) {
+        vfsc_err("\nEnrollment didn't finish. Details are in %s\n"
+                  "(or run with --debug to see everything on screen).\n\n", MMIS_ENROLL_LOG_PATH);
+    } else {
+        vfsc_ok("\nDone. Your finger is enrolled on the sensor.\n\n");
+    }
 }
 
 /* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS
@@ -2887,11 +2952,15 @@ static void do_enroll(void) {
         vfsc_err("No supported sensor detected. Can't enroll without one.\n\n");
         return;
     }
-    if (!g_detected_sensor->backend_available) {
-        vfsc_err("%s detected, but its capture backend isn't implemented yet.\n\n",
-                  g_detected_sensor->display_name);
+    printf("Declaring sensor type...\n");
+    if (!g_detected_sensor->backend_available && !is_metallica_mis_sensor(g_detected_sensor)) {
+        vfsc_warn("%s %04x:%04x detected, but it only supports the capture test for now.\n"
+                  "Enrollment isn't available for this sensor yet.\n\n",
+                  g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
         return;
     }
+    printf("%s %04x:%04x detected, proceeding with the agent.\n\n",
+           g_detected_sensor->display_name, g_detected_sensor->vid, g_detected_sensor->pid);
 
     /* Metallica MIS-specific: this sensor needs a proprietary
      * firmware blob uploaded during first-run pairing before it can
@@ -2909,6 +2978,13 @@ static void do_enroll(void) {
             }
             printf("\n");
         }
+    }
+
+    /* Metallica MIS stores the print on the sensor, so it skips the template volume and the
+     * finger-name flow below. */
+    if (is_metallica_mis_sensor(g_detected_sensor)) {
+        do_enroll_metallica();
+        return;
     }
 
     /* First-run convenience, same reasoning as do_deploy()'s identical

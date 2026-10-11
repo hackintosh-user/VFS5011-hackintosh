@@ -37,6 +37,19 @@ int metallica_mis_do_enroll_test(void);
  * the host identity (product name + serial) does not match the one the sensor was paired
  * with. The client reacts by asking for that identity once. */
 #define MMIS_SESSION_FAILED (-2)
+/* Returned by metallica_mis_do_enroll_guided() when the person declined to replace the
+ * prints already stored on the sensor. Nothing was changed. */
+#define MMIS_ENROLL_CANCELLED (-3)
+
+/* Asked once, after the sensor's stored prints are counted, when there is at least one.
+ * Return 1 to delete ALL user records on the sensor and enroll, 0 to cancel. */
+typedef int (*mmis_replace_cb)(int users_on_sensor);
+
+/* The enrollment behind menu item [1]: same steps as metallica_mis_do_enroll_test() but
+ * without the technical output, and an existing print is handled through `replace_cb`
+ * instead of telling the person to run --wipe-records. Returns 0, -1,
+ * MMIS_SESSION_FAILED or MMIS_ENROLL_CANCELLED. */
+int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
 
 /*
  * metallica_mis_do_verify_test(): first native verify on a Metallica MIS

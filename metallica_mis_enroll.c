@@ -417,7 +417,7 @@ static size_t htid_identity(unsigned char *out, size_t cap) {
 }
 
 /* ---- the whole test ---- */
-int metallica_mis_do_enroll_test(void) {
+static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
     static enroll_ctx_t ctx;
     static enroll_result_t res;
     static unsigned char tinfo[TEMPLATE_MAX + 2048];
@@ -443,13 +443,27 @@ int metallica_mis_do_enroll_test(void) {
         goto done;
     }
 
-    printf("Prints on the sensor now:\n");
+    if (!guided) printf("Prints on the sensor now:\n");
     int users_before = 0;
-    if (mmis_db_list(&tls, &users_before) != 0) {
+    g_mmis_db_quiet = guided;
+    int list_rc = mmis_db_list(&tls, &users_before);
+    g_mmis_db_quiet = 0;
+    if (list_rc != 0) {
         fprintf(stderr, "metallica_mis: enroll: could not read the sensor's records, stopping\n");
         goto done;
     }
-    if (users_before > 0) {
+    if (guided && users_before > 0) {
+        if (!replace_cb || !replace_cb(users_before)) {
+            rc = MMIS_ENROLL_CANCELLED;
+            goto done;
+        }
+        int deleted = 0;
+        if (mmis_db_wipe_users(&tls, &deleted) != 0) {
+            fprintf(stderr, "metallica_mis: enroll: could not remove the old prints from the sensor\n");
+            goto done;
+        }
+        mmis_dbg("enroll: replaced %d user record(s)", deleted);
+    } else if (users_before > 0) {
         printf("\nNote: the sensor already holds %d user record(s). If saving the new print is rejected\n"
                "with status 0x04c3, run --wipe-records first and enroll again.\n", users_before);
     }
@@ -487,7 +501,8 @@ int metallica_mis_do_enroll_test(void) {
 
     while (!done_enrolling && attempts < ENROLL_MAX_ATTEMPTS && bad_in_a_row < ENROLL_MAX_BAD_IN_A_ROW) {
         attempts++;
-        printf("\nTouch %d (the sensor usually needs about 10 good touches):\n", good + 1);
+        if (guided) printf("\nTouch %d of about 10:\n", good + 1);
+        else printf("\nTouch %d (the sensor usually needs about 10 good touches):\n", good + 1);
         /* python: glow_start_scan() is the first thing in every pass of its
          * enroll loop. The sensor's light goes out after each capture, so it
          * has to be relit before every touch or the person is left guessing. */
@@ -501,7 +516,8 @@ int metallica_mis_do_enroll_test(void) {
                 if (append_new_image(&tls, &res) == 0) {
                     ok = true;
                     good++;
-                    printf("  Accepted (header %zu bytes, template %zu bytes).\n", res.header_len, res.template_len);
+                    if (guided) printf("  Good touch.\n");
+                    else printf("  Accepted (header %zu bytes, template %zu bytes).\n", res.header_len, res.template_len);
                     if (res.tid_len > 0) done_enrolling = true;
                 }
             }
@@ -544,6 +560,7 @@ int metallica_mis_do_enroll_test(void) {
     if (mmis_db_new_finger(&tls, user_dbid, tinfo, tinfo_len, &finger_dbid) != 0) {
         fprintf(stderr, "metallica_mis: enroll: the sensor rejected the new print. Status 0x04c3 means an\n"
                          "older print is still stored: run --wipe-records, then --enroll-test again.\n");
+        if (guided) printf("\nThe sensor refused to save the print.\n");
         simple_app(&tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
         goto done;
     }
@@ -554,16 +571,24 @@ int metallica_mis_do_enroll_test(void) {
     }
     simple_app(&tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
 
-    printf("\nSaved: user record %u, finger record %u (subtype 0x%02x).\n\nPrints on the sensor now:\n",
-           user_dbid, finger_dbid, ENROLL_DEFAULT_SUBTYPE);
-    mmis_db_list(&tls, NULL);
+    if (guided) {
+        printf("\nPrint saved on the sensor.\n");
+    } else {
+        printf("\nSaved: user record %u, finger record %u (subtype 0x%02x).\n\nPrints on the sensor now:\n",
+               user_dbid, finger_dbid, ENROLL_DEFAULT_SUBTYPE);
+        mmis_db_list(&tls, NULL);
+    }
     rc = 0;
 
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("enroll: end, rc=%d", rc);
-    return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
+    return rc == 0 ? 0 : ((rc == MMIS_SESSION_FAILED || rc == MMIS_ENROLL_CANCELLED) ? rc : -1);
 }
+
+int metallica_mis_do_enroll_test(void) { return enroll_impl(false, NULL); }
+
+int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb) { return enroll_impl(true, replace_cb); }
 
 /* ---- verify (match in the sensor) ---- */
 
