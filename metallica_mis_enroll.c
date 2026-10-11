@@ -545,6 +545,9 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
         } else {
             printf("  That touch was not usable, try again.\n");
         }
+        if (cap == 0 && !ok) {
+            printf("  The sensor did not accept that touch. Lift your finger and touch again, placing it a little differently.\n");
+        }
         bad_in_a_row = ok ? 0 : bad_in_a_row + 1;
         /* python: finally: enrollment_update_end() runs after every attempt, including the last */
         enrollment_flag(&tls, "enrollment_update_end", 0);
@@ -690,7 +693,7 @@ done:
     return rc;
 }
 
-int metallica_mis_do_verify_test(void) {
+static int verify_impl(bool guided) {
     static enroll_ctx_t ctx;
     metallica_mis_tls_t tls;
     int rc = -1;
@@ -714,9 +717,12 @@ int metallica_mis_do_verify_test(void) {
         goto done;
     }
 
-    printf("Prints on the sensor now:\n");
+    if (!guided) printf("Prints on the sensor now:\n");
     int users = 0;
-    if (mmis_db_list(&tls, &users) != 0) {
+    g_mmis_db_quiet = guided;
+    int list_rc = mmis_db_list(&tls, &users);
+    g_mmis_db_quiet = 0;
+    if (list_rc != 0) {
         fprintf(stderr, "metallica_mis: verify: could not read the sensor's records, stopping\n");
         goto done;
     }
@@ -771,10 +777,12 @@ int metallica_mis_do_verify_test(void) {
     simple_app(&tls, "glow_end_scan", GLOW_END_SCAN, sizeof(GLOW_END_SCAN));
 
     if (matched) {
-        printf("\nMATCH: user record %u, finger subtype 0x%02x (hash %zu bytes).\n", usr_id, subtype, hash_len);
+        if (guided) printf("\nMatch. The sensor recognised your finger.\n");
+        else printf("\nMATCH: user record %u, finger subtype 0x%02x (hash %zu bytes).\n", usr_id, subtype, hash_len);
         rc = 0;
     } else if (not_recognised) {
-        printf("\nNO MATCH: the sensor captured the touch but did not recognise the finger.\n");
+        if (guided) printf("\nNo match. The sensor did not recognise that finger.\n");
+        else printf("\nNO MATCH: the sensor captured the touch but did not recognise the finger.\n");
         rc = 1;
     } else {
         fprintf(stderr, "\nmetallica_mis: verify: stopped after %d attempt(s) without a usable result.\n", attempts);
@@ -783,8 +791,13 @@ int metallica_mis_do_verify_test(void) {
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("verify: end, rc=%d", rc);
+    if (guided && rc == 1) return MMIS_VERIFY_NO_MATCH;
     return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
 }
+
+int metallica_mis_do_verify_test(void) { return verify_impl(false); }
+
+int metallica_mis_do_verify_guided(void) { return verify_impl(true); }
 
 /* ---- daemon API: keep one secure session, identify on demand ---- */
 

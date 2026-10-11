@@ -53,6 +53,14 @@ typedef int (*mmis_replace_cb)(int users_on_sensor);
  * MMIS_SESSION_FAILED or MMIS_ENROLL_CANCELLED. */
 int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
 
+/* Returned by metallica_mis_do_verify_guided() when the sensor captured the touch but did not
+ * recognise the finger. 0 is a match, MMIS_SESSION_FAILED and -1 are as above. */
+#define MMIS_VERIFY_NO_MATCH 1
+
+/* The verification behind menu item [2]: same steps as metallica_mis_do_verify_test() with
+ * plain-language output. */
+int metallica_mis_do_verify_guided(void);
+
 /*
  * metallica_mis_do_verify_test(): first native verify on a Metallica MIS
  * sensor, a C port of python-validity's Sensor.identify() / match_finger()

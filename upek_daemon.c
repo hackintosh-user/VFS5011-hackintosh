@@ -431,9 +431,30 @@ static int upek_run_deinit(libusb_device_handle *handle) {
  * doesn't duplicate that step since it's identical across sensors --
  * only the actual capture protocol differs). */
 unsigned char *upek_capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
-    if (upek_run_init(handle) < 0) {
-        fprintf(stderr, "upek: init sequence failed\n");
-        return NULL;
+    int init_r = upek_run_init(handle);
+    if (init_r < 0) {
+        /* First report from real hardware (Oct 11): the very first register write (0x49) stalls
+         * with LIBUSB_ERROR_PIPE. Gather what the next report needs, then retry once after a
+         * device reset, before giving up. */
+        fprintf(stderr, "upek: init sequence failed (%s), probing the control pipe...\n", libusb_error_name(init_r));
+        uint8_t probe = 0;
+        int rr = upek_read_reg(handle, 0x09, &probe);
+        if (rr < 0) fprintf(stderr, "upek: diag: read reg 0x09 failed: %s\n", libusb_error_name(rr));
+        else fprintf(stderr, "upek: diag: read reg 0x09 ok, value 0x%02x (reads work, only writes stall)\n", probe);
+
+        fprintf(stderr, "upek: diag: resetting the device and retrying the init once...\n");
+        int reset_r = libusb_reset_device(handle);
+        fprintf(stderr, "upek: diag: reset returned %s\n", reset_r == 0 ? "OK" : libusb_error_name(reset_r));
+        usleep(800000);
+        if (reset_r == 0 || reset_r == LIBUSB_ERROR_NOT_FOUND) {
+            (void)libusb_claim_interface(handle, 0);
+        }
+        init_r = upek_run_init(handle);
+        if (init_r < 0) {
+            fprintf(stderr, "upek: init sequence failed again (%s)\n", libusb_error_name(init_r));
+            return NULL;
+        }
+        fprintf(stderr, "upek: init worked after the reset\n");
     }
     if (upek_await_finger(handle) < 0) {
         fprintf(stderr, "upek: await-finger sequence failed\n");

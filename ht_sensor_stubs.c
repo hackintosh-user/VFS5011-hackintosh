@@ -33,6 +33,7 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) { (void)tls; not_built(
 int metallica_mis_do_records(bool wipe) { (void)wipe; not_built(); return -1; }
 int metallica_mis_do_enroll_test(void) { not_built(); return -1; }
 int metallica_mis_do_verify_test(void) { not_built(); return -1; }
+int metallica_mis_do_verify_guided(void) { not_built(); return -1; }
 int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb) { (void)replace_cb; not_built(); return -1; }
 
 bool metallica_mis_firmware_is_present(void) { return false; }

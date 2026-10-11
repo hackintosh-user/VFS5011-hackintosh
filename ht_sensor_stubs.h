@@ -27,6 +27,8 @@ extern int g_metallica_mis_session_rebooted;
 #define MMIS_ENROLL_CANCELLED (-3)
 typedef int (*mmis_replace_cb)(int users_on_sensor);
 int metallica_mis_do_enroll_guided(mmis_replace_cb replace_cb);
+#define MMIS_VERIFY_NO_MATCH 1
+int metallica_mis_do_verify_guided(void);
 extern int g_metallica_mis_debug;
 
 int metallica_mis_open_device(void);
