@@ -4,7 +4,7 @@ All notable changes to the Hackintosh-TouchID fingerprint authentication project
 
 ---
 ## v1.1.0 - Current Development Target
-**CHANGES ARE YET TO BE MERGED INTO ```MAIN```**
+**CHANGES ARE YET TO BE MERGED INTO `MAIN`**
 
 - New sensor: UPEK/AuthenTec TouchStrip (`147e:2016`), experimental, capture test only for now.
 - New sensor: Synaptics Metallica MIS, experimental. A native port of python-validity (pairing, secure session, calibration, enroll and verify) now works on real hardware. `[1]` Enroll now enrolls this sensor straight from the menu: it asks before replacing prints already stored on the sensor, sets up a never-paired sensor by itself, and keeps diagnostics in `/var/log/htid-metallica-enroll.log`. If the sensor was paired on Windows or Linux, the client asks once for the laptop's real product name and serial (with hints on where to find them) and remembers them. The sensor light now comes back on before every touch. `--enroll-test`, `--verify-test`, `--list-records`, `--wipe-records`, `--host-product`, `--host-serial` and `--debug` remain for troubleshooting. Verified on `06cb:009a`, while `138a:0097` and `138a:009d` are detected but untested. Unlock integration is still in progress.
