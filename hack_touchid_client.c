@@ -2015,6 +2015,7 @@ static void print_usage(void) {
     printf("With no flags, launches the interactive menu.\n\n");
     printf("Flags:\n");
     printf("  -h, --help          Show this help and exit\n");
+    printf("  -v, --version       Show client version, build, branch, daemon, FPOV and Fpbootd versions\n");
     printf("  --q, --quiet        Skip the verbose boot log\n");
     printf("  --deploy-agent      Headless (re)install of the daemon, no menu\n");
     printf("  --diag-pid          Print a diagnostic report and exit\n");
@@ -2036,6 +2037,65 @@ static void print_usage(void) {
     printf("                      DMI product_name / product_serial, not the spoofed Mac values)\n");
     printf("  --fpbootd-daemon    Run as the Fpbootd pre-login socket server\n\n");
     printf("From the interactive menu, [H] shows this same help.\n\n");
+}
+
+/* --version / -v: plain-text build info, no colors, no sensor probing, no
+ * sudo (handled in main()'s first pass, same as -h/--help). Daemon lines
+ * only run "--version" on vfs5011_daemon; the other sensor backends have
+ * no standalone daemon that answers it yet, so they just report whether
+ * the binary is installed. */
+static void print_version(void) {
+    client_version_info_t info;
+    memset(&info, 0, sizeof(info));
+    bool have = read_local_version_file(&info);
+
+    printf("Hack-TouchID Client\n");
+    printf("  Version  : %s\n", VFS5011_PROJECT_VERSION);
+    printf("  Build    : %s\n", (have && info.build[0]) ? info.build : "unknown");
+    printf("  Branch   : %s\n", (have && info.branch[0]) ? info.branch : "unknown");
+
+    const char *seen[HACK_TOUCHID_SENSOR_COUNT];
+    size_t seen_n = 0;
+    bool any_daemon = false;
+    for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
+        const char *name = HACK_TOUCHID_SENSORS[i].daemon_binary_name;
+        if (!name || !name[0]) continue;
+        bool dup = false;
+        for (size_t j = 0; j < seen_n; j++) {
+            if (strcmp(seen[j], name) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+        seen[seen_n++] = name;
+
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "/usr/local/libexec/hack-touchid/%s", name);
+        if (access(path, F_OK) != 0) continue;
+        any_daemon = true;
+
+        char line[96] = "Installed (version not reported)";
+        if (strcmp(name, "vfs5011_daemon") == 0) {
+            char cmd[PATH_MAX + 32];
+            snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", path);
+            FILE *fp = popen(cmd, "r");
+            if (fp) {
+                char v[64] = {0};
+                bool got = fgets(v, sizeof(v), fp) != NULL;
+                pclose(fp);
+                v[strcspn(v, "\r\n")] = '\0';
+                if (got && v[0]) snprintf(line, sizeof(line), "v%s", v);
+            }
+        }
+        printf("  Daemon   : %s (%s)\n", line, name);
+    }
+    if (!any_daemon) printf("  Daemon   : Not Installed\n");
+
+    char fpov[80];
+    get_fpov_status_line(fpov, sizeof(fpov));
+    printf("  FPOV     : %s\n", fpov);
+
+    char fpb[80];
+    get_fpbootd_status_line(fpb, sizeof(fpb));
+    printf("  Fpbootd  : %s\n", fpb);
 }
 
 /* [FP] Fpbootd -- stub for now. The daemon + Authorization Plugin are
@@ -6477,6 +6537,14 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage();
+            return 0;
+        }
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            init_exec_dir(argv[0]);
+            print_version();
             return 0;
         }
     }
