@@ -56,6 +56,17 @@ extern const char *g_metallica_mis_host_serial_override;
  * identity). The client uses it to tell "run again" from "ask for the identity". */
 extern int g_metallica_mis_session_rebooted;
 
+/* Why the last metallica_mis_open_calibration_session() failed:
+ *   MMIS_FAIL_IDENTITY  the paired identity in flash could not be decrypted/verified with the
+ *                       host product name + serial in use (the only case where asking for the
+ *                       identity helps)
+ *   MMIS_FAIL_HANDSHAKE the identity was fine but the sensor rejected the TLS handshake (for
+ *                       example a fatal alert after an unclean close of the previous run) */
+#define MMIS_FAIL_NONE      0
+#define MMIS_FAIL_IDENTITY  1
+#define MMIS_FAIL_HANDSHAKE 2
+extern int g_metallica_mis_session_fail;
+
 /* Opens the sensor over libusb and claims its interface. Tries each
  * known Metallica MIS identity (06cb:009a, 138a:0097, 138a:009d) in
  * turn. Returns 0 on success, -1 on failure (already prints its own

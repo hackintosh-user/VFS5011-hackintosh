@@ -23,6 +23,17 @@
 #include "mmis_factory_bits.h"
 #include "mmis_timeslot.h"
 
+/* Maps why metallica_mis_open_calibration_session() failed to the code the client acts on. Only a
+ * paired identity that could not be verified means "wrong host identity"; a rejected handshake
+ * or any other failure must never make the client ask for (or delete) the saved identity. */
+static int mmis_session_fail_rc(void) {
+    switch (g_metallica_mis_session_fail) {
+    case MMIS_FAIL_IDENTITY:  return MMIS_SESSION_FAILED;
+    case MMIS_FAIL_HANDSHAKE: return MMIS_SESSION_HANDSHAKE;
+    default:                  return -1;
+    }
+}
+
 /* ---- limits ---- */
 #define ENROLL_MAX_ATTEMPTS      30      /* total capture attempts before giving up */
 #define ENROLL_MAX_BAD_IN_A_ROW  4       /* consecutive failed attempts before giving up */
@@ -479,7 +490,7 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
     if (metallica_mis_open_calibration_session(&tls) != 0) {
         fprintf(stderr, "metallica_mis: enroll: could not establish a secure session "
                          "(sensor not paired/loaded yet? run Pair Sensor first)\n");
-        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
+        if (!g_metallica_mis_session_rebooted) rc = mmis_session_fail_rc();
         goto done;
     }
 
@@ -541,7 +552,7 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
 
     while (!done_enrolling && attempts < ENROLL_MAX_ATTEMPTS && bad_in_a_row < ENROLL_MAX_BAD_IN_A_ROW) {
         attempts++;
-        if (guided) printf("\nTouch %d of about 10:\n", good + 1);
+        if (guided) printf("\nTouch %d:\n", good + 1);
         else printf("\nTouch %d (the sensor usually needs about 10 good touches):\n", good + 1);
         /* python: glow_start_scan() is the first thing in every pass of its
          * enroll loop. The sensor's light goes out after each capture, so it
@@ -626,7 +637,7 @@ static int enroll_impl(bool guided, mmis_replace_cb replace_cb) {
 done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("enroll: end, rc=%d", rc);
-    return rc == 0 ? 0 : ((rc == MMIS_SESSION_FAILED || rc == MMIS_ENROLL_CANCELLED) ? rc : -1);
+    return rc == 0 ? 0 : ((rc == MMIS_SESSION_FAILED || rc == MMIS_SESSION_HANDSHAKE || rc == MMIS_ENROLL_CANCELLED) ? rc : -1);
 }
 
 int metallica_mis_do_enroll_test(void) { return enroll_impl(false, NULL); }
@@ -735,7 +746,7 @@ static int verify_impl(bool guided) {
     if (metallica_mis_open_calibration_session(&tls) != 0) {
         fprintf(stderr, "metallica_mis: verify: could not establish a secure session "
                          "(sensor not paired/loaded yet? run Pair Sensor first)\n");
-        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
+        if (!g_metallica_mis_session_rebooted) rc = mmis_session_fail_rc();
         goto done;
     }
 
@@ -818,7 +829,7 @@ done:
     if (device_open) metallica_mis_close_device();
     mmis_dbg("verify: end, rc=%d", rc);
     if (guided && rc == 1) return MMIS_VERIFY_NO_MATCH;
-    return rc == 0 ? 0 : (rc == MMIS_SESSION_FAILED ? MMIS_SESSION_FAILED : -1);
+    return rc == 0 ? 0 : ((rc == MMIS_SESSION_FAILED || rc == MMIS_SESSION_HANDSHAKE) ? rc : -1);
 }
 
 int metallica_mis_do_verify_test(void) { return verify_impl(false); }
@@ -846,7 +857,7 @@ int metallica_mis_agent_open(void) {
     device_open = true;
     if (metallica_mis_send_init() != 0) goto fail;
     if (metallica_mis_open_calibration_session(&s_agent_tls) != 0) {
-        if (!g_metallica_mis_session_rebooted) rc = MMIS_SESSION_FAILED;
+        if (!g_metallica_mis_session_rebooted) rc = mmis_session_fail_rc();
         goto fail;
     }
     int users = 0;

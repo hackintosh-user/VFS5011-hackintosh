@@ -34,11 +34,13 @@
 int metallica_mis_do_enroll_test(void);
 
 /* Return value shared by metallica_mis_do_enroll_test() and metallica_mis_do_verify_test():
- * 0 success, -1 failure, MMIS_SESSION_FAILED (-2) when the secure session could not be
- * opened and the sensor did not just reboot after a fresh pairing, which usually means
- * the host identity (product name + serial) does not match the one the sensor was paired
- * with. The client reacts by asking for that identity once. */
+ * 0 success, -1 failure, MMIS_SESSION_FAILED (-2) only when the paired identity in the sensor
+ * could not be verified, which means the host identity (product name + serial) does not match
+ * the one the sensor was paired with. The client reacts by asking for that identity once. */
 #define MMIS_SESSION_FAILED (-2)
+/* The secure session could not be opened although the host identity was accepted (the sensor
+ * rejected the TLS handshake). Asking for the identity does not help; waiting and retrying can. */
+#define MMIS_SESSION_HANDSHAKE (-4)
 /* Returned by metallica_mis_do_enroll_guided() when the person declined to replace the
  * prints already stored on the sensor. Nothing was changed. */
 #define MMIS_ENROLL_CANCELLED (-3)

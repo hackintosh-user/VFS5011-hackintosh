@@ -1693,7 +1693,12 @@ static void unmount_template_volume(void) {
  * the g_finger_* cache, then unmounts. Used whenever the cache is
  * stale (-1) and something needs an authoritative answer — e.g. Enroll
  * checking for a name collision, or Manage Fingerprints. */
+static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s);
+
 static int refresh_finger_cache(void) {
+    /* Metallica MIS keeps its prints on the sensor itself: there is no template volume to
+     * mount, and probing for one printed a red "Volume mount failed" at every startup. */
+    if (g_detected_sensor && is_metallica_mis_sensor(g_detected_sensor)) return -1;
     char mount_path[PATH_MAX];
     if (mount_template_volume(mount_path, sizeof(mount_path)) != 0) {
         return -1;
@@ -2684,6 +2689,14 @@ static int mmis_call_action(int (*action)(void)) {
  * can't be opened because of the host identity, asks for it once and retries once. */
 static int mmis_run_with_host_identity(int (*action)(void)) {
     int rc = mmis_call_action(action);
+    /* The sensor rejected the TLS handshake although the host identity was accepted (usually
+     * the previous run did not close its session cleanly). That is not an identity problem:
+     * never prompt for it and never delete the saved one. Wait a moment and try once more. */
+    if (rc == MMIS_SESSION_HANDSHAKE) {
+        sleep(3);
+        rc = mmis_call_action(action);
+        if (rc == MMIS_SESSION_HANDSHAKE) return rc;
+    }
     if (rc != MMIS_SESSION_FAILED) return rc;
 
     if (g_mmis_id_from_cli) {
@@ -2700,6 +2713,7 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
     }
     g_mmis_id_from_saved = true;
     rc = mmis_call_action(action);
+    if (rc == MMIS_SESSION_HANDSHAKE) return rc;
     if (rc == MMIS_SESSION_FAILED) {
         vfsc_err("\nThe sensor still refused the session. Double-check the product name and serial,\n"
                   "then run this again (you'll be asked for them once more).\n");
@@ -2769,6 +2783,10 @@ static void do_verify_metallica(void) {
         else vfsc_ok("\nVerified.\n\n");
     } else if (rc == MMIS_VERIFY_NO_MATCH) {
         vfsc_warn("\nNot recognised.\n\n");
+    } else if (rc == MMIS_SESSION_HANDSHAKE) {
+        vfsc_err("\nThe sensor rejected the secure connection. Your host identity is fine.\n"
+                  "Wait about 10 seconds and try again. If it keeps happening,\n"
+                  "send %s.\n\n", MMIS_ENROLL_LOG_PATH);
     } else {
         vfsc_err("\nVerification didn't finish. Details are in %s\n"
                   "(or run with --debug to see everything on screen).\n"
@@ -2796,6 +2814,10 @@ static void do_enroll_metallica(void) {
 
     if (rc == MMIS_ENROLL_CANCELLED) {
         printf("\nEnrollment cancelled. Nothing was changed.\n\n");
+    } else if (rc == MMIS_SESSION_HANDSHAKE) {
+        vfsc_err("\nThe sensor rejected the secure connection. Your host identity is fine.\n"
+                  "Wait about 10 seconds and try again. If it keeps happening, send %s.\n\n",
+                 MMIS_ENROLL_LOG_PATH);
     } else if (rc != 0) {
         vfsc_err("\nEnrollment didn't finish. Details are in %s\n"
                   "(or run with --debug to see everything on screen).\n\n", MMIS_ENROLL_LOG_PATH);
