@@ -140,6 +140,15 @@ const char *g_metallica_mis_host_serial_override = NULL;
  * the sensor or load firmware and rebooted it. See metallica_mis_daemon.h. */
 int g_metallica_mis_session_rebooted = 0;
 
+/* Why the last metallica_mis_open_calibration_session() failed. See metallica_mis_daemon.h
+ * (this file does not include it, so the values are repeated here, guarded). */
+#ifndef MMIS_FAIL_NONE
+#define MMIS_FAIL_NONE      0
+#define MMIS_FAIL_IDENTITY  1
+#define MMIS_FAIL_HANDSHAKE 2
+#endif
+int g_metallica_mis_session_fail = MMIS_FAIL_NONE;
+
 /*
  * open_device() -- transport open/claim is genuinely reusable in
  * shape from vfs5011_daemon.c's open_device(), same libusb calls,
@@ -458,6 +467,9 @@ static int assert_status(const unsigned char *reply, int reply_len) {
  * meaning). Not performance-sensitive -- diagnostic path only.
  */
 static void mmis_hexdump(const char *label, const uint8_t *buf, size_t len) {
+    /* Only with --debug-full: the calibration dumps are ~2,000 lines per run and used to
+     * bury the enroll log (750 KB after a day of testing). */
+    if (g_metallica_mis_debug < 2) return;
     fprintf(stderr, "metallica_mis: %s (%zu bytes):\n", label, len);
     for (size_t i = 0; i < len; i += 16) {
         fprintf(stderr, "  %04zx: ", i);
@@ -1320,6 +1332,7 @@ int metallica_mis_do_calibrate(metallica_mis_tls_t *tls) {
  * (*tls_out's contents are undefined on failure -- do not use it).
  */
 int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
+    g_metallica_mis_session_fail = MMIS_FAIL_NONE;
     char product_name[256];
     char serial_number[256];
     metallica_mis_identity_t identity;
@@ -1435,6 +1448,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
                          "or a genuine PSK/host-identity mismatch -- these are distinct "
                          "failure modes, not all the same problem).\n");
         free(paired_identity);
+        g_metallica_mis_session_fail = MMIS_FAIL_IDENTITY;
         return -1;
     }
 
@@ -1445,6 +1459,7 @@ int metallica_mis_open_calibration_session(metallica_mis_tls_t *tls_out) {
     if (metallica_mis_tls_open(tls_out, paired_identity) != 0) {
         fprintf(stderr, "metallica_mis: open_calibration_session(): tls_open() failed "
                          "on the already-paired fast path\n");
+        g_metallica_mis_session_fail = MMIS_FAIL_HANDSHAKE;
         return -1;
     }
 
