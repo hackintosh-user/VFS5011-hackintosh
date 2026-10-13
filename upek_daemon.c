@@ -53,33 +53,70 @@
 
 /* ---- low-level register read/write, synchronous ---- */
 
-/* Returns 0 on success (with *out_value set), or a negative libusb
- * error code. Mirrors sm_read_reg()/sm_read_reg_cb() in upeksonly.c,
- * collapsed into one blocking call since there's no event loop here
- * to hand a callback back into. */
-static int upek_read_reg(libusb_device_handle *handle, uint8_t reg, uint8_t *out_value) {
-    unsigned char buf[UPEK_CTRL_READ_RESPONSE_LEN];
-    int r = libusb_control_transfer(handle,
-        UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
-        /* wValue */ 0, /* wIndex */ reg,
-        buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
+/* Oct 13: the first real report (Sonoma 14.8.9, 147e:2016) stalled the very first register write
+ * with LIBUSB_ERROR_PIPE. The request layout below is the one libfprint's upeksonly.c uses, but
+ * other layouts are tried by upek_probe_and_adapt() when it fails, and whichever works is kept
+ * for the rest of the session:
+ *   write 0: wValue=0,     wIndex=reg, 1 data byte (libfprint layout, default)
+ *   write 1: wValue=reg,   wIndex=0,   1 data byte
+ *   write 2: wValue=value, wIndex=reg, no data stage
+ *   read  0: wValue=0,     wIndex=reg, 8 bytes back (libfprint layout, default)
+ *   read  1: wValue=reg,   wIndex=0,   8 bytes back
+ *   read  2: wValue=0,     wIndex=reg, 1 byte back */
+static int g_upek_wr_layout = 0;
+static int g_upek_rd_layout = 0;
+
+static int upek_write_reg_layout(libusb_device_handle *handle, int layout, uint8_t reg, uint8_t value) {
+    unsigned char data = value;
+    int r;
+    switch (layout) {
+    case 1:
+        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+                                    reg, 0, &data, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    case 2:
+        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+                                    value, reg, NULL, 0, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    default:
+        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, &data, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    }
+    return r < 0 ? r : 0;
+}
+
+static int upek_read_reg_layout(libusb_device_handle *handle, int layout, uint8_t reg, uint8_t *out_value) {
+    unsigned char buf[UPEK_CTRL_READ_RESPONSE_LEN] = {0};
+    int r;
+    switch (layout) {
+    case 1:
+        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+                                    reg, 0, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
+        break;
+    case 2:
+        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, buf, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    default:
+        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
+        break;
+    }
     if (r < 0) return r;
-    /* Only byte[0] of the 8-byte response is meaningful -- same as
-     * upeksonly.c's sm_read_reg_cb() taking data[0] and discarding
-     * the rest. */
+    if (r < 1) return LIBUSB_ERROR_IO;
+    /* Only byte[0] of the response is meaningful, same as upeksonly.c's sm_read_reg_cb(). */
     *out_value = buf[0];
     return 0;
 }
 
+static int upek_read_reg(libusb_device_handle *handle, uint8_t reg, uint8_t *out_value) {
+    return upek_read_reg_layout(handle, g_upek_rd_layout, reg, out_value);
+}
+
 /* Mirrors sm_write_reg(). */
 static int upek_write_reg(libusb_device_handle *handle, uint8_t reg, uint8_t value) {
-    unsigned char data = value;
-    int r = libusb_control_transfer(handle,
-        UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
-        /* wValue */ 0, /* wIndex */ reg,
-        &data, 1, UPEK_CTRL_TIMEOUT_MS);
-    if (r < 0) return r;
-    return 0;
+    return upek_write_reg_layout(handle, g_upek_wr_layout, reg, value);
 }
 
 /* Mirrors sm_write_regs() -- writes a whole table in order, aborting
@@ -419,6 +456,140 @@ static int upek_run_deinit(libusb_device_handle *handle) {
     return upek_write_regs(handle, UPEK_DEINIT_WRITEV, sizeof(UPEK_DEINIT_WRITEV) / sizeof(UPEK_DEINIT_WRITEV[0]));
 }
 
+/* ---- Control-pipe probe (first-hardware-report diagnostics) ---- */
+
+#include <stdarg.h>
+
+#define UPEK_PROBE_REPORT_PATH "/tmp/htid-upek-probe.txt"
+static FILE *g_upek_report = NULL;
+
+static void upek_rep(const char *fmt, ...) {
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "upek: probe: %s\n", line);
+    if (g_upek_report) { fprintf(g_upek_report, "%s\n", line); fflush(g_upek_report); }
+}
+
+static void upek_probe_descriptors(libusb_device_handle *h) {
+    libusb_device *dev = libusb_get_device(h);
+    struct libusb_device_descriptor d;
+    if (libusb_get_device_descriptor(dev, &d) == 0) {
+        upek_rep("device %04x:%04x bcdUSB=%04x bcdDevice=%04x class=%u ep0max=%u configs=%u",
+                 d.idVendor, d.idProduct, d.bcdUSB, d.bcdDevice, d.bDeviceClass,
+                 d.bMaxPacketSize0, d.bNumConfigurations);
+    }
+    struct libusb_config_descriptor *cfg = NULL;
+    int r = libusb_get_active_config_descriptor(dev, &cfg);
+    if (r != 0 || !cfg) {
+        upek_rep("active config descriptor unavailable: %s", libusb_error_name(r));
+        return;
+    }
+    upek_rep("active config value=%u interfaces=%u maxpower=%umA", cfg->bConfigurationValue,
+             cfg->bNumInterfaces, cfg->MaxPower * 2);
+    bool has_bulk = false, has_intr = false;
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
+        for (int a = 0; a < cfg->interface[i].num_altsetting; a++) {
+            const struct libusb_interface_descriptor *id = &cfg->interface[i].altsetting[a];
+            upek_rep("  interface %u alt %u class=%02x/%02x/%02x endpoints=%u", id->bInterfaceNumber,
+                     id->bAlternateSetting, id->bInterfaceClass, id->bInterfaceSubClass,
+                     id->bInterfaceProtocol, id->bNumEndpoints);
+            for (int e = 0; e < id->bNumEndpoints; e++) {
+                const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
+                upek_rep("    endpoint 0x%02x attr=%02x maxpacket=%u interval=%u", ep->bEndpointAddress,
+                         ep->bmAttributes, ep->wMaxPacketSize, ep->bInterval);
+                if (ep->bEndpointAddress == UPEK_IN_ENDPOINT_BULK) has_bulk = true;
+                if (ep->bEndpointAddress == UPEK_IN_ENDPOINT_INTR) has_intr = true;
+            }
+        }
+    }
+    upek_rep("expected endpoints: bulk IN 0x%02x %s, interrupt IN 0x%02x %s", UPEK_IN_ENDPOINT_BULK,
+             has_bulk ? "present" : "MISSING", UPEK_IN_ENDPOINT_INTR, has_intr ? "present" : "MISSING");
+    libusb_free_config_descriptor(cfg);
+}
+
+static void upek_probe_standard(libusb_device_handle *h) {
+    unsigned char buf[18] = {0};
+    int r = libusb_control_transfer(h, 0x80, 0x00, 0, 0, buf, 2, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_STATUS: %s", libusb_error_name(r));
+    else upek_rep("standard GET_STATUS: ok, %02x %02x", buf[0], buf[1]);
+    r = libusb_control_transfer(h, 0x80, 0x08, 0, 0, buf, 1, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_CONFIGURATION: %s", libusb_error_name(r));
+    else upek_rep("standard GET_CONFIGURATION: ok, %u", buf[0]);
+    r = libusb_control_transfer(h, 0x80, 0x06, 0x0100, 0, buf, 18, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_DESCRIPTOR(device): %s", libusb_error_name(r));
+    else upek_rep("standard GET_DESCRIPTOR(device): ok, %d bytes (EP0 itself works)", r);
+}
+
+/* Tries every read and write layout once. Returns true when at least one write layout worked and
+ * adopts the first working write and read layout. */
+static bool upek_probe_layouts(libusb_device_handle *h, const char *stage) {
+    bool wr_ok = false;
+    upek_rep("-- register layouts (%s) --", stage);
+    for (int l = 0; l < 3; l++) {
+        uint8_t v = 0;
+        int r = upek_read_reg_layout(h, l, 0x09, &v);
+        if (r < 0) upek_rep("read layout %d (reg 0x09): %s", l, libusb_error_name(r));
+        else {
+            upek_rep("read layout %d (reg 0x09): ok, value 0x%02x", l, v);
+            if (g_upek_rd_layout == 0 || l < g_upek_rd_layout) g_upek_rd_layout = l;
+        }
+        (void)libusb_clear_halt(h, 0x00);
+        (void)libusb_clear_halt(h, 0x80);
+    }
+    for (int l = 0; l < 3; l++) {
+        int r = upek_write_reg_layout(h, l, 0x49, 0x00);
+        if (r < 0) upek_rep("write layout %d (reg 0x49=0x00): %s", l, libusb_error_name(r));
+        else {
+            upek_rep("write layout %d (reg 0x49=0x00): ok", l);
+            if (!wr_ok) { g_upek_wr_layout = l; wr_ok = true; }
+        }
+        (void)libusb_clear_halt(h, 0x00);
+    }
+    return wr_ok;
+}
+
+/* Returns 0 when some layout let a register write through (g_upek_*_layout are set), -1 when
+ * nothing worked. Everything it learns goes to stderr and to UPEK_PROBE_REPORT_PATH. */
+static int upek_probe_and_adapt(libusb_device_handle *h) {
+    g_upek_report = fopen(UPEK_PROBE_REPORT_PATH, "w");
+    upek_rep("UPEK control-pipe probe (macOS libusb %u.%u.%u)", libusb_get_version()->major,
+             libusb_get_version()->minor, libusb_get_version()->micro);
+    upek_probe_descriptors(h);
+    upek_probe_standard(h);
+
+    int result = -1;
+    if (upek_probe_layouts(h, "as opened")) { result = 0; goto out; }
+
+    /* Re-apply the configuration, then try again. */
+    upek_rep("-- re-applying configuration 1 --");
+    (void)libusb_release_interface(h, 0);
+    int r = libusb_set_configuration(h, 1);
+    upek_rep("set_configuration(1): %s", r == 0 ? "ok" : libusb_error_name(r));
+    r = libusb_claim_interface(h, 0);
+    upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    usleep(300000);
+    if (upek_probe_layouts(h, "after set_configuration")) { result = 0; goto out; }
+
+    /* Last resort: full device reset. */
+    upek_rep("-- resetting the device --");
+    r = libusb_reset_device(h);
+    upek_rep("reset_device: %s", r == 0 ? "ok" : libusb_error_name(r));
+    usleep(1000000);
+    r = libusb_claim_interface(h, 0);
+    upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    if (upek_probe_layouts(h, "after reset")) { result = 0; goto out; }
+
+    upek_rep("RESULT: every register request layout was stalled by the sensor");
+out:
+    if (result == 0) upek_rep("RESULT: using write layout %d, read layout %d", g_upek_wr_layout, g_upek_rd_layout);
+    fprintf(stderr, "upek: probe report saved to %s, please send it\n", UPEK_PROBE_REPORT_PATH);
+    if (g_upek_report) { fclose(g_upek_report); g_upek_report = NULL; }
+    return result;
+}
+
 /* ---- Public capture entry point ---- */
 
 /* Full one-swipe capture: init -> await finger -> capture -> deinit.
@@ -434,27 +605,17 @@ unsigned char *upek_capture_fingerprint_image(libusb_device_handle *handle, int 
     int init_r = upek_run_init(handle);
     if (init_r < 0) {
         /* First report from real hardware (Oct 11): the very first register write (0x49) stalls
-         * with LIBUSB_ERROR_PIPE. Gather what the next report needs, then retry once after a
-         * device reset, before giving up. */
+         * with LIBUSB_ERROR_PIPE, the diagnostic read fails the same way and a reset does not
+         * help. Probe the control pipe, adopt a request layout that works if there is one, and
+         * leave a report for the next round. */
         fprintf(stderr, "upek: init sequence failed (%s), probing the control pipe...\n", libusb_error_name(init_r));
-        uint8_t probe = 0;
-        int rr = upek_read_reg(handle, 0x09, &probe);
-        if (rr < 0) fprintf(stderr, "upek: diag: read reg 0x09 failed: %s\n", libusb_error_name(rr));
-        else fprintf(stderr, "upek: diag: read reg 0x09 ok, value 0x%02x (reads work, only writes stall)\n", probe);
-
-        fprintf(stderr, "upek: diag: resetting the device and retrying the init once...\n");
-        int reset_r = libusb_reset_device(handle);
-        fprintf(stderr, "upek: diag: reset returned %s\n", reset_r == 0 ? "OK" : libusb_error_name(reset_r));
-        usleep(800000);
-        if (reset_r == 0 || reset_r == LIBUSB_ERROR_NOT_FOUND) {
-            (void)libusb_claim_interface(handle, 0);
-        }
+        if (upek_probe_and_adapt(handle) != 0) return NULL;
         init_r = upek_run_init(handle);
         if (init_r < 0) {
-            fprintf(stderr, "upek: init sequence failed again (%s)\n", libusb_error_name(init_r));
+            fprintf(stderr, "upek: init sequence failed again with the adopted layout (%s)\n", libusb_error_name(init_r));
             return NULL;
         }
-        fprintf(stderr, "upek: init worked after the reset\n");
+        fprintf(stderr, "upek: init worked with the adopted request layout\n");
     }
     if (upek_await_finger(handle) < 0) {
         fprintf(stderr, "upek: await-finger sequence failed\n");
