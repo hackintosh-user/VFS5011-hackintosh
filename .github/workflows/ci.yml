@@ -9,7 +9,7 @@ name: CI
 #
 # Repository layout (reorganized): the client and prep_and_build.sh stay at
 # the root; scripts/ has the build scripts; metallica/, upek/, vfs5011/
-# (+ vfs5011/vol) hold each sensor's code; shared/sen, shared/access and
+# hold each sensor's code, vol/ has the template volume scripts; shared/sen, shared/access and
 # shared/pane hold the cross-sensor parts. Every compile below therefore uses
 # the same include paths as scripts/ht_env.sh (HT_INC).
 #
@@ -107,7 +107,7 @@ jobs:
           sudo ln -s "$(brew --prefix openssl@3)" /usr/local/opt/openssl@3
       - name: Build
         run: |
-          chmod +x ./*.sh scripts/*.sh vfs5011/*.sh vfs5011/vol/*.sh \
+          chmod +x ./*.sh scripts/*.sh vfs5011/*.sh vol/*.sh \
             shared/access/*.sh shared/pane/source/*.sh
           ./scripts/build.sh
       - name: Verify binaries were produced
@@ -137,8 +137,8 @@ jobs:
             vfs5011/vfs5011_daemon.c vfs5011/vfs5011_proto.h \
             vfs5011/hack-touchid-menubar-ipc.c vfs5011/hack-touchid-menubar-ipc.h \
             vfs5011/hack-touchid-agent-install.sh \
-            vfs5011/vol/hack-touchid-volume-mount.sh vfs5011/vol/hack-touchid-volume-unmount.sh \
-            vfs5011/vol/hack-touchid-setup-volume.sh vfs5011/vol/hack-touchid-store-password.sh \
+            vol/hack-touchid-volume-mount.sh vol/hack-touchid-volume-unmount.sh \
+            vol/hack-touchid-setup-volume.sh vol/hack-touchid-store-password.sh \
             upek/upek_daemon.c upek/upek_daemon.h upek/upek_proto.h \
             metallica/metallica_mis_daemon.c metallica/metallica_mis_enroll.c \
             metallica/metallica_mis_db.c metallica/ht_sensor_stubs.c metallica/ht_sensor_stubs.h \
