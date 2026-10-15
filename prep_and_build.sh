@@ -73,7 +73,7 @@ done
 
 echo "== Fixing permissions on every .sh file in the repo =="
 chmod +x ./*.sh
-for d in scripts vfs5011 vol shared/access shared/pane/source; do
+for d in scripts vfs5011 vol metallica shared/access shared/pane/source; do
     [ -d "$d" ] && chmod +x "$d"/*.sh
 done
 ls -la ./*.sh scripts/*.sh
@@ -81,7 +81,7 @@ ls -la ./*.sh scripts/*.sh
 echo
 echo "== Reclaiming ownership of build artifacts (in case a previous sudo build left them root-owned) =="
 CURRENT_USER="$(id -un)"
-for bin in hack-touchid vfs5011_daemon metallica_mis_daemon; do
+for bin in hack-touchid vfs5011_daemon metallica_mis_daemon metallica_mis_agent; do
     if [ -e "$bin" ] && [ "$(stat -f '%Su' "$bin")" != "$CURRENT_USER" ]; then
         echo "  $bin is owned by $(stat -f '%Su' "$bin") -- reclaiming as $CURRENT_USER (you may be prompted for your password)"
         sudo chown "$CURRENT_USER":staff "$bin"
