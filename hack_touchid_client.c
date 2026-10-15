@@ -2096,7 +2096,7 @@ static void print_version(void) {
         any_daemon = true;
 
         char line[96] = "Installed (version not reported)";
-        if (strcmp(name, "vfs5011_daemon") == 0) {
+        if (strcmp(name, "vfs5011_daemon") == 0 || strcmp(name, "metallica_mis_agent") == 0) {
             char cmd[PATH_MAX + 32];
             snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", path);
             FILE *fp = popen(cmd, "r");
@@ -2402,6 +2402,17 @@ static int is_metallica_mis_sensor(const hack_touchid_sensor_t *s) {
     return (s->vid == 0x06cb && s->pid == 0x009a) ||
            (s->vid == 0x138a && s->pid == 0x0097) ||
            (s->vid == 0x138a && s->pid == 0x009d);
+}
+
+/* True when the Metallica MIS lock screen / padlock agent has been built next
+ * to this client (scripts/build_metallica_agent.sh writes ./metallica_mis_agent).
+ * backend_available stays 0 for the Metallica rows, so this is what lets
+ * Deploy [3] through for that family. */
+static bool metallica_agent_ready(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor)) return false;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/metallica_mis_agent", g_exec_dir);
+    return access(path, X_OK) == 0;
 }
 
 /* Runs the Metallica MIS plaintext-bootstrap + pairing + firmware-
@@ -5194,7 +5205,7 @@ static bool do_deploy(void) {
     /* Detected, but that sensor's capture backend isn't built yet
      * (backend_available == 0 in the table) -- e.g. UPEK is
      * recognized on sight but has no daemon/installer to deploy. */
-    if (!g_detected_sensor->backend_available) {
+    if (!g_detected_sensor->backend_available && !metallica_agent_ready()) {
         vfsc_err("%s detected, but its capture backend isn't implemented yet.\n"
                   "Deploy isn't available for this sensor until that's built.\n\n",
                   g_detected_sensor->display_name);
@@ -5667,21 +5678,26 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
      * order. Compiler output has no natural "% done" signal, so the bar
      * is driven by those discrete steps: it counts only the binaries
      * this build actually makes (hack-touchid always, vfs5011_daemon for
-     * the VFS5011 family, metallica_mis_daemon for Metallica), and a step
+     * the VFS5011 family, metallica_mis_daemon and metallica_mis_agent for
+     * Metallica), and a step
      * that has started counts as half done, so with 2 steps the bar goes
      * 0% -> 25% -> 75% -> 100% at "Build complete". It is an estimate,
      * not a measurement. */
     static const char *const all_steps[] = {
         "Building hack-touchid...",
         "Building vfs5011_daemon...",
-        "Building metallica_mis_daemon"
+        "Building metallica_mis_daemon",
+        "Building metallica_mis_agent"
     };
     const bool fam_all = strcmp(build_family, "all") == 0;
-    const char *build_steps[3];
+    const char *build_steps[4];
     int total_steps = 0;
     build_steps[total_steps++] = all_steps[0];
     if (fam_all || strstr(build_family, "vfs5011")) build_steps[total_steps++] = all_steps[1];
-    if (fam_all || strstr(build_family, "metallica")) build_steps[total_steps++] = all_steps[2];
+    if (fam_all || strstr(build_family, "metallica")) {
+        build_steps[total_steps++] = all_steps[2];
+        build_steps[total_steps++] = all_steps[3];
+    }
     int step = 0;   /* how many of build_steps have started */
     int percent = 0;
 
