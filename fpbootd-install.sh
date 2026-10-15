@@ -56,7 +56,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_SCRIPT="$SCRIPT_DIR/build_client.sh"
+BUILD_SCRIPT="$SCRIPT_DIR/scripts/build_client.sh"
 BUILT_BINARY="$SCRIPT_DIR/hack-touchid"
 INSTALL_DIR="$(dirname "$BINARY_PATH")"
 
@@ -66,7 +66,7 @@ if [ ! -x "$BUILD_SCRIPT" ]; then
 fi
 
 echo "Building hack-touchid from source..."
-if ! (cd "$SCRIPT_DIR" && ./build_client.sh > /tmp/fpbootd_build.log 2>&1); then
+if ! (cd "$SCRIPT_DIR" && ./scripts/build_client.sh > /tmp/fpbootd_build.log 2>&1); then
     echo "Error: build failed. See /tmp/fpbootd_build.log for the compiler output." >&2
     exit 1
 fi
@@ -87,11 +87,11 @@ chmod 755 "$BINARY_PATH"
 # it happened to be built from. Deployed alone without these, every
 # capture attempt would fail at the very first mount.
 for script in "hack-touchid-volume-mount.sh" "hack-touchid-volume-unmount.sh"; do
-    if [ ! -f "$SCRIPT_DIR/$script" ]; then
-        echo "Error: $SCRIPT_DIR/$script not found -- can't deploy a working daemon without it." >&2
+    if [ ! -f "$SCRIPT_DIR/vol/$script" ]; then
+        echo "Error: $SCRIPT_DIR/vol/$script not found -- can't deploy a working daemon without it." >&2
         exit 1
     fi
-    cp "$SCRIPT_DIR/$script" "$INSTALL_DIR/$script"
+    cp "$SCRIPT_DIR/vol/$script" "$INSTALL_DIR/$script"
     chown root:wheel "$INSTALL_DIR/$script"
     chmod 755 "$INSTALL_DIR/$script"
 done

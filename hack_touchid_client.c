@@ -36,6 +36,7 @@
 #include <dirent.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <strings.h>
 #include <sys/utsname.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
@@ -684,10 +685,10 @@ static int capture_quality_template(struct xyt_struct *out_tmpl, int quiet) {
  * ------------------------------------------------------------------ */
 
 #define VFSC_RULE "--------------------------------------------------------------------"
-#define MOUNT_SCRIPT_NAME "hack-touchid-volume-mount.sh"
-#define UNMOUNT_SCRIPT_NAME "hack-touchid-volume-unmount.sh"
-#define SETUP_VOLUME_SCRIPT_NAME "hack-touchid-setup-volume.sh"
-#define GRANT_ACCESSIBILITY_SCRIPT_NAME "hack-touchid-grant-accessibility.sh"
+#define MOUNT_SCRIPT_NAME "vol/hack-touchid-volume-mount.sh"
+#define UNMOUNT_SCRIPT_NAME "vol/hack-touchid-volume-unmount.sh"
+#define SETUP_VOLUME_SCRIPT_NAME "vol/hack-touchid-setup-volume.sh"
+#define GRANT_ACCESSIBILITY_SCRIPT_NAME "shared/access/hack-touchid-grant-accessibility.sh"
 #define AGENT_LABEL "com.hackintosh.vfs5011agent"
 #define VOLUME_NAME "HackTouchIDStore"
 #define TCC_DB_PATH "/Library/Application Support/com.apple.TCC/TCC.db"
@@ -1168,6 +1169,23 @@ static void ensure_path_symlink(void) {
     }
 }
 
+/* Helper scripts (volume mount/unmount/setup, accessibility grant) live in
+ * subfolders of the repo (vol, shared/access), but a deployed copy of
+ * the daemon / fpbootd has them FLAT next to the binary (see
+ * vfs5011/hack-touchid-agent-install.sh and fpbootd-install.sh). So look next
+ * to the running binary first, then fall back to the repo-relative path. */
+static const char *ht_script(const char *repo_rel) {
+    static char bufs[4][PATH_MAX];
+    static int next;
+    char *out = bufs[next++ & 3];
+    const char *base = strrchr(repo_rel, '/');
+    base = base ? base + 1 : repo_rel;
+    snprintf(out, PATH_MAX, "%s/%s", g_exec_dir, base);
+    if (access(out, F_OK) != 0)
+        snprintf(out, PATH_MAX, "%s/%s", g_exec_dir, repo_rel);
+    return out;
+}
+
 #define VERSION_FILE_NAME "VERSION.txt"
 
 typedef struct {
@@ -1642,7 +1660,7 @@ static int mount_template_volume(char *out_path, size_t out_path_size) {
     if (!confirm_shared_store_if_needed()) return -1;
 
     char cmd[PATH_MAX * 2];
-    snprintf(cmd, sizeof(cmd), "\"%s/%s\"", g_exec_dir, MOUNT_SCRIPT_NAME);
+    snprintf(cmd, sizeof(cmd), "\"%s\"", ht_script(MOUNT_SCRIPT_NAME));
 
     FILE *fp = popen(cmd, "r");
     if (!fp) {
@@ -1679,7 +1697,7 @@ static int mount_template_volume(char *out_path, size_t out_path_size) {
 
 static void unmount_template_volume(void) {
     char cmd[PATH_MAX * 2];
-    snprintf(cmd, sizeof(cmd), "\"%s/%s\" > /dev/null 2>&1", g_exec_dir, UNMOUNT_SCRIPT_NAME);
+    snprintf(cmd, sizeof(cmd), "\"%s\" > /dev/null 2>&1", ht_script(UNMOUNT_SCRIPT_NAME));
     int status = system(cmd);
     if (status != 0) {
         vfsc_err(
@@ -1935,6 +1953,7 @@ static void print_menu(void) {
     if (is_metallica_mis_sensor(g_detected_sensor)) {
         printf("%s[P]%s Pair Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
         printf("%s[B]%s Calibrate Sensor (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
+        printf("%s[N]%s Rename a Print (Metallica MIS, experimental)\n", VFSC_BOLD, VFSC_RESET);
     }
     if (is_upek_sensor(g_detected_sensor)) {
         printf("%s[U]%s Test Capture (UPEK, experimental, no save)\n", VFSC_BOLD, VFSC_RESET);
@@ -1947,6 +1966,7 @@ static void print_menu(void) {
            VFSC_BOLD, VFSC_RESET, VFSC_DIM, VFSC_RESET);
     printf("\n");
     printf("%sUtilities%s\n", VFSC_DIM, VFSC_RESET);
+    printf("%s[I]%s Install Preference Pane (System Settings)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
@@ -2031,6 +2051,9 @@ static void print_usage(void) {
     printf("                      (experimental, tester tool, run with --debug)\n");
     printf("  --verify-test       Metallica MIS: calibrate, touch once, match against a print saved by\n");
     printf("                      --enroll-test and exit (experimental, run with --debug)\n");
+    printf("  --list-fingers      Print the enrolled prints as JSON and exit (used by the Settings pane)\n");
+    printf("  --rename-finger     With --finger-id ID --finger-name NAME: rename a print and exit\n");
+    printf("  --delete-finger     With --finger-id ID: remove a print and exit (not on Metallica MIS)\n");
     printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
     printf("  --host-serial X     Metallica MIS: use X as the host serial instead of this Mac's\n");
     printf("                      (for a sensor paired on Linux/Windows: pass the laptop's real\n");
@@ -2054,7 +2077,7 @@ static void print_version(void) {
     printf("  Build    : %s\n", (have && info.build[0]) ? info.build : "unknown");
     printf("  Branch   : %s\n", (have && info.branch[0]) ? info.branch : "unknown");
 
-    const char *seen[HACK_TOUCHID_SENSOR_COUNT];
+    const char *seen[HACK_TOUCHID_SENSOR_COUNT] = { NULL };
     size_t seen_n = 0;
     bool any_daemon = false;
     for (size_t i = 0; i < HACK_TOUCHID_SENSOR_COUNT; i++) {
@@ -2784,6 +2807,157 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
     return rc;
 }
 
+/* ---- Metallica MIS print names (aliases) ----
+ * The sensor only stores a finger number (1 to 10) with each print, so the names live in a small
+ * text file ("slot<TAB>name" per line) on the ENCRYPTED template volume. They are reconciled
+ * against the sensor's own list every time prints are added or renamed: a name whose slot is no
+ * longer on the sensor is dropped. Without the volume (Settings [4]) everything still works,
+ * prints are just identified by finger name as before. */
+#define MMIS_ALIAS_FILE    "metallica_aliases.txt"
+#define MMIS_ALIAS_LEN     32
+#define MMIS_ALIAS_MAX     16
+#define MMIS_SLOTS         10
+typedef struct { int slot; char name[MMIS_ALIAS_LEN]; } mmis_alias_t;
+static mmis_alias_t g_mmis_aliases[MMIS_ALIAS_MAX];
+static int g_mmis_alias_count = 0;
+static bool g_mmis_alias_loaded = false;
+
+static const char *mmis_alias_find(int slot) {
+    for (int i = 0; i < g_mmis_alias_count; i++)
+        if (g_mmis_aliases[i].slot == slot) return g_mmis_aliases[i].name;
+    return NULL;
+}
+
+static void mmis_alias_set(int slot, const char *name) {
+    for (int i = 0; i < g_mmis_alias_count; i++) {
+        if (g_mmis_aliases[i].slot == slot) {
+            snprintf(g_mmis_aliases[i].name, MMIS_ALIAS_LEN, "%s", name);
+            return;
+        }
+    }
+    if (g_mmis_alias_count >= MMIS_ALIAS_MAX) return;
+    g_mmis_aliases[g_mmis_alias_count].slot = slot;
+    snprintf(g_mmis_aliases[g_mmis_alias_count].name, MMIS_ALIAS_LEN, "%s", name);
+    g_mmis_alias_count++;
+}
+
+/* Keeps only the names whose slot is in `slots` (NULL/0 keeps nothing). */
+static void mmis_alias_prune(const uint16_t *slots, int n) {
+    int out = 0;
+    for (int i = 0; i < g_mmis_alias_count; i++) {
+        bool keep = false;
+        for (int j = 0; j < n; j++) if (slots[j] == g_mmis_aliases[i].slot) { keep = true; break; }
+        if (keep) g_mmis_aliases[out++] = g_mmis_aliases[i];
+    }
+    g_mmis_alias_count = out;
+}
+
+/* Trims, drops control characters and cuts to the maximum length. Returns the new length. */
+static size_t mmis_alias_clean(char *s) {
+    size_t w = 0;
+    for (size_t r = 0; s[r]; r++) {
+        unsigned char c = (unsigned char)s[r];
+        if (c < 0x20 || c == 0x7f) continue;
+        if (w == 0 && c == ' ') continue;
+        if (w < MMIS_ALIAS_LEN - 1) s[w++] = (char)c;
+    }
+    while (w > 0 && s[w - 1] == ' ') w--;
+    s[w] = '\0';
+    return w;
+}
+
+/* A name already used by one of the prints in `slots`, other than `except_slot`. */
+static bool mmis_alias_taken(const char *name, const uint16_t *slots, int n, int except_slot) {
+    for (int i = 0; i < n; i++) {
+        if (slots[i] == except_slot) continue;
+        const char *a = mmis_alias_find(slots[i]);
+        if (a && strcasecmp(a, name) == 0) return true;
+    }
+    return false;
+}
+
+static void mmis_alias_read(const char *dir) {
+    g_mmis_alias_count = 0;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, MMIS_ALIAS_FILE);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        int slot = atoi(line);
+        char name[MMIS_ALIAS_LEN];
+        snprintf(name, sizeof(name), "%s", tab + 1);
+        name[strcspn(name, "\r\n")] = '\0';
+        if (slot >= 1 && slot <= MMIS_SLOTS && mmis_alias_clean(name) > 0) mmis_alias_set(slot, name);
+    }
+    fclose(f);
+}
+
+static bool mmis_alias_write(const char *dir) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, MMIS_ALIAS_FILE);
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    for (int i = 0; i < g_mmis_alias_count; i++)
+        fprintf(f, "%d\t%s\n", g_mmis_aliases[i].slot, g_mmis_aliases[i].name);
+    bool ok = (fclose(f) == 0);
+    (void)chmod(path, 0600);
+    return ok;
+}
+
+/* Makes sure the names are in memory: mounts the volume once, reads, unmounts. False when the
+ * volume is not set up or could not be mounted (names are then simply not used). */
+static bool mmis_alias_ensure_loaded(void) {
+    if (g_mmis_alias_loaded) return true;
+    if (!is_volume_configured()) return false;
+    char mp[PATH_MAX];
+    if (mount_template_volume(mp, sizeof(mp)) != 0) return false;
+    mmis_alias_read(mp);
+    unmount_template_volume();
+    g_mmis_alias_loaded = true;
+    return true;
+}
+
+static bool mmis_alias_save(void) {
+    char mp[PATH_MAX];
+    if (mount_template_volume(mp, sizeof(mp)) != 0) return false;
+    bool ok = mmis_alias_write(mp);
+    unmount_template_volume();
+    return ok;
+}
+
+/* What to call a stored print: its name, else the finger name it was enrolled as. */
+static void mmis_print_label(int slot, char *out, size_t out_size) {
+    const char *a = g_mmis_alias_loaded ? mmis_alias_find(slot) : NULL;
+    const char *f = a ? NULL : metallica_mis_finger_name((uint16_t)slot);
+    if (a) snprintf(out, out_size, "%s", a);
+    else if (f) snprintf(out, out_size, "%s (not named)", f);
+    else snprintf(out, out_size, "Print in slot %d (not named)", slot);
+}
+
+/* Asks for a name until it is non-empty-or-defaulted and unique among `slots`.
+ * `except_slot` is the print being renamed (0 when adding). Returns false on end of input. */
+static bool mmis_alias_ask(const uint16_t *slots, int n, int except_slot, int default_slot,
+                           const char *question, char *out) {
+    for (;;) {
+        printf("%s", question);
+        fflush(stdout);
+        char raw[128];
+        if (!fgets(raw, sizeof(raw), stdin)) return false;
+        raw[strcspn(raw, "\r\n")] = '\0';
+        if (mmis_alias_clean(raw) == 0) snprintf(raw, sizeof(raw), "Print %d", default_slot);
+        if (mmis_alias_taken(raw, slots, n, except_slot)) {
+            printf("Another print already has that name, pick a different one.\n");
+            continue;
+        }
+        snprintf(out, MMIS_ALIAS_LEN, "%s", raw);
+        return true;
+    }
+}
+
 /* ---- [1] Enroll for Metallica MIS sensors ---- */
 static int mmis_replace_prompt(int users) {
     printf("\nThis sensor already has %d print%s stored. Replacing deletes ALL prints on it,\n"
@@ -2793,6 +2967,93 @@ static int mmis_replace_prompt(int users) {
     char a[8];
     if (!fgets(a, sizeof(a), stdin)) return 0;
     return a[0] == 'y' || a[0] == 'Y';
+}
+
+/* State shared between the prints hook (runs inside the enroll session) and what happens after
+ * a successful enroll. */
+static bool g_mmis_alias_mode = false;
+static int g_mmis_new_slot = 0;
+static char g_mmis_new_name[MMIS_ALIAS_LEN];
+static bool g_mmis_replaced = false;
+static uint16_t g_mmis_subs_seen[64];
+static int g_mmis_subs_seen_n = 0;
+
+static int mmis_prints_prompt(const uint16_t *subs, int n) {
+    g_mmis_new_slot = 0;
+    g_mmis_new_name[0] = '\0';
+    g_mmis_replaced = false;
+    g_mmis_subs_seen_n = n > 64 ? 64 : n;
+    for (int i = 0; i < g_mmis_subs_seen_n; i++) g_mmis_subs_seen[i] = subs[i];
+
+    bool names_ok = mmis_alias_ensure_loaded();
+    if (n > 0) {
+        printf("\nPrints already on this sensor:\n");
+        for (int i = 0; i < g_mmis_subs_seen_n; i++) {
+            char label[96];
+            mmis_print_label(g_mmis_subs_seen[i], label, sizeof(label));
+            printf("  - %s\n", label);
+        }
+    }
+
+    bool replace = false;
+    if (n > 0) {
+        printf("\n[A] Add another print (keeps the ones above)\n"
+               "[R] Replace ALL prints (also deletes ones made on Windows or Linux)\n"
+               "[C] Cancel\n"
+               "Choice (Enter = A): ");
+        fflush(stdout);
+        char c[16];
+        if (!fgets(c, sizeof(c), stdin)) return MMIS_PRINTS_CANCEL;
+        if (c[0] == 'c' || c[0] == 'C') return MMIS_PRINTS_CANCEL;
+        if (c[0] == 'r' || c[0] == 'R') {
+            printf("Delete ALL prints on the sensor and start over? [y/N]: ");
+            fflush(stdout);
+            char y[8];
+            if (!fgets(y, sizeof(y), stdin) || (y[0] != 'y' && y[0] != 'Y')) return MMIS_PRINTS_CANCEL;
+            replace = true;
+        }
+    }
+
+    int slot = 1;
+    if (!replace) {
+        slot = 0;
+        for (int s = 1; s <= MMIS_SLOTS && !slot; s++) {
+            bool used = false;
+            for (int i = 0; i < g_mmis_subs_seen_n; i++) if (g_mmis_subs_seen[i] == s) { used = true; break; }
+            if (!used) slot = s;
+        }
+        if (!slot) {
+            printf("\nThe sensor has no free slot left (10 prints). Use Replace to start over.\n");
+            return MMIS_PRINTS_CANCEL;
+        }
+    }
+
+    if (names_ok) {
+        const uint16_t *kept = replace ? NULL : g_mmis_subs_seen;
+        int kept_n = replace ? 0 : g_mmis_subs_seen_n;
+        if (!mmis_alias_ask(kept, kept_n, 0, slot,
+                            "\nName for this print, for example \"Dad\" or \"Sara, left thumb\": ",
+                            g_mmis_new_name))
+            return MMIS_PRINTS_CANCEL;
+    } else {
+        printf("\nThe secure volume is not available, so this print will not get a name.\n");
+    }
+    printf("\n");
+    metallica_mis_set_enroll_subtype((uint16_t)slot);
+    g_mmis_new_slot = slot;
+    g_mmis_replaced = replace;
+    return replace ? MMIS_PRINTS_REPLACE : MMIS_PRINTS_ADD;
+}
+
+/* After a successful enroll: store the new name and drop names of prints that are gone. */
+static void mmis_alias_commit_new(void) {
+    if (g_mmis_new_slot <= 0 || g_mmis_new_name[0] == '\0') return;
+    if (!mmis_alias_ensure_loaded()) return;
+    if (g_mmis_replaced) mmis_alias_prune(NULL, 0);
+    else mmis_alias_prune(g_mmis_subs_seen, g_mmis_subs_seen_n);
+    mmis_alias_set(g_mmis_new_slot, g_mmis_new_name);
+    if (!mmis_alias_save())
+        vfsc_warn("The print is saved, but its name could not be stored on the secure volume.\n");
 }
 
 static int mmis_enroll_action(void) {
@@ -2838,7 +3099,11 @@ static void do_verify_metallica(void) {
     if (rc == 0) {
         const char *name = NULL;
         int st = metallica_mis_last_match_subtype();
-        if (st >= 0) name = metallica_mis_finger_name((uint16_t)st);
+        if (st >= 0) {
+            (void)mmis_alias_ensure_loaded();
+            name = g_mmis_alias_loaded ? mmis_alias_find(st) : NULL;
+            if (!name) name = metallica_mis_finger_name((uint16_t)st);
+        }
         if (name) vfsc_ok("\nVerified: %s.\n\n", name);
         else vfsc_ok("\nVerified.\n\n");
     } else if (rc == MMIS_VERIFY_NO_MATCH) {
@@ -2859,7 +3124,14 @@ static void do_enroll_metallica(void) {
     printf("The print is stored on the sensor itself, nothing is saved on this Mac.\n"
            "Keep your finger OFF the sensor until it asks for a touch.\n\n");
     fflush(stdout);
-    mmis_choose_finger();
+    g_mmis_alias_mode = is_volume_configured() != 0;
+    if (g_mmis_alias_mode) {
+        metallica_mis_set_prints_cb(mmis_prints_prompt);
+        g_mmis_new_slot = 0;
+    } else {
+        metallica_mis_set_prints_cb(NULL);
+        mmis_choose_finger();
+    }
     g_mmis_stderr_to_log = true;
     int rc = mmis_run_with_host_identity(mmis_enroll_action);
     if (rc != 0 && rc != MMIS_ENROLL_CANCELLED && g_metallica_mis_session_rebooted) {
@@ -2871,6 +3143,8 @@ static void do_enroll_metallica(void) {
         rc = mmis_run_with_host_identity(mmis_enroll_action);
     }
     g_mmis_stderr_to_log = false;
+    metallica_mis_set_prints_cb(NULL);
+    if (rc == 0 && g_mmis_alias_mode) mmis_alias_commit_new();
 
     if (rc == MMIS_ENROLL_CANCELLED) {
         printf("\nEnrollment cancelled. Nothing was changed.\n\n");
@@ -2882,9 +3156,317 @@ static void do_enroll_metallica(void) {
         vfsc_err("\nEnrollment didn't finish. Details are in %s\n"
                   "(or run with --debug to see everything on screen).\n\n", MMIS_ENROLL_LOG_PATH);
     } else {
-        vfsc_ok("\nDone. Your finger is enrolled on the sensor.\n\n");
+        if (g_mmis_alias_mode && g_mmis_new_name[0]) vfsc_ok("\nDone. \"%s\" is enrolled on the sensor.\n\n", g_mmis_new_name);
+        else vfsc_ok("\nDone. Your finger is enrolled on the sensor.\n\n");
     }
     mmis_press_return();
+}
+
+/* [N] Rename a print (Metallica MIS). Needs the secure volume, where the names live. */
+static uint16_t g_mmis_list_subs[64];
+static int g_mmis_list_n = 0;
+static int mmis_list_action(void) {
+    g_mmis_list_n = 0;
+    return metallica_mis_list_prints(g_mmis_list_subs, 64, &g_mmis_list_n);
+}
+
+static void do_rename_metallica(void) {
+    if (!is_volume_configured()) {
+        vfsc_warn("Names are stored on the encrypted volume, which is not set up yet.\n"
+                  "Set it up from Settings, then try again.\n\n");
+        mmis_press_return();
+        return;
+    }
+    printf("Reading the prints stored on the sensor...\n");
+    fflush(stdout);
+    g_mmis_stderr_to_log = true;
+    int rc = mmis_run_with_host_identity(mmis_list_action);
+    g_mmis_stderr_to_log = false;
+    if (rc != 0) {
+        vfsc_err("\nCould not read the sensor's prints. Details are in %s\n\n", MMIS_ENROLL_LOG_PATH);
+        mmis_press_return();
+        return;
+    }
+    if (g_mmis_list_n == 0) {
+        printf("\nThe sensor has no prints yet. Use [1] Enroll first.\n\n");
+        mmis_press_return();
+        return;
+    }
+    if (!mmis_alias_ensure_loaded()) {
+        vfsc_err("\nCould not open the encrypted volume.\n\n");
+        mmis_press_return();
+        return;
+    }
+    printf("\nPrints on this sensor:\n");
+    for (int i = 0; i < g_mmis_list_n; i++) {
+        char label[96];
+        mmis_print_label(g_mmis_list_subs[i], label, sizeof(label));
+        printf("  [%d] %s\n", i + 1, label);
+    }
+    printf("\nNumber to rename (Enter = cancel): ");
+    fflush(stdout);
+    char raw[16];
+    if (!fgets(raw, sizeof(raw), stdin) || raw[0] == '\n') {
+        printf("\nNothing changed.\n\n");
+        mmis_press_return();
+        return;
+    }
+    int pick = atoi(raw);
+    if (pick < 1 || pick > g_mmis_list_n) {
+        printf("\nNot a number from the list. Nothing changed.\n\n");
+        mmis_press_return();
+        return;
+    }
+    int slot = g_mmis_list_subs[pick - 1];
+    char name[MMIS_ALIAS_LEN];
+    if (!mmis_alias_ask(g_mmis_list_subs, g_mmis_list_n, slot, slot, "New name: ", name)) {
+        printf("\nNothing changed.\n\n");
+        mmis_press_return();
+        return;
+    }
+    mmis_alias_prune(g_mmis_list_subs, g_mmis_list_n);
+    mmis_alias_set(slot, name);
+    if (mmis_alias_save()) vfsc_ok("\nRenamed to \"%s\".\n\n", name);
+    else vfsc_err("\nCould not store the name on the encrypted volume.\n\n");
+    mmis_press_return();
+}
+
+/* ---- Fingerprint management for the System Settings pane ----
+ * Headless commands the HackTouchID preference pane runs (as root, through the macOS admin
+ * password dialog) because the prints and their names live on the encrypted volume or on the
+ * sensor, which only root can open:
+ *   --list-fingers
+ *   --rename-finger --finger-id ID --finger-name "New name"
+ *   --delete-finger --finger-id ID
+ * The result is JSON between the lines HTID-JSON-BEGIN and HTID-JSON-END, so anything else the
+ * volume scripts or the sensor code print around it is ignored by the pane. The id is opaque to
+ * the pane: the finger label for sensors that store templates on the volume, the slot number
+ * (1 to 10) for Metallica MIS. */
+#define HT_FINGERS_NONE   0
+#define HT_FINGERS_LIST   1
+#define HT_FINGERS_RENAME 2
+#define HT_FINGERS_DELETE 3
+static int g_fingers_cmd = HT_FINGERS_NONE;
+static const char *g_finger_id_arg = NULL;
+static const char *g_finger_name_arg = NULL;
+
+typedef struct { char id[48]; char name[96]; bool named; } ht_finger_row_t;
+#define HT_FINGER_ROWS 64
+static ht_finger_row_t g_ht_rows[HT_FINGER_ROWS];
+static int g_ht_rows_n = 0;
+static int g_ht_capacity = 0;
+static bool g_ht_is_metallica = false;
+static char g_ht_err[320];
+
+static void ht_json_str(const char *s) {
+    putchar('"');
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c < 0x20) printf("\\u%04x", c);
+        else putchar(c);
+    }
+    putchar('"');
+}
+
+static int ht_json_fail(const char *msg) {
+    printf("\nHTID-JSON-BEGIN\n{\"ok\":false,\"error\":");
+    ht_json_str(msg);
+    printf("}\nHTID-JSON-END\n");
+    fflush(stdout);
+    return 1;
+}
+
+static int ht_json_done(const char *msg) {
+    printf("\nHTID-JSON-BEGIN\n{\"ok\":true,\"message\":");
+    ht_json_str(msg);
+    printf("}\nHTID-JSON-END\n");
+    fflush(stdout);
+    return 0;
+}
+
+/* Rename result: the pane updates its list from this instead of asking for the password again.
+ * For label-based sensors the new id IS the new label, so the pane needs the sanitised value. */
+static int ht_json_renamed(const char *id, const char *name) {
+    printf("\nHTID-JSON-BEGIN\n{\"ok\":true,\"message\":\"Renamed.\",\"id\":");
+    ht_json_str(id);
+    printf(",\"name\":");
+    ht_json_str(name);
+    printf("}\nHTID-JSON-END\n");
+    fflush(stdout);
+    return 0;
+}
+
+static int ht_row_cmp(const void *a, const void *b) {
+    return strcasecmp(((const ht_finger_row_t *)a)->name, ((const ht_finger_row_t *)b)->name);
+}
+
+/* Metallica MIS: the sensor knows the slots, the encrypted volume knows the names. */
+static int ht_collect_metallica(void) {
+    g_mmis_stderr_to_log = true;
+    int rc = mmis_run_with_host_identity(mmis_list_action);
+    g_mmis_stderr_to_log = false;
+    if (rc != 0) {
+        snprintf(g_ht_err, sizeof(g_ht_err),
+                 "Could not read the prints from the sensor. If this Mac never opened the sensor, "
+                 "run the client once so it can ask for the host identity. Details: %s",
+                 MMIS_ENROLL_LOG_PATH);
+        return -1;
+    }
+    bool names_ok = mmis_alias_ensure_loaded();
+    g_ht_rows_n = 0;
+    g_ht_capacity = MMIS_SLOTS;
+    for (int i = 0; i < g_mmis_list_n && g_ht_rows_n < HT_FINGER_ROWS; i++) {
+        int slot = g_mmis_list_subs[i];
+        ht_finger_row_t *r = &g_ht_rows[g_ht_rows_n++];
+        snprintf(r->id, sizeof(r->id), "%d", slot);
+        const char *alias = names_ok ? mmis_alias_find(slot) : NULL;
+        const char *fname = metallica_mis_finger_name((uint16_t)slot);
+        r->named = alias != NULL;
+        if (alias) snprintf(r->name, sizeof(r->name), "%s", alias);
+        else if (fname) snprintf(r->name, sizeof(r->name), "%s", fname);
+        else snprintf(r->name, sizeof(r->name), "Print in slot %d", slot);
+    }
+    return 0;
+}
+
+/* Sensors that keep templates on the volume: one fingers/<label>.dat per finger. */
+static int ht_collect_files(void) {
+    if (!is_volume_configured()) {
+        snprintf(g_ht_err, sizeof(g_ht_err),
+                 "The encrypted fingerprint volume is not set up yet. Enroll a finger from the client first.");
+        return -1;
+    }
+    char mp[PATH_MAX];
+    if (mount_template_volume(mp, sizeof(mp)) != 0) {
+        snprintf(g_ht_err, sizeof(g_ht_err), "Could not open the encrypted fingerprint volume.");
+        return -1;
+    }
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", mp, FINGERS_DIRNAME);
+    char labels[MAX_ENROLLED_FINGERS][MAX_FINGER_LABEL + 1];
+    int n = list_enrolled_fingers(dir, labels, MAX_ENROLLED_FINGERS);
+    unmount_template_volume();
+    g_ht_rows_n = 0;
+    g_ht_capacity = MAX_ENROLLED_FINGERS;
+    for (int i = 0; i < n && g_ht_rows_n < HT_FINGER_ROWS; i++) {
+        ht_finger_row_t *r = &g_ht_rows[g_ht_rows_n++];
+        snprintf(r->id, sizeof(r->id), "%s", labels[i]);
+        snprintf(r->name, sizeof(r->name), "%s", labels[i]);
+        r->named = true;
+    }
+    qsort(g_ht_rows, (size_t)g_ht_rows_n, sizeof(g_ht_rows[0]), ht_row_cmp);
+    return 0;
+}
+
+static int ht_collect(void) {
+    g_ht_is_metallica = g_detected_sensor && is_metallica_mis_sensor(g_detected_sensor);
+    return g_ht_is_metallica ? ht_collect_metallica() : ht_collect_files();
+}
+
+/* An id coming from the pane must be a plain file label: no path parts. */
+static bool ht_label_is_plain(const char *id) {
+    if (!id || id[0] == '\0' || id[0] == '.') return false;
+    if (strlen(id) > MAX_FINGER_LABEL) return false;
+    return strchr(id, '/') == NULL && strchr(id, '\\') == NULL;
+}
+
+static int ht_list_fingers(void) {
+    if (ht_collect() != 0) return ht_json_fail(g_ht_err);
+    printf("\nHTID-JSON-BEGIN\n{\"ok\":true,\"sensor\":");
+    ht_json_str(g_ht_is_metallica ? "metallica" : "files");
+    printf(",\"sensor_name\":");
+    ht_json_str(g_detected_sensor ? g_detected_sensor->display_name : "");
+    printf(",\"capacity\":%d,\"can_delete\":%s,\"fingers\":[", g_ht_capacity,
+           g_ht_is_metallica ? "false" : "true");
+    for (int i = 0; i < g_ht_rows_n; i++) {
+        printf("%s{\"id\":", i ? "," : "");
+        ht_json_str(g_ht_rows[i].id);
+        printf(",\"name\":");
+        ht_json_str(g_ht_rows[i].name);
+        printf(",\"named\":%s}", g_ht_rows[i].named ? "true" : "false");
+    }
+    printf("]}\nHTID-JSON-END\n");
+    fflush(stdout);
+    return 0;
+}
+
+static int ht_rename_metallica(const char *id, const char *raw_name) {
+    if (!g_mmis_alias_loaded) {
+        return ht_json_fail("Names are stored on the encrypted volume, which is not available. "
+                            "Set it up from the client's Settings first.");
+    }
+    char *end = NULL;
+    long slot = strtol(id, &end, 10);
+    bool present = false;
+    for (int i = 0; i < g_mmis_list_n; i++) if (g_mmis_list_subs[i] == slot) present = true;
+    if (!end || *end != '\0' || !present) return ht_json_fail("That print is no longer on the sensor.");
+
+    char name[MMIS_ALIAS_LEN * 4];
+    snprintf(name, sizeof(name), "%s", raw_name);
+    if (mmis_alias_clean(name) == 0) return ht_json_fail("The name cannot be empty.");
+    if (mmis_alias_taken(name, g_mmis_list_subs, g_mmis_list_n, (int)slot))
+        return ht_json_fail("Another print already has that name.");
+    mmis_alias_prune(g_mmis_list_subs, g_mmis_list_n);
+    mmis_alias_set((int)slot, name);
+    if (!mmis_alias_save()) return ht_json_fail("Could not store the name on the encrypted volume.");
+    char sid[16];
+    snprintf(sid, sizeof(sid), "%ld", slot);
+    return ht_json_renamed(sid, name);
+}
+
+static int ht_rename_files(const char *id, const char *raw_name) {
+    if (!ht_label_is_plain(id)) return ht_json_fail("Invalid print id.");
+    char newlabel[MAX_FINGER_LABEL + 1];
+    if (sanitize_finger_label(raw_name, newlabel, sizeof(newlabel)) != 0)
+        return ht_json_fail("The name cannot be empty.");
+    if (!ht_label_is_plain(newlabel)) return ht_json_fail("That name is not allowed (it cannot start with a dot).");
+    if (strcmp(id, newlabel) == 0) return ht_json_renamed(id, id);
+
+    char mp[PATH_MAX];
+    if (mount_template_volume(mp, sizeof(mp)) != 0) return ht_json_fail("Could not open the encrypted fingerprint volume.");
+    char from[PATH_MAX], to[PATH_MAX];
+    snprintf(from, sizeof(from), "%s/%s/%s.dat", mp, FINGERS_DIRNAME, id);
+    snprintf(to, sizeof(to), "%s/%s/%s.dat", mp, FINGERS_DIRNAME, newlabel);
+    int rc = 0;
+    const char *err = NULL;
+    if (access(from, F_OK) != 0) err = "That print no longer exists.";
+    else if (strcasecmp(id, newlabel) != 0 && access(to, F_OK) == 0) err = "Another print already has that name.";
+    else if (rename(from, to) != 0) err = "Could not rename the print file.";
+    unmount_template_volume();
+    if (err) rc = ht_json_fail(err);
+    else rc = ht_json_renamed(newlabel, newlabel);
+    return rc;
+}
+
+static int ht_delete_files(const char *id) {
+    if (!ht_label_is_plain(id)) return ht_json_fail("Invalid print id.");
+    char mp[PATH_MAX];
+    if (mount_template_volume(mp, sizeof(mp)) != 0) return ht_json_fail("Could not open the encrypted fingerprint volume.");
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s/%s.dat", mp, FINGERS_DIRNAME, id);
+    bool ok = remove(path) == 0;
+    unmount_template_volume();
+    return ok ? ht_json_done("Removed.") : ht_json_fail("Could not remove that print.");
+}
+
+static int run_fingers_mode(void) {
+    if (g_fingers_cmd == HT_FINGERS_LIST) return ht_list_fingers();
+
+    if (!g_finger_id_arg) return ht_json_fail("Missing --finger-id.");
+    if (g_fingers_cmd == HT_FINGERS_RENAME && !g_finger_name_arg) return ht_json_fail("Missing --finger-name.");
+
+    g_ht_is_metallica = g_detected_sensor && is_metallica_mis_sensor(g_detected_sensor);
+    if (g_ht_is_metallica) {
+        if (g_fingers_cmd == HT_FINGERS_DELETE)
+            return ht_json_fail("Removing a single print is not supported on this sensor yet. "
+                                "Use Enroll, then Replace, in the client.");
+        /* Reads the sensor's slots and loads the names: the rename is checked against them. */
+        if (ht_collect_metallica() != 0) return ht_json_fail(g_ht_err);
+        return ht_rename_metallica(g_finger_id_arg, g_finger_name_arg);
+    }
+    return g_fingers_cmd == HT_FINGERS_RENAME ? ht_rename_files(g_finger_id_arg, g_finger_name_arg)
+                                              : ht_delete_files(g_finger_id_arg);
 }
 
 /* run_enroll_test_mode() -- headless "--enroll-test" for Metallica MIS
@@ -3620,8 +4202,8 @@ static void do_settings_set_password(void) {
  * at a blank line. Returns 0 on success. Shared between the Settings
  * entry point and Deploy's own first-run auto-setup. */
 static int do_run_volume_setup(void) {
-    char cmd[PATH_MAX + 32];
-    snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, SETUP_VOLUME_SCRIPT_NAME);
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "sh \"%s\" 2>&1", ht_script(SETUP_VOLUME_SCRIPT_NAME));
 
     printf("%s", VFSC_DIM);
     int status = system(cmd);
@@ -3927,8 +4509,8 @@ static bool check_fpov_version(void) {
  * linked -- this never deletes anything itself, only points out what
  * a human might want to clean up with diskutil apfs deleteVolume. */
 static void do_settings_link_volume(void) {
-    char cmd[PATH_MAX + 32];
-    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --list 2>&1", g_exec_dir, MOUNT_SCRIPT_NAME);
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --list 2>&1", ht_script(MOUNT_SCRIPT_NAME));
 
     FILE *fp = popen(cmd, "r");
     if (!fp) {
@@ -3998,8 +4580,8 @@ static void do_settings_link_volume(void) {
     }
     printf("\n");
 
-    snprintf(cmd, sizeof(cmd), "\"%s/%s\" --link \"%s\"",
-             g_exec_dir, MOUNT_SCRIPT_NAME, diskids[idx - 1]);
+    snprintf(cmd, sizeof(cmd), "\"%s\" --link \"%s\"",
+             ht_script(MOUNT_SCRIPT_NAME), diskids[idx - 1]);
     printf("%s", VFSC_DIM);
     status = system(cmd);
     printf("%s", VFSC_RESET);
@@ -4023,8 +4605,8 @@ static void do_settings_link_volume(void) {
  * yet — the script itself checks the binary exists and reports a
  * clear error rather than doing anything destructive. */
 static int do_run_accessibility_grant(void) {
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd), "sh \"%s/%s\" 2>&1", g_exec_dir, GRANT_ACCESSIBILITY_SCRIPT_NAME);
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "sh \"%s\" 2>&1", ht_script(GRANT_ACCESSIBILITY_SCRIPT_NAME));
 
     printf("%s", VFSC_DIM);
     int status = system(cmd);
@@ -4510,6 +5092,65 @@ static void do_settings_menu(void) {
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * System Settings preference pane install
+ * ------------------------------------------------------------------ *
+ * The pane is NOT built or installed automatically. prep_and_build.sh only
+ * compiles it into shared/pane/build/HackTouchID.prefPane (and that
+ * pre-compiled bundle is what ships on the branches). This copies that
+ * bundle into the console user's ~/Library/PreferencePanes. Used by the
+ * [I] menu option and by the question at the end of Deploy [3]. */
+#define PANE_BUNDLE_NAME "HackTouchID.prefPane"
+
+static bool pane_bundle_path(char *out, size_t out_size) {
+    snprintf(out, out_size, "%s/shared/pane/build/%s", g_exec_dir, PANE_BUNDLE_NAME);
+    struct stat st;
+    return stat(out, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool do_install_pane(void) {
+    char src[PATH_MAX];
+    if (!pane_bundle_path(src, sizeof(src))) {
+        vfsc_err("Pre-compiled preference pane not found:\n  %s/shared/pane/build/%s\n"
+                 "Update the client, or run ./prep_and_build.sh to build it.\n\n",
+                 g_exec_dir, PANE_BUNDLE_NAME);
+        return false;
+    }
+
+    /* The client runs as root via sudo: install for the real console user. */
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && *sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw) pw = getpwuid(getuid());
+    if (!pw || !pw->pw_dir || !*pw->pw_dir) {
+        vfsc_err("Could not work out which user to install the preference pane for.\n\n");
+        return false;
+    }
+
+    char dir[PATH_MAX], dest[PATH_MAX + 64];
+    snprintf(dir, sizeof(dir), "%s/Library/PreferencePanes", pw->pw_dir);
+    snprintf(dest, sizeof(dest), "%s/%s", dir, PANE_BUNDLE_NAME);
+
+    printf("%sInstalling the preference pane for %s...%s\n", VFSC_CYAN, pw->pw_name, VFSC_RESET);
+
+    char cmd[PATH_MAX * 6 + 512];
+    int uid = (int)pw->pw_uid, gid = (int)pw->pw_gid;
+    snprintf(cmd, sizeof(cmd),
+             "mkdir -p \"%s\" && rm -rf \"%s\" && ditto \"%s\" \"%s\" && "
+             "xattr -cr \"%s\" 2>/dev/null; "
+             "chown -R %d:%d \"%s\" && chown %d:%d \"%s\"",
+             dir, dest, src, dest, dest, uid, gid, dest, uid, gid, dir);
+    if (system(cmd) != 0) {
+        vfsc_err("Could not copy the preference pane to %s\n\n", dir);
+        return false;
+    }
+
+    vfsc_ok("Preference pane installed: %s\n", dest);
+    printf("Open System Settings and look for \"Hackintosh TouchID\" at the bottom of the sidebar.\n"
+           "If System Settings is already open, quit it (Cmd+Q) and open it again.\n\n");
+    return true;
+}
+
 /* Deploy installs/reinstalls hack-touchid-agent-install.sh, which handles
  * everything: rebuilding the daemon from source, copying it into
  * place, tearing down any prior registration, the scoped NOPASSWD
@@ -4630,6 +5271,27 @@ static bool do_deploy(void) {
             prompt_and_store_password(mount_path, /*only_if_missing=*/1);
         }
         unmount_template_volume();
+    }
+
+    /* Optional: offer the System Settings preference pane. Only when a person
+     * is at a terminal (not for the menu bar updater / headless runs) and the
+     * pre-compiled bundle is present. */
+    {
+        char pane_src[PATH_MAX];
+        if (getenv("HTID_NO_PAUSE") == NULL && isatty(STDIN_FILENO) &&
+            pane_bundle_path(pane_src, sizeof(pane_src))) {
+            printf("Hackintosh TouchID has a custom Preference pane for ease of access directly\n"
+                   "built into System Settings. Would you like to install this package? [Y / N] ");
+            fflush(stdout);
+            char pane_answer[16] = {0};
+            if (fgets(pane_answer, sizeof(pane_answer), stdin) &&
+                (pane_answer[0] == 'y' || pane_answer[0] == 'Y')) {
+                printf("\n");
+                do_install_pane();
+            } else {
+                printf("Skipped. You can install it later with [I] in the main menu.\n\n");
+            }
+        }
     }
 
     printf("Lock your screen and swipe an enrolled finger to test it.\n\n");
@@ -6601,6 +7263,26 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
+        if (strcmp(argv[i], "--list-fingers") == 0) {
+            g_fingers_cmd = HT_FINGERS_LIST;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--rename-finger") == 0) {
+            g_fingers_cmd = HT_FINGERS_RENAME;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--delete-finger") == 0) {
+            g_fingers_cmd = HT_FINGERS_DELETE;
+            g_verbose_boot = false;
+        }
+        {
+            int fr = match_value_flag(argc, argv, &i, "--finger-id", &g_finger_id_arg);
+            if (fr == 0) fr = match_value_flag(argc, argv, &i, "--finger-name", &g_finger_name_arg);
+            if (fr < 0) {
+                vfsc_err("--finger-id and --finger-name need a value.\n");
+                return 1;
+            }
+        }
         {
             int r = match_value_flag(argc, argv, &i, "--host-product", &g_metallica_mis_host_product_override);
             if (r < 0) {
@@ -6630,7 +7312,7 @@ int main(int argc, char **argv) {
      * to however many flags actually apply. */
     if (geteuid() != 0) {
         vfsc_err("Root privileges are required to access the USB device — requesting via sudo...\n");
-        char *sudo_argv[24];
+        char *sudo_argv[32];
         int ai = 0;
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
@@ -6647,6 +7329,11 @@ int main(int argc, char **argv) {
         if (g_enroll_test_mode) sudo_argv[ai++] = "--enroll-test";
         if (g_verify_test_mode) sudo_argv[ai++] = "--verify-test";
         if (g_fpbootd_daemon_mode) sudo_argv[ai++] = "--fpbootd-daemon";
+        if (g_fingers_cmd == HT_FINGERS_LIST) sudo_argv[ai++] = "--list-fingers";
+        if (g_fingers_cmd == HT_FINGERS_RENAME) sudo_argv[ai++] = "--rename-finger";
+        if (g_fingers_cmd == HT_FINGERS_DELETE) sudo_argv[ai++] = "--delete-finger";
+        if (g_finger_id_arg) { sudo_argv[ai++] = "--finger-id"; sudo_argv[ai++] = (char *)g_finger_id_arg; }
+        if (g_finger_name_arg) { sudo_argv[ai++] = "--finger-name"; sudo_argv[ai++] = (char *)g_finger_name_arg; }
         if (g_metallica_mis_host_product_override) {
             sudo_argv[ai++] = "--host-product";
             sudo_argv[ai++] = (char *)g_metallica_mis_host_product_override;
@@ -6762,6 +7449,14 @@ int main(int argc, char **argv) {
         g_detected_sensor = detect_supported_sensor();
         run_verify_test_mode();
         return 0;
+    }
+
+    /* --list-fingers / --rename-finger / --delete-finger: headless fingerprint management for
+     * the System Settings pane. JSON between HTID-JSON-BEGIN / HTID-JSON-END; exit code 0 only
+     * when it worked. */
+    if (g_fingers_cmd != HT_FINGERS_NONE) {
+        g_detected_sensor = detect_supported_sensor();
+        return run_fingers_mode();
     }
 
     /* --deploy-agent short-circuits straight to run_deploy_agent_mode()
@@ -6895,6 +7590,16 @@ int main(int argc, char **argv) {
                     ran_action = false;
                 }
                 break;
+            case 'N': case 'n':
+                if (is_metallica_mis_sensor(g_detected_sensor)) {
+                    sensor_yield_begin();
+                    do_rename_metallica();
+                    sensor_yield_end();
+                } else {
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    ran_action = false;
+                }
+                break;
             case 'U': case 'u':
                 if (is_upek_sensor(g_detected_sensor)) {
                     do_test_upek_capture();
@@ -6925,6 +7630,12 @@ int main(int argc, char **argv) {
                 break;
             case 'F': case 'f':
                 do_fpbootd_stub();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'I': case 'i':
+                do_install_pane();
                 printf("Press Return to go back to the main menu...");
                 fflush(stdout);
                 getchar();

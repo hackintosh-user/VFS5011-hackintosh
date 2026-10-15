@@ -3,9 +3,9 @@
 # prep_and_build.sh
 #
 # Fixes the recurring "some .sh files aren't executable" problem
-# (build.sh only ever chmod'd itself + build_client.sh + build_daemon.sh,
+# (scripts/build.sh only ever chmod'd itself + build_client.sh + build_daemon.sh,
 # never the runtime helper scripts like hack-touchid-volume-mount.sh) by
-# chmod +x'ing EVERY .sh file in this folder, and rebuilds both
+# chmod +x'ing EVERY .sh file in the repo, and rebuilds both
 # binaries from source.
 #
 # NOTE (v1.1): this used to also deploy the daemon itself (rebuild,
@@ -28,7 +28,7 @@
 #
 # Sensor-driven (Oct 4): you tell it which sensor you have, and it only
 # installs and builds what that sensor needs. Dependencies come from the
-# sensor table in supported_sensors.h, so nothing here goes stale.
+# sensor table in shared/sen/supported_sensors.h, so nothing here goes stale.
 #
 # Usage:
 #   ./prep_and_build.sh                      detect the plugged-in sensor
@@ -39,18 +39,24 @@
 #   ./prep_and_build.sh --list               show families and what each needs
 #   ./prep_and_build.sh --yes                install missing deps without asking
 #   ./prep_and_build.sh --no-install         never touch Homebrew, just report
+#   ./prep_and_build.sh --no-pane            skip building the preference pane
 #
-# Run this from inside the project folder (same folder as build.sh).
+# The System Settings preference pane is compiled into shared/pane/build/
+# (needs swiftc). It is only BUILT here, never installed: the client installs
+# it ([I] in the menu, or the question at the end of Deploy [3]).
+#
+# Run this from the repo root. The build scripts live in scripts/.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-. ./ht_env.sh
+. ./scripts/ht_env.sh
 
 SENSORS=""
 ASSUME_YES=0
 NO_INSTALL=0
+BUILD_PANE=1
 LIST_ONLY=0
 FALLBACK_ALL=0
 while [ $# -gt 0 ]; do
@@ -58,15 +64,19 @@ while [ $# -gt 0 ]; do
         --sensor)     SENSORS="$2"; shift 2 ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
         --no-install) NO_INSTALL=1; shift ;;
+        --no-pane)    BUILD_PANE=0; shift ;;
         --list)       LIST_ONLY=1; shift ;;
-        -h|--help)    sed -n '2,45p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,51p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
 done
 
-echo "== Fixing permissions on every .sh file in $SCRIPT_DIR =="
+echo "== Fixing permissions on every .sh file in the repo =="
 chmod +x ./*.sh
-ls -la ./*.sh
+for d in scripts vfs5011 vol shared/access shared/pane/source; do
+    [ -d "$d" ] && chmod +x "$d"/*.sh
+done
+ls -la ./*.sh scripts/*.sh
 
 echo
 echo "== Reclaiming ownership of build artifacts (in case a previous sudo build left them root-owned) =="
@@ -168,12 +178,27 @@ fi
 
 echo
 echo "== Building client + daemon from source =="
-./build.sh --sensor "$FAMILIES"
+./scripts/build.sh --sensor "$FAMILIES"
+
+# Preference pane: build only, never install. A failure here must not fail
+# the whole build (the pane is optional), so it is reported and skipped.
+if [ "$BUILD_PANE" = "1" ] && [ "$(uname -s)" = "Darwin" ] && [ -f shared/pane/source/build_prefpane.sh ]; then
+    echo
+    echo "== Building the System Settings preference pane (not installed) =="
+    if ! command -v swiftc >/dev/null 2>&1; then
+        echo "  swiftc not found (install the Xcode Command Line Tools). Skipping the pane."
+    elif ./shared/pane/source/build_prefpane.sh; then
+        echo "  Pane built: shared/pane/build/HackTouchID.prefPane"
+    else
+        echo "  warning: the preference pane failed to build. Skipping it, the rest is fine."
+    fi
+fi
 
 echo
 echo "Done. Binaries are built. Nothing has been deployed/installed yet."
 echo "Run the client and use Deploy [3] from the menu when you're ready:"
 echo "  sudo ./hack-touchid"
+echo "The preference pane (if built) is installed from the client too: [I] in the menu."
 echo
 echo "If you're setting up Fpbootd (the pre-login daemon), that's a separate"
 echo "opt-in install, same reasoning as above -- run it yourself when ready:"

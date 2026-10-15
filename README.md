@@ -166,6 +166,31 @@ Only the dependencies for that sensor are installed and built. Add `--yes` to sk
 
 This produces the needed binaries for running the client and each sensor's Daemon + other needed files. 
 
+`prep_and_build.sh` also compiles the System Settings preference pane into `shared/pane/build/` (add `--no-pane` to skip it). It is never installed automatically: use `[I] Install Preference Pane` in the client, or answer `Y` to the question at the end of `[3] Deploy`. The client installs the pre-compiled bundle from `shared/pane/build/`.
+
+## Repository layout
+
+```
+prep_and_build.sh        start here: installs deps, builds everything
+hack_touchid_client.c    the client (menu + headless commands), binary: ./hack-touchid
+fpbootd-install.sh       opt-in pre-login daemon install
+scripts/                 build scripts (build.sh, build_client.sh, build_daemon.sh,
+                         build_metallica_mis.sh) and ht_env.sh, the shared build helpers
+shared/sen/              supported_sensors.h, fp_types.h, ht_sensor_tool.c, the matcher
+shared/access/           accessibility grant script, ax_probe.c
+shared/pane/source/      preference pane source (Swift, Info.plist, build_prefpane.sh)
+shared/pane/build/       pre-compiled HackTouchID.prefPane that ships with the repo
+vfs5011/                 VFS5011 daemon, protocol, menu bar IPC, agent installer
+vol/                     encrypted template volume scripts (setup, mount, unmount, store password)
+metallica/               Metallica MIS code, sensor stubs, and tests/ (mmis_*_test.c)
+upek/                    UPEK code
+NBIS/                    fingerprint matching library
+tests/                   matcher unit tests
+Hackintosh-TouchID-Menubar/   menu bar app
+```
+
+The binaries (`hack-touchid`, `vfs5011_daemon`, `metallica_mis_daemon`) are still written to the repo root.
+
 
 ## Usage
 
