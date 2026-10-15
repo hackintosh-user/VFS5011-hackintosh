@@ -215,6 +215,39 @@ static void handle_restart_request(void) {
            "see hack-touchid-menubar-ipc.c handle_restart_request comment)\n");
 }
 
+/* --- Match threshold (set from the preference pane) --- */
+
+static const int k_threshold_values[] = { 20, 25, 30, 35, 40 };
+#define K_THRESHOLD_COUNT ((int)(sizeof(k_threshold_values) / sizeof(k_threshold_values[0])))
+
+/* Same one-integer file format load_match_threshold() parses. Written to a
+ * temp file and renamed so a swipe never reads a half-written value. */
+static void set_match_threshold(int value) {
+    const char *dir = "/usr/local/libexec/hack-touchid";
+    mkdir("/usr/local/libexec", 0755);
+    mkdir(dir, 0755); /* EEXIST is fine */
+
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", VFS5011_MATCH_THRESHOLD_CONF_PATH);
+    FILE *f = fopen(tmp_path, "w");
+    if (f == NULL) {
+        fprintf(stderr, "vfs5011: failed to write match threshold: %s\n", strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", value);
+    fclose(f);
+    chmod(tmp_path, 0644); /* the preference pane reads it as a normal user */
+    if (rename(tmp_path, VFS5011_MATCH_THRESHOLD_CONF_PATH) != 0) {
+        fprintf(stderr, "vfs5011: failed to install match threshold file: %s\n", strerror(errno));
+        unlink(tmp_path);
+        return;
+    }
+    printf("vfs5011: match threshold set to %d via request\n", value);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                          CFSTR(VFS5011_NOTIFY_THRESHOLD_CHANGED),
+                                          NULL, NULL, TRUE);
+}
+
 /* --- Distributed notification callback (mirrors notification_callback) --- */
 
 static void menubar_ipc_callback(CFNotificationCenterRef center,
@@ -224,7 +257,17 @@ static void menubar_ipc_callback(CFNotificationCenterRef center,
                                   CFDictionaryRef userInfo) {
     (void)center; (void)observer; (void)object; (void)userInfo;
 
-    if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_ENABLE), 0) == kCFCompareEqualTo) {
+    if (CFStringHasPrefix(name, CFSTR(VFS5011_NOTIFY_REQUEST_THRESHOLD_PREFIX))) {
+        /* Only the five registered names ever arrive here; still validate. */
+        CFIndex prefix_len = CFStringGetLength(CFSTR(VFS5011_NOTIFY_REQUEST_THRESHOLD_PREFIX));
+        CFStringRef suffix = CFStringCreateWithSubstring(kCFAllocatorDefault, name,
+                CFRangeMake(prefix_len, CFStringGetLength(name) - prefix_len));
+        int value = suffix ? CFStringGetIntValue(suffix) : 0;
+        if (suffix) CFRelease(suffix);
+        for (int i = 0; i < K_THRESHOLD_COUNT; i++) {
+            if (k_threshold_values[i] == value) { set_match_threshold(value); break; }
+        }
+    } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_ENABLE), 0) == kCFCompareEqualTo) {
         set_scanning_enabled(true);
     } else if (CFStringCompare(name, CFSTR(VFS5011_NOTIFY_REQUEST_DISABLE), 0) == kCFCompareEqualTo) {
         set_scanning_enabled(false);
@@ -273,6 +316,15 @@ void vfs5011_menubar_ipc_init(void) {
     CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback,
                                      CFSTR(VFS5011_NOTIFY_REQUEST_YIELD_END), NULL,
                                      CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    for (int i = 0; i < K_THRESHOLD_COUNT; i++) {
+        CFStringRef tname = CFStringCreateWithFormat(kCFAllocatorDefault, NULL,
+                                                      CFSTR(VFS5011_NOTIFY_REQUEST_THRESHOLD_PREFIX "%d"),
+                                                      k_threshold_values[i]);
+        CFNotificationCenterAddObserver(center, NULL, menubar_ipc_callback, tname, NULL,
+                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFRelease(tname);
+    }
 
     announce_lockswipe_state(); /* a menu bar app that launched first still learns the state */
 

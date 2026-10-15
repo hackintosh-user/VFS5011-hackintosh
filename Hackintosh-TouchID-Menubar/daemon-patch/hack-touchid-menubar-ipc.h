@@ -57,6 +57,21 @@
 #define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_ENABLE  VFS5011_NOTIFY_PREFIX ".request_lockswipe_enable"
 #define VFS5011_NOTIFY_REQUEST_LOCKSWIPE_DISABLE VFS5011_NOTIFY_PREFIX ".request_lockswipe_disable"
 
+/*
+ * Preference pane (or any UI) -> daemon: set the match threshold. One distinct
+ * notification per allowed value, "request_threshold_<N>" with N in
+ * {20,25,30,35,40}, because userInfo does not reliably cross the root/user
+ * boundary (see the note at the top). The daemon writes
+ * VFS5011_MATCH_THRESHOLD_CONF_PATH (the file the client's Settings [6] and
+ * the daemon's load_match_threshold() already use) and confirms with
+ * "threshold_changed". The daemon re-reads that file on every scored swipe,
+ * so no restart is needed.
+ */
+#define VFS5011_NOTIFY_REQUEST_THRESHOLD_PREFIX VFS5011_NOTIFY_PREFIX ".request_threshold_"
+#define VFS5011_NOTIFY_THRESHOLD_CHANGED        VFS5011_NOTIFY_PREFIX ".threshold_changed"
+#define VFS5011_MATCH_THRESHOLD_CONF_PATH \
+    "/usr/local/libexec/hack-touchid/match_threshold.conf"
+
 /* Client -> daemon: free the sensor for the duration of an Enroll/Verify/test, then hand it back */
 #define VFS5011_NOTIFY_REQUEST_YIELD_BEGIN VFS5011_NOTIFY_PREFIX ".request_yield_begin"
 #define VFS5011_NOTIFY_REQUEST_YIELD_END   VFS5011_NOTIFY_PREFIX ".request_yield_end"
