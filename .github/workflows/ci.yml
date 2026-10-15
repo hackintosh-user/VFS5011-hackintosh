@@ -7,6 +7,12 @@ name: CI
 # scripts pass shellcheck, and do the matcher's pure-logic unit tests
 # (serialization + fingers/ directory scanning) still pass.
 #
+# Repository layout (reorganized): the client and prep_and_build.sh stay at
+# the root; scripts/ has the build scripts; metallica/, upek/, vfs5011/
+# (+ vfs5011/vol) hold each sensor's code; shared/sen, shared/access and
+# shared/pane hold the cross-sensor parts. Every compile below therefore uses
+# the same include paths as scripts/ht_env.sh (HT_INC).
+#
 # What this deliberately does NOT cover (needs a real sensor VID:PID detcted):
 #   - libusb capture from the actual sensor
 #   - CFNotificationCenter IPC across the root/user boundary
@@ -46,13 +52,16 @@ jobs:
           cppcheck --force --enable=warning,performance,portability \
             --suppress=missingInclude \
             --error-exitcode=1 \
-            -I. -INBIS/include \
-            ax_probe.c vfs5011_daemon.c hack_touchid_client.c hack-touchid-matcher.c \
-            hack-touchid-menubar-ipc.c metallica_mis_daemon.c metallica_mis_firmware.c \
-            metallica_mis_tls.c metallica_mis_init_flash.c metallica_mis_flash.c \
-            metallica_mis_blobs_9a.c metallica_mis_upload_fwext.c \
-            mmis_timeslot.c mmis_calibrate.c mmis_rom_info.c mmis_factory_bits.c \
-            metallica_mis_debug.c metallica_mis_db.c
+            -I. -Ishared/sen -Imetallica -Iupek -Ivfs5011 -INBIS/include \
+            shared/access/ax_probe.c vfs5011/vfs5011_daemon.c hack_touchid_client.c \
+            shared/sen/hack-touchid-matcher.c vfs5011/hack-touchid-menubar-ipc.c \
+            metallica/metallica_mis_daemon.c metallica/metallica_mis_firmware.c \
+            metallica/metallica_mis_tls.c metallica/metallica_mis_init_flash.c \
+            metallica/metallica_mis_flash.c metallica/metallica_mis_blobs_9a.c \
+            metallica/metallica_mis_upload_fwext.c metallica/mmis_timeslot.c \
+            metallica/mmis_calibrate.c metallica/mmis_rom_info.c \
+            metallica/mmis_factory_bits.c metallica/metallica_mis_debug.c \
+            metallica/metallica_mis_db.c
           # NOTE (Aug 2026): metallica_mis_tls.c/init_flash.c had been sitting in
           # the tree since Aug 19-20 without appearing in this list at all --
           # meaning cppcheck (and the build jobs below, which also don't
@@ -63,7 +72,7 @@ jobs:
           # (libssl-dev) are available on the runner. metallica_mis_flash.c/
           # metallica_mis_blobs_9a.c are new as of this same session and are
           # added from the start rather than repeating the same mistake.
-          # UPDATE: build_metallica_mis.sh now links all five of these
+          # UPDATE: scripts/build_metallica_mis.sh now links all five of these
           # files (plus metallica_mis_firmware.c) into a real binary, and
           # the build-daemon-and-client job below builds + verifies it.
           # cppcheck here still only catches syntax/logic issues, not link
@@ -77,7 +86,7 @@ jobs:
       - name: Install libusb + openssl@3
         run: brew install libusb openssl@3
       - name: Point compiler at Homebrew's libusb/openssl
-        # build_client.sh/build_daemon.sh hardcode -I/usr/local/include and
+        # scripts/build_client.sh and scripts/build_daemon.sh hardcode -I/usr/local/include and
         # -L/usr/local/lib, and build_metallica_mis.sh hardcodes
         # /usr/local/opt/openssl@3, which is correct on Mohammad's Intel
         # DV6 (where Homebrew installs to /usr/local) but NOT on GitHub's
@@ -98,14 +107,85 @@ jobs:
           sudo ln -s "$(brew --prefix openssl@3)" /usr/local/opt/openssl@3
       - name: Build
         run: |
-          chmod +x ./*.sh
-          ./build.sh
+          chmod +x ./*.sh scripts/*.sh vfs5011/*.sh vfs5011/vol/*.sh \
+            shared/access/*.sh shared/pane/source/*.sh
+          ./scripts/build.sh
       - name: Verify binaries were produced
         run: |
           test -x ./hack-touchid
           test -x ./vfs5011_daemon
           test -x ./metallica_mis_daemon
           echo "All three binaries built successfully."
+
+  layout-check:
+    name: Repository layout (required files and shipped pane)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that every path the scripts and the client rely on exists
+        # The client and scripts find each other by these paths. If a file is
+        # moved without updating them, this fails here instead of on a Mac.
+        run: |
+          missing=0
+          for f in \
+            hack_touchid_client.c prep_and_build.sh fpbootd-install.sh VERSION.txt \
+            scripts/build.sh scripts/build_client.sh scripts/build_daemon.sh \
+            scripts/build_metallica_mis.sh scripts/ht_env.sh \
+            shared/sen/supported_sensors.h shared/sen/fp_types.h shared/sen/ht_sensor_tool.c \
+            shared/sen/hack-touchid-matcher.c shared/sen/hack-touchid-matcher.h \
+            shared/access/hack-touchid-grant-accessibility.sh shared/access/ax_probe.c \
+            vfs5011/vfs5011_daemon.c vfs5011/vfs5011_proto.h \
+            vfs5011/hack-touchid-menubar-ipc.c vfs5011/hack-touchid-menubar-ipc.h \
+            vfs5011/hack-touchid-agent-install.sh \
+            vfs5011/vol/hack-touchid-volume-mount.sh vfs5011/vol/hack-touchid-volume-unmount.sh \
+            vfs5011/vol/hack-touchid-setup-volume.sh vfs5011/vol/hack-touchid-store-password.sh \
+            upek/upek_daemon.c upek/upek_daemon.h upek/upek_proto.h \
+            metallica/metallica_mis_daemon.c metallica/metallica_mis_enroll.c \
+            metallica/metallica_mis_db.c metallica/ht_sensor_stubs.c metallica/ht_sensor_stubs.h \
+            shared/pane/source/HackTouchIDPane.swift shared/pane/source/Info.plist \
+            shared/pane/source/build_prefpane.sh \
+            shared/pane/build/HackTouchID.prefPane/Contents/Info.plist \
+            shared/pane/build/HackTouchID.prefPane/Contents/MacOS/HackTouchID \
+            tests/run_tests.sh tests/test_matcher.c; do
+            [ -f "$f" ] || { echo "MISSING: $f"; missing=1; }
+          done
+          [ "$missing" = "0" ] || exit 1
+          echo "Layout OK."
+      - name: The two copies of the menu bar IPC must be identical
+        # vfs5011/ is what the daemon builds from; the daemon-patch/ copy is
+        # what the menu bar app folder documents. They drifted before.
+        run: |
+          for f in hack-touchid-menubar-ipc.c hack-touchid-menubar-ipc.h; do
+            cmp "vfs5011/$f" "Hackintosh-TouchID-Menubar/daemon-patch/$f" \
+              || { echo "$f differs between vfs5011/ and daemon-patch/"; exit 1; }
+          done
+          echo "IPC copies match."
+      - name: Nothing may still point at the old flat layout
+        run: |
+          if grep -rn --include="*.sh" --include="*.yml" -E '\./build(_client|_daemon|_metallica_mis)?\.sh' . \
+               | grep -v -E '\./scripts/|^\./\.git/|usage:|# '; then
+            echo "A script still calls a build script from the old location."; exit 1
+          fi
+          echo "No old-layout references found."
+
+  build-prefpane:
+    name: Build preference pane (macOS, informational)
+    runs-on: macos-latest
+    # Compiles the pane from source to prove it still builds. The pre-compiled
+    # bundle the client installs is shared/pane/build (shipped in the repo),
+    # so a failure here, for example a newer Xcode on the runner, does not
+    # block the rest of CI.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          chmod +x shared/pane/source/build_prefpane.sh
+          ./shared/pane/source/build_prefpane.sh
+      - name: Verify bundle
+        run: |
+          test -x shared/pane/build/HackTouchID.prefPane/Contents/MacOS/HackTouchID
+          echo "Pane built."
 
   matcher-unit-tests:
     name: Matcher unit tests (macOS)
