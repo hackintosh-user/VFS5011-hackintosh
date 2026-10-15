@@ -893,7 +893,7 @@ static void auth_prompt_poll_callback(CFRunLoopTimerRef timer, void *info) {
     }
     not_locked_ticks = 0;
 
-    if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* already mid-episode elsewhere */
+    if (st != STATE_IDLE) return; /* already mid-episode elsewhere */
 
     pid_t candidates[8];
     int candidate_count = get_auth_candidate_pids(candidates, 8);
