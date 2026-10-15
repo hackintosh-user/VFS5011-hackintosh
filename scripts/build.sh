@@ -3,7 +3,8 @@
 # Builds hack-touchid (interactive menu frontend) and, depending on the
 # sensor you pick, vfs5011_daemon (background auth daemon) and
 # metallica_mis_daemon (Metallica MIS pairing test harness,
-# active-development only) by invoking their individual build scripts.
+# active-development only) and metallica_mis_agent (Metallica MIS lock
+# screen / padlock unlock agent) by invoking their individual build scripts.
 #
 # Usage:
 #   ./scripts/build.sh                         builds everything (old behaviour)
@@ -11,7 +12,8 @@
 #   ./scripts/build.sh --sensor 06cb:009a      same, by USB ID
 #   ./scripts/build.sh --sensor vfs5011        VFS5011 only, no OpenSSL needed
 #
-# The binaries (hack-touchid, vfs5011_daemon, metallica_mis_daemon) are written
+# The binaries (hack-touchid, vfs5011_daemon, metallica_mis_daemon,
+# metallica_mis_agent) are written
 # to the repo root. For ax_probe (standalone AX diagnostic tool,
 # shared/access/ax_probe.c), build it separately, see README.
 set -e
@@ -48,6 +50,11 @@ case ",$FAMILIES," in *,metallica,*)
     echo "==> Building metallica_mis_daemon (pairing test harness)..."
     "$SCRIPT_DIR/build_metallica_mis.sh"
     BUILT="$BUILT, ./metallica_mis_daemon"
+
+    echo ""
+    echo "==> Building metallica_mis_agent (lock screen / padlock unlock)..."
+    "$SCRIPT_DIR/build_metallica_agent.sh"
+    BUILT="$BUILT, ./metallica_mis_agent"
 ;; esac
 
 echo ""
