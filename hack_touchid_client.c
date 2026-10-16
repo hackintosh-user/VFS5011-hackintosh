@@ -5714,8 +5714,10 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
     draw_progress_bar(percent, "Building");
     while (fgets(bline, sizeof(bline), bp)) {
         fputs(bline, log_fp); /* full output still preserved for debugging */
+        fflush(log_fp);       /* flush per line: a hung build must leave a readable log */
         if (strstr(bline, "Missing for your sensor")) {
-            printf("\nInstalling the Homebrew packages your sensor needs (this can take a few minutes)...\n");
+            printf("\n%s", bline); /* names the packages, so a long install is not a mystery */
+            printf("Installing the Homebrew packages your sensor needs (this can take a few minutes)...\n");
             draw_progress_bar(percent, "Building");
         }
         if (step < total_steps && strstr(bline, build_steps[step])) {
