@@ -5665,14 +5665,17 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
      * below, so either prompt was invisible and the update sat at
      * "Building [0/3]" forever. So: name the sensor family we already
      * detected (or "all"), say yes to installs, and close stdin so
-     * nothing can ever wait on an answer. --no-pane: the pane ships
+     * nothing can ever wait on an answer. --no-install: the updater never
+     * runs Homebrew itself (on Intel that compiles from source and looked
+     * like a hang at 0%); a missing package now fails fast and the
+     * "missing:" / "error:" lines are printed below. --no-pane: the pane ships
      * pre-compiled in the branch and the copy below installs it, so the
      * updater must not wait on a swiftc build after "Build complete"
      * (it sat at 100% for minutes on older Macs). */
     const char *build_family = (g_detected_sensor && g_detected_sensor->family)
                                    ? g_detected_sensor->family : "all";
     snprintf(cmd, sizeof(cmd),
-             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes --no-pane 2>&1 </dev/null",
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes --no-install --no-pane 2>&1 </dev/null",
              src_dir, build_family);
     FILE *bp = popen(cmd, "r");
     if (!bp) {
@@ -5715,6 +5718,11 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
     while (fgets(bline, sizeof(bline), bp)) {
         fputs(bline, log_fp); /* full output still preserved for debugging */
         fflush(log_fp);       /* flush per line: a hung build must leave a readable log */
+        if ((strstr(bline, "  missing: ") && !strstr(bline, "nothing")) ||
+            strncmp(bline, "error:", 6) == 0) {
+            printf("\n%s", bline);
+            draw_progress_bar(percent, "Building");
+        }
         if (strstr(bline, "Missing for your sensor")) {
             printf("\n%s", bline); /* names the packages, so a long install is not a mystery */
             printf("Installing the Homebrew packages your sensor needs (this can take a few minutes)...\n");
