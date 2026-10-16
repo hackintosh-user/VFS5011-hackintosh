@@ -4972,6 +4972,7 @@ static void do_settings_toggle_live_update(void) {
 }
 
 /* Defined further down in the updater section. */
+static void do_settings_recent_commits(void);
 static bool fetch_remote_version_file(const char *branch, client_version_info_t *out);
 static void run_update_prompt(const client_version_info_t *local,
                               const client_version_info_t *remote, bool live, bool relaunch);
@@ -5050,6 +5051,7 @@ static void print_settings_menu(void) {
     printf("%s[U]%s Toggle Live Update Notifications (current: %s)\n", VFSC_BOLD, VFSC_RESET,
            g_live_update_check ? "ON" : "OFF");
     printf("%s[CU]%s Check for Updates Now\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[CM]%s Show Recent Commits (last 5 per branch)\n", VFSC_BOLD, VFSC_RESET);
 
     printf("\n");
     printf("%s[B]%s Back\n", VFSC_BOLD, VFSC_RESET);
@@ -5084,6 +5086,10 @@ static void do_settings_menu(void) {
             do_settings_check_updates();
             continue;
         }
+        if ((line[0] == 'C' || line[0] == 'c') && (line[1] == 'M' || line[1] == 'm') && line[2] == '\0') {
+            do_settings_recent_commits();
+            continue;
+        }
         switch (cmd) {
             case '1': do_settings_delete_fingers(); break;
             case '2': do_settings_clear_password_cache(); break;
@@ -5098,7 +5104,7 @@ static void do_settings_menu(void) {
             case 'L': case 'l': do_settings_lockswipe_sensitivity(); break;
             case 'B': case 'b': return;
             default:
-                vfsc_err("Unrecognized option '%s'. Choose 1-9, L, U, CU or B.\n\n", line);
+                vfsc_err("Unrecognized option '%s'. Choose 1-9, L, U, CU, CM or B.\n\n", line);
         }
     }
 }
@@ -5950,6 +5956,154 @@ static bool show_update_changelog(const char *branch, const char *local_version)
     free(buf);
     return true;
 }
+
+/* ------------------------------------------------------------------ *
+ * Settings [CM]: recent commits
+ * ------------------------------------------------------------------ *
+ * Asks which branch (active-development [A] or main [M]), then prints that
+ * branch's last 5 commits (date, author, short hash, first line of the
+ * message) so you can see what changed without opening GitHub.
+ *
+ * Reads GitHub's public Atom feed for the branch (no API token, no JSON
+ * library, no rate limit worries) with curl, like the rest of the updater.
+ * The feed only carries each commit's first message line, so the longer
+ * description is not shown. Press Return to go back to the Settings menu. */
+#define COMMITS_SHOWN 5
+
+/* Copies the text between <tag> and </tag> (first match at or after `from`)
+ * into out, trims whitespace and decodes the XML entities GitHub uses.
+ * Returns a pointer just past the closing tag, or NULL if not found. */
+static const char *feed_extract_tag(const char *from, const char *open_tag,
+                                    const char *close_tag, char *out, size_t out_size) {
+    const char *a = strstr(from, open_tag);
+    if (!a) return NULL;
+    a += strlen(open_tag);
+    const char *b = strstr(a, close_tag);
+    if (!b) return NULL;
+
+    while (a < b && isspace((unsigned char)*a)) a++;
+    const char *e = b;
+    while (e > a && isspace((unsigned char)e[-1])) e--;
+
+    size_t o = 0;
+    while (a < e && o + 1 < out_size) {
+        if (*a == '&') {
+            static const struct { const char *ent; char ch; } ents[] = {
+                {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&#39;", '\''}, {"&apos;", '\''}
+            };
+            bool hit = false;
+            for (size_t i = 0; i < sizeof(ents) / sizeof(ents[0]); i++) {
+                size_t l = strlen(ents[i].ent);
+                if ((size_t)(e - a) >= l && strncmp(a, ents[i].ent, l) == 0) {
+                    out[o++] = ents[i].ch;
+                    a += l;
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) continue;
+        }
+        /* The title can wrap over lines: flatten any newline to a space. */
+        out[o++] = (*a == '\n' || *a == '\r') ? ' ' : *a;
+        a++;
+    }
+    out[o] = '\0';
+    return b + strlen(close_tag);
+}
+
+static void do_settings_recent_commits(void) {
+    char line[64];
+    printf("Which branch?  Active-development [A] or main [M]: ");
+    fflush(stdout);
+    if (!fgets(line, sizeof(line), stdin)) { printf("\n"); return; }
+
+    const char *branch = NULL;
+    if (line[0] == 'A' || line[0] == 'a') branch = "active-development";
+    else if (line[0] == 'M' || line[0] == 'm') branch = "main";
+    else {
+        vfsc_err("Please answer A (active-development) or M (main).\n\n");
+        return;
+    }
+
+    printf("\nFetching the last %d commits on \"%s\"...\n", COMMITS_SHOWN, branch);
+    fflush(stdout);
+
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "curl -fsSL -m 8 '%s/commits/%s.atom' 2>/dev/null",
+             UPDATE_REPO_URL, branch);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        vfsc_warn("Couldn't run curl.\n\n");
+        return;
+    }
+    size_t cap = 256 * 1024, len = 0, n;
+    char *feed = malloc(cap);
+    if (!feed) { pclose(fp); vfsc_err("Out of memory.\n\n"); return; }
+    while (len < cap - 1 && (n = fread(feed + len, 1, cap - 1 - len, fp)) > 0) len += n;
+    feed[len] = '\0';
+    pclose(fp);
+
+    if (len == 0 || !strstr(feed, "<entry>")) {
+        vfsc_warn("Couldn't get the commit list. Check your internet connection and that the "
+                  "branch \"%s\" exists, then try again.\n\n", branch);
+        free(feed);
+        return;
+    }
+
+    printf("\n%sLast %d commits on %s%s\n", VFSC_BCYAN, COMMITS_SHOWN, branch, VFSC_RESET);
+    printf("%s--------------------------------%s\n", VFSC_DIM, VFSC_RESET);
+
+    const char *cur = feed;
+    int shown = 0;
+    while (shown < COMMITS_SHOWN) {
+        const char *entry = strstr(cur, "<entry>");
+        if (!entry) break;
+        const char *entry_end = strstr(entry, "</entry>");
+        if (!entry_end) break;
+
+        char id[256] = "", title[512] = "", updated[64] = "", author[128] = "";
+        feed_extract_tag(entry, "<id>", "</id>", id, sizeof(id));
+        feed_extract_tag(entry, "<title>", "</title>", title, sizeof(title));
+        feed_extract_tag(entry, "<updated>", "</updated>", updated, sizeof(updated));
+        const char *auth = strstr(entry, "<author>");
+        if (auth && auth < entry_end) feed_extract_tag(auth, "<name>", "</name>", author, sizeof(author));
+
+        /* id looks like tag:github.com,2008:Grit::Commit/<40 hex>: keep 7. */
+        char short_sha[8] = "";
+        const char *slash = strrchr(id, '/');
+        if (slash) snprintf(short_sha, sizeof(short_sha), "%.7s", slash + 1);
+
+        /* 2026-10-16T13:45:12Z -> "2026-10-16 13:45" (+ the zone as given) */
+        char when[64] = "";
+        snprintf(when, sizeof(when), "%s", updated);
+        for (char *c = when; *c; c++) if (*c == 'T') *c = ' ';
+        if (strlen(when) > 16) {
+            const char *tz = when + 16;
+            while (*tz && *tz != 'Z' && *tz != '+' && *tz != '-') tz++;
+            char zone[16] = "";
+            snprintf(zone, sizeof(zone), " %s", *tz == 'Z' ? "UTC" : tz);
+            when[16] = '\0';
+            strncat(when, zone, sizeof(when) - strlen(when) - 1);
+        }
+
+        printf("%s%s%s  %s%s%s  %s\n", VFSC_BOLD, short_sha[0] ? short_sha : "-------", VFSC_RESET,
+               VFSC_DIM, when, VFSC_RESET, author[0] ? author : "unknown");
+        printf("   %s\n\n", title[0] ? title : "(no message)");
+
+        shown++;
+        cur = entry_end + strlen("</entry>");
+    }
+    free(feed);
+
+    if (shown == 0) vfsc_warn("The feed came back, but it had no commits in it.\n\n");
+
+    printf("Press Return to go back to Settings...");
+    fflush(stdout);
+    int ch;
+    while ((ch = getchar()) != '\n' && ch != EOF) { }
+    printf("\n");
+}
+
 
 /* After an update the stale daemon is gone and only a deploy puts one back. Runs the NEWLY
  * installed binary (this process is still the old one) with --deploy-agent. HTID_NO_PAUSE stops
