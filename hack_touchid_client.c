@@ -2051,6 +2051,8 @@ static void print_usage(void) {
     printf("                      (experimental, tester tool, run with --debug)\n");
     printf("  --verify-test       Metallica MIS: calibrate, touch once, match against a print saved by\n");
     printf("                      --enroll-test and exit (experimental, run with --debug)\n");
+    printf("  --cli               Skip the preference pane question and start the CLI client\n");
+    printf("  --pane              Open the installed preference pane instead of the CLI client\n");
     printf("  --list-fingers      Print the enrolled prints as JSON and exit (used by the Settings pane)\n");
     printf("  --rename-finger     With --finger-id ID --finger-name NAME: rename a print and exit\n");
     printf("  --delete-finger     With --finger-id ID: remove a print and exit (not on Metallica MIS)\n");
@@ -5168,6 +5170,87 @@ static bool do_install_pane(void) {
     return true;
 }
 
+/* ---- Pane-or-CLI choice at startup ----
+ * When the HTID preference pane is already installed for the console user, the interactive
+ * start offers to open it instead of the CLI menu. The CLI stays fully available:
+ *   --cli   skip the question and go straight to the CLI client
+ *   --pane  open the pane without asking
+ * Any failure to open the pane falls back to the CLI client. */
+static bool g_force_cli_mode = false;
+static bool g_force_pane_mode = false;
+
+static struct passwd *console_user_entry(void) {
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && *sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw) pw = getpwuid(getuid());
+    if (!pw || !pw->pw_dir || !*pw->pw_dir) return NULL;
+    return pw;
+}
+
+static bool installed_pane_path(char *out, size_t out_size, struct passwd **pw_out) {
+    struct passwd *pw = console_user_entry();
+    if (!pw) return false;
+    snprintf(out, out_size, "%s/Library/PreferencePanes/%s", pw->pw_dir, PANE_BUNDLE_NAME);
+    struct stat st;
+    if (stat(out, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+    if (pw_out) *pw_out = pw;
+    return true;
+}
+
+/* Opens the pane as the real user (the client itself runs as root). Returns false when it could
+ * not be opened, so the caller falls back to the CLI client. */
+static bool launch_installed_pane(const char *pane_path, struct passwd *pw) {
+    char cmd[PATH_MAX * 2 + 128];
+    snprintf(cmd, sizeof(cmd), "sudo -u '%s' /usr/bin/open \"%s\" >/dev/null 2>&1",
+             pw->pw_name, pane_path);
+    if (system(cmd) == 0) return true;
+    /* Fallback: at least open System Settings itself. */
+    snprintf(cmd, sizeof(cmd), "sudo -u '%s' /usr/bin/open -b com.apple.systempreferences >/dev/null 2>&1",
+             pw->pw_name);
+    if (system(cmd) == 0) {
+        printf("Opened System Settings. Look for \"Hackintosh TouchID\" at the bottom of the sidebar.\n");
+        return true;
+    }
+    return false;
+}
+
+/* Returns true when the pane was opened and the client should exit. */
+static bool offer_pane_instead_of_cli(void) {
+    if (g_force_cli_mode) return false;
+    char pane_path[PATH_MAX];
+    struct passwd *pw = NULL;
+    if (!installed_pane_path(pane_path, sizeof(pane_path), &pw)) {
+        if (g_force_pane_mode)
+            printf("The preference pane is not installed yet. Continuing with the CLI client "
+                   "(use [I] in the menu to install it).\n\n");
+        return false;
+    }
+
+    if (!g_force_pane_mode) {
+        if (!isatty(STDIN_FILENO)) return false;
+        printf("\nNote: The HTID preference pane is currently installed.\n"
+               "Would you like to launch the Preference pane or continue launching the CLI Client?\n"
+               "  [P] Launch the Preference pane\n"
+               "  [C] Continue with the CLI Client (default)\n"
+               "Choice: ");
+        fflush(stdout);
+        char answer[16] = {0};
+        if (!fgets(answer, sizeof(answer), stdin)) return false;
+        if (answer[0] != 'p' && answer[0] != 'P') {
+            printf("\n");
+            return false;
+        }
+    }
+
+    if (launch_installed_pane(pane_path, pw)) {
+        printf("Preference pane opened. Run the client again with --cli if you need the CLI menu.\n");
+        return true;
+    }
+    vfsc_err("Could not open the preference pane. Continuing with the CLI client.\n\n");
+    return false;
+}
+
 /* Deploy installs/reinstalls hack-touchid-agent-install.sh, which handles
  * everything: rebuilding the daemon from source, copying it into
  * place, tearing down any prior registration, the scoped NOPASSWD
@@ -7398,6 +7481,8 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--cli") == 0) g_force_cli_mode = true;
+        if (strcmp(argv[i], "--pane") == 0) g_force_pane_mode = true;
         if (strcmp(argv[i], "--deploy-agent") == 0) {
             g_deploy_agent_mode = true;
         }
@@ -7500,6 +7585,8 @@ int main(int argc, char **argv) {
         sudo_argv[ai++] = "sudo";
         sudo_argv[ai++] = argv[0];
         if (!g_verbose_boot) sudo_argv[ai++] = "--q";
+        if (g_force_cli_mode) sudo_argv[ai++] = "--cli";
+        if (g_force_pane_mode) sudo_argv[ai++] = "--pane";
         if (g_deploy_agent_mode) sudo_argv[ai++] = "--deploy-agent";
         if (g_diag_pid_mode) sudo_argv[ai++] = "--diag-pid";
         if (g_check_updates_mode) sudo_argv[ai++] = "--check-updates";
@@ -7650,6 +7737,12 @@ int main(int argc, char **argv) {
     if (g_deploy_agent_mode) {
         run_deploy_agent_mode();
         return 0;
+    }
+
+    /* Interactive start only: when the preference pane is installed, offer to open it instead of
+     * the CLI menu. Updater and post-update runs never ask. */
+    if (!g_check_updates_mode && !g_menu_updater_mode && !g_post_update_mode) {
+        if (offer_pane_instead_of_cli()) return 0;
     }
 
     /* Quiet mode keeps the banner where it's always been (first thing
