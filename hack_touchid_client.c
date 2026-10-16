@@ -5659,11 +5659,14 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
      * below, so either prompt was invisible and the update sat at
      * "Building [0/3]" forever. So: name the sensor family we already
      * detected (or "all"), say yes to installs, and close stdin so
-     * nothing can ever wait on an answer. */
+     * nothing can ever wait on an answer. --no-pane: the pane ships
+     * pre-compiled in the branch and the copy below installs it, so the
+     * updater must not wait on a swiftc build after "Build complete"
+     * (it sat at 100% for minutes on older Macs). */
     const char *build_family = (g_detected_sensor && g_detected_sensor->family)
                                    ? g_detected_sensor->family : "all";
     snprintf(cmd, sizeof(cmd),
-             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes 2>&1 </dev/null",
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes --no-pane 2>&1 </dev/null",
              src_dir, build_family);
     FILE *bp = popen(cmd, "r");
     if (!bp) {
