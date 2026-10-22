@@ -2683,6 +2683,13 @@ static char g_mmis_id_product[MMIS_HOST_ID_MAX + 1];
 static char g_mmis_id_serial[MMIS_HOST_ID_MAX + 1];
 static bool g_mmis_id_from_cli = false;
 static bool g_mmis_id_from_saved = false;
+/* Pane mode (--list-fingers / --rename-finger): there is no terminal to ask in, so a session that
+ * needs the host identity is reported to the pane instead of prompting. */
+static bool g_ht_noninteractive = false;
+static bool g_mmis_need_identity = false;
+static bool g_mmis_identity_refused = false;
+/* --save-host-identity: keep the --host-product / --host-serial values once the session opened. */
+static bool g_save_host_identity = false;
 
 static void mmis_host_identity_load_saved(void) {
     if (g_metallica_mis_host_product_override || g_metallica_mis_host_serial_override) {
@@ -2795,6 +2802,11 @@ static int mmis_run_with_host_identity(int (*action)(void)) {
     }
     if (rc != MMIS_SESSION_FAILED) return rc;
 
+    if (g_ht_noninteractive) {
+        g_mmis_need_identity = true;
+        g_mmis_identity_refused = g_mmis_id_from_cli || g_mmis_id_from_saved;
+        return -1;
+    }
     if (g_mmis_id_from_cli) {
         vfsc_err("\nThe sensor refused the host identity given with --host-product / --host-serial.\n"
                   "Check both values against the other operating system.\n");
@@ -2948,6 +2960,8 @@ static void mmis_print_label(int slot, char *out, size_t out_size) {
     const char *f = a ? NULL : metallica_mis_finger_name((uint16_t)slot);
     if (a) snprintf(out, out_size, "%s", a);
     else if (f) snprintf(out, out_size, "%s (not named)", f);
+    else if (slot == 245) snprintf(out, out_size, "Windows print");
+    else if (slot > 245 && slot <= 254) snprintf(out, out_size, "Windows print %d", slot - 244);
     else snprintf(out, out_size, "Print in slot %d (not named)", slot);
 }
 
@@ -3263,13 +3277,14 @@ static int g_fingers_cmd = HT_FINGERS_NONE;
 static const char *g_finger_id_arg = NULL;
 static const char *g_finger_name_arg = NULL;
 
-typedef struct { char id[48]; char name[96]; bool named; } ht_finger_row_t;
+typedef struct { char id[48]; char name[96]; bool named; bool readonly; } ht_finger_row_t;
 #define HT_FINGER_ROWS 64
 static ht_finger_row_t g_ht_rows[HT_FINGER_ROWS];
 static int g_ht_rows_n = 0;
 static int g_ht_capacity = 0;
 static bool g_ht_is_metallica = false;
 static char g_ht_err[320];
+static const char *g_ht_err_code = NULL;
 
 static void ht_json_str(const char *s) {
     putchar('"');
@@ -3285,6 +3300,11 @@ static void ht_json_str(const char *s) {
 static int ht_json_fail(const char *msg) {
     printf("\nHTID-JSON-BEGIN\n{\"ok\":false,\"error\":");
     ht_json_str(msg);
+    if (g_ht_err_code) {
+        printf(",\"code\":");
+        ht_json_str(g_ht_err_code);
+        printf(",\"refused\":%s", g_mmis_identity_refused ? "true" : "false");
+    }
     printf("}\nHTID-JSON-END\n");
     fflush(stdout);
     return 1;
@@ -3315,10 +3335,33 @@ static int ht_row_cmp(const void *a, const void *b) {
 }
 
 /* Metallica MIS: the sensor knows the slots, the encrypted volume knows the names. */
+static void ht_save_host_identity_if_asked(void) {
+    if (!g_save_host_identity || !g_metallica_mis_host_product_override ||
+        !g_metallica_mis_host_serial_override) return;
+    const char *p = g_metallica_mis_host_product_override;
+    const char *sn = g_metallica_mis_host_serial_override;
+    if (p == g_mmis_id_product || sn == g_mmis_id_serial) return; /* already the saved values */
+    if (strlen(p) > MMIS_HOST_ID_MAX || strlen(sn) > MMIS_HOST_ID_MAX) return;
+    if (strpbrk(p, "\r\n") || strpbrk(sn, "\r\n")) return;
+    snprintf(g_mmis_id_product, sizeof(g_mmis_id_product), "%s", p);
+    snprintf(g_mmis_id_serial, sizeof(g_mmis_id_serial), "%s", sn);
+    (void)mmis_host_identity_save();
+}
+
 static int ht_collect_metallica(void) {
+    g_ht_noninteractive = true;
+    g_mmis_need_identity = false;
     g_mmis_stderr_to_log = true;
     int rc = mmis_run_with_host_identity(mmis_list_action);
     g_mmis_stderr_to_log = false;
+    if (rc == 0) ht_save_host_identity_if_asked();
+    if (rc != 0 && g_mmis_need_identity) {
+        g_ht_err_code = "need_host_identity";
+        snprintf(g_ht_err, sizeof(g_ht_err),
+                 "This sensor was paired on another operating system, so it needs this laptop's real "
+                 "product name and serial number.");
+        return -1;
+    }
     if (rc != 0) {
         snprintf(g_ht_err, sizeof(g_ht_err),
                  "Could not read the prints from the sensor. If this Mac never opened the sensor, "
@@ -3336,6 +3379,15 @@ static int ht_collect_metallica(void) {
         const char *alias = names_ok ? mmis_alias_find(slot) : NULL;
         const char *fname = metallica_mis_finger_name((uint16_t)slot);
         r->named = alias != NULL;
+        r->readonly = false;
+        /* Windows Hello stores its prints as "unspecified finger" 0xF5 to 0xFE (245 to 254),
+         * outside the 1 to 10 range macOS uses, so they cannot carry a name here. */
+        if (slot >= 245 && slot <= 254) {
+            r->readonly = true;
+            r->named = true;
+            if (slot == 245) snprintf(r->name, sizeof(r->name), "Windows print");
+            else snprintf(r->name, sizeof(r->name), "Windows print %d", slot - 244);
+        } else
         if (alias) snprintf(r->name, sizeof(r->name), "%s", alias);
         else if (fname) snprintf(r->name, sizeof(r->name), "%s", fname);
         else snprintf(r->name, sizeof(r->name), "Print in slot %d", slot);
@@ -3397,7 +3449,8 @@ static int ht_list_fingers(void) {
         ht_json_str(g_ht_rows[i].id);
         printf(",\"name\":");
         ht_json_str(g_ht_rows[i].name);
-        printf(",\"named\":%s}", g_ht_rows[i].named ? "true" : "false");
+        printf(",\"named\":%s,\"readonly\":%s}", g_ht_rows[i].named ? "true" : "false",
+               g_ht_rows[i].readonly ? "true" : "false");
     }
     printf("]}\nHTID-JSON-END\n");
     fflush(stdout);
@@ -3411,6 +3464,8 @@ static int ht_rename_metallica(const char *id, const char *raw_name) {
     }
     char *end = NULL;
     long slot = strtol(id, &end, 10);
+    if (end && *end == '\0' && (slot < 1 || slot > MMIS_SLOTS))
+        return ht_json_fail("Prints made in Windows can't be renamed here.");
     bool present = false;
     for (int i = 0; i < g_mmis_list_n; i++) if (g_mmis_list_subs[i] == slot) present = true;
     if (!end || *end != '\0' || !present) return ht_json_fail("That print is no longer on the sensor.");
@@ -7531,6 +7586,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--fpbootd-daemon") == 0) {
             g_fpbootd_daemon_mode = true;
         }
+        if (strcmp(argv[i], "--save-host-identity") == 0) {
+            g_save_host_identity = true;
+        }
         if (strcmp(argv[i], "--list-fingers") == 0) {
             g_fingers_cmd = HT_FINGERS_LIST;
             g_verbose_boot = false;
@@ -7612,6 +7670,7 @@ int main(int argc, char **argv) {
             sudo_argv[ai++] = "--host-serial";
             sudo_argv[ai++] = (char *)g_metallica_mis_host_serial_override;
         }
+        if (g_save_host_identity) sudo_argv[ai++] = "--save-host-identity";
         sudo_argv[ai++] = NULL;
         execvp("sudo", sudo_argv);
         vfsc_err("Failed to re-exec with sudo: %s\n", strerror(errno));
