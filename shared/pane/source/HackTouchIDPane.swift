@@ -228,6 +228,7 @@ private struct FingerRow {
     var id: String
     var name: String
     var named: Bool
+    var readonly: Bool = false
 }
 
 private func label(_ text: String, bold: Bool = false, secondary: Bool = false) -> NSTextField {
@@ -615,10 +616,14 @@ class HackTouchIDPane: NSPreferencePane {
         fingersStatus.stringValue = status
 
         let rows: [NSView] = fingers.map { f in
-            let sub: NSTextField? = f.named ? nil : label("Not named yet", secondary: true)
-            let rename = NSButton(title: "Rename", target: self, action: #selector(renameFingerTapped(_:)))
-            rename.identifier = NSUserInterfaceItemIdentifier(f.id)
-            var buttons: [NSView] = [rename]
+            let sub: NSTextField? = f.readonly ? label("Created in Windows", secondary: true)
+                                               : (f.named ? nil : label("Not named yet", secondary: true))
+            var buttons: [NSView] = []
+            if !f.readonly {
+                let rename = NSButton(title: "Rename", target: self, action: #selector(renameFingerTapped(_:)))
+                rename.identifier = NSUserInterfaceItemIdentifier(f.id)
+                buttons.append(rename)
+            }
             if canDelete {
                 let remove = NSButton(title: "Remove", target: self, action: #selector(removeFingerTapped(_:)))
                 remove.identifier = NSUserInterfaceItemIdentifier(f.id)
@@ -634,9 +639,15 @@ class HackTouchIDPane: NSPreferencePane {
     }
 
     @objc private func loadFingersTapped() {
+        loadFingers([])
+    }
+
+    /// Reads the prints through the client. `extra` carries the host identity (and
+    /// --save-host-identity) after the user typed it in.
+    private func loadFingers(_ extra: [String]) {
         guard !fingersBusy else { return }
         setFingersBusy(true, message: "Waiting for your administrator password...")
-        runClient(["--list-fingers"]) { [weak self] json, cancelled in
+        runClient(["--list-fingers"] + extra) { [weak self] json, cancelled in
             guard let self = self else { return }
             self.setFingersBusy(false)
             if cancelled { self.fingersStatus.stringValue = "Cancelled. Click Load to try again."; return }
@@ -645,6 +656,11 @@ class HackTouchIDPane: NSPreferencePane {
                 return
             }
             if (json["ok"] as? Bool) != true {
+                if (json["code"] as? String) == "need_host_identity" {
+                    self.fingersStatus.stringValue = "This sensor needs this laptop's real product name and serial number."
+                    self.askHostIdentity(refused: (json["refused"] as? Bool) ?? false)
+                    return
+                }
                 self.fingersStatus.stringValue = (json["error"] as? String) ?? "Reading the fingerprints failed."
                 return
             }
@@ -653,11 +669,52 @@ class HackTouchIDPane: NSPreferencePane {
             let list = (json["fingers"] as? [[String: Any]]) ?? []
             self.fingers = list.compactMap { d in
                 guard let id = d["id"] as? String, let name = d["name"] as? String else { return nil }
-                return FingerRow(id: id, name: name, named: (d["named"] as? Bool) ?? false)
+                return FingerRow(id: id, name: name, named: (d["named"] as? Bool) ?? false,
+                                 readonly: (d["readonly"] as? Bool) ?? false)
             }
             self.fingersLoaded = true
             self.rebuildFingerList()
         }
+    }
+
+    /// The sensor was paired on another operating system. macOS only sees the spoofed Mac values,
+    /// so the real product name and serial have to be copied from Windows or Linux once.
+    private func askHostIdentity(refused: Bool) {
+        let alert = NSAlert()
+        alert.messageText = refused ? "The sensor refused those values" : "This sensor needs this laptop's real identity"
+        var info = ""
+        if refused { info += "Check both values against the other operating system.\n\n" }
+        info += "The sensor was paired on another operating system. macOS can't read the real product name and serial on a Hackintosh, so copy them once:\n\n"
+        info += "Windows (PowerShell):\nGet-CimInstance Win32_ComputerSystemProduct | Select Name,IdentifyingNumber\n\n"
+        info += "Linux:\ncat /sys/class/dmi/id/product_name /sys/class/dmi/id/product_serial\n\n"
+        info += "Name is the product name, IdentifyingNumber is the serial."
+        alert.informativeText = info
+        alert.addButton(withTitle: "Save and Load")
+        alert.addButton(withTitle: "Cancel")
+        let product = NSTextField(frame: NSRect(x: 0, y: 30, width: 300, height: 24))
+        product.placeholderString = "Product name"
+        let serial = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        serial.placeholderString = "Serial number"
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 56))
+        box.addSubview(product)
+        box.addSubview(serial)
+        alert.accessoryView = box
+        alert.window.initialFirstResponder = product
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self else { return }
+            guard response == .alertFirstButtonReturn else {
+                self.fingersStatus.stringValue = "Cancelled. Click Load to try again."
+                return
+            }
+            let p = product.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let s = serial.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.isEmpty || s.isEmpty || p.count > 120 || s.count > 120 || p.contains("\n") || s.contains("\n") {
+                self.fingersStatus.stringValue = "Both values are needed (up to 120 characters). Click Load to try again."
+                return
+            }
+            self.loadFingers(["--host-product", p, "--host-serial", s, "--save-host-identity"])
+        }
+        if let w = mainView.window { alert.beginSheetModal(for: w, completionHandler: finish) } else { finish(alert.runModal()) }
     }
 
     @objc private func renameFingerTapped(_ sender: NSButton) {
