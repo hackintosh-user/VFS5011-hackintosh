@@ -13,10 +13,10 @@ VERSION="${1:-1.0.0}"
 ZIP_NAME="HackintoshTouchID-v${VERSION}.zip"
 
 echo "==> Packaging release zip"
-cd build
-rm -f "../$ZIP_NAME"
-zip -r "../$ZIP_NAME" "Hackintosh Touch-ID.app" > /dev/null
-cd ..
+cd "$SCRIPT_DIR/../shared/menubar/build"
+rm -f "$SCRIPT_DIR/$ZIP_NAME"
+zip -r "$SCRIPT_DIR/$ZIP_NAME" "Hackintosh Touch-ID.app" > /dev/null
+cd "$SCRIPT_DIR"
 
 echo "==> Done: $ZIP_NAME"
 echo "    Upload this file as a Release asset on GitHub."
