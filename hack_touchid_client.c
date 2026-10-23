@@ -35,6 +35,8 @@
 #include <limits.h>
 #include <dirent.h>
 #include <pwd.h>
+#include <grp.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <strings.h>
 #include <sys/utsname.h>
@@ -5514,11 +5516,11 @@ static void do_settings_menu(void) {
 /* ------------------------------------------------------------------ *
  * System Settings preference pane install
  * ------------------------------------------------------------------ *
- * The pane is NOT built or installed automatically. prep_and_build.sh only
- * compiles it into shared/pane/build/HackTouchID.prefPane (and that
- * pre-compiled bundle is what ships on the branches). This copies that
+ * prep_and_build.sh compiles the pane into shared/pane/build/HackTouchID.prefPane
+ * (and that pre-compiled bundle is what ships on the branches). This copies that
  * bundle into the console user's ~/Library/PreferencePanes. Used by the
- * [I] menu option and by the question at the end of Deploy [3]. */
+ * [I] menu option, the question at the end of Deploy [3], and ensure_pane_installed()
+ * on an interactive start (which also builds the bundle when it is missing). */
 #define PANE_BUNDLE_NAME "HackTouchID.prefPane"
 
 static bool pane_bundle_path(char *out, size_t out_size) {
@@ -5649,6 +5651,112 @@ static bool offer_pane_instead_of_cli(void) {
     }
     vfsc_err("Could not open the preference pane. Continuing with the CLI client.\n\n");
     return false;
+}
+
+/* ---- First launch: build and install the pane ----
+ * On an interactive start the client makes sure the preference pane is installed and current,
+ * then offer_pane_instead_of_cli() asks "pane or CLI". Order:
+ *   1. a pane bundle already in shared/pane/build (prebuilt, or built by prep_and_build.sh) is used;
+ *   2. if there is none, it is compiled with build_prefpane.sh as the console user, with a
+ *      time limit (the updater once hung for good inside that swiftc step);
+ *   3. it is copied to ~/Library/PreferencePanes when it is missing or its version differs.
+ * Any failure prints one line and the client carries on with the CLI. --cli skips all of this. */
+#define PANE_BUILD_LIMIT_SECONDS 240
+#define PANE_BUILD_LOG "/tmp/htid-pane-build.log"
+
+static bool pane_bundle_version(const char *bundle, char *out, size_t cap) {
+    char cmd[PATH_MAX + 160];
+    snprintf(cmd, sizeof(cmd),
+             "/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \"%s/Contents/Info.plist\" 2>/dev/null",
+             bundle);
+    out[0] = '\0';
+    FILE *p = popen(cmd, "r");
+    if (!p) return false;
+    if (!fgets(out, (int)cap, p)) out[0] = '\0';
+    pclose(p);
+    out[strcspn(out, "\r\n")] = '\0';
+    return out[0] != '\0';
+}
+
+static bool build_pane_with_time_limit(struct passwd *pw) {
+    char script[PATH_MAX];
+    snprintf(script, sizeof(script), "%s/shared/pane/source/build_prefpane.sh", g_exec_dir);
+    if (access(script, R_OK) != 0) return false;
+    if (system("command -v swiftc >/dev/null 2>&1") != 0) {
+        vfsc_warn("The preference pane is not built yet and swiftc was not found.\n"
+                  "Install the Xcode Command Line Tools (xcode-select --install) or run ./prep_and_build.sh.\n\n");
+        return false;
+    }
+    printf("%sBuilding the preference pane (first launch, up to a minute or two)...%s\n", VFSC_CYAN, VFSC_RESET);
+    fflush(stdout);
+
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        setpgid(0, 0);
+        /* Build as the real user so the repo files keep their owner. */
+        if (pw && getuid() == 0) {
+            if (initgroups(pw->pw_name, (int)pw->pw_gid) != 0 || setgid(pw->pw_gid) != 0 ||
+                setuid(pw->pw_uid) != 0) _exit(126);
+        }
+        int in = open("/dev/null", O_RDONLY);
+        int out = open(PANE_BUILD_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+        if (out < 0) out = open("/dev/null", O_WRONLY);
+        if (in >= 0) dup2(in, STDIN_FILENO);
+        if (out >= 0) { dup2(out, STDOUT_FILENO); dup2(out, STDERR_FILENO); }
+        execl("/bin/bash", "bash", script, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+
+    int status = 0;
+    int waited = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) break;
+        if (r < 0) return false;
+        if (waited >= PANE_BUILD_LIMIT_SECONDS) {
+            kill(-pid, SIGKILL);
+            (void)waitpid(pid, &status, 0);
+            vfsc_warn("Building the preference pane took too long and was stopped.\n"
+                      "Details: %s\n\n", PANE_BUILD_LOG);
+            return false;
+        }
+        sleep(1);
+        waited++;
+        if (waited % 10 == 0) { printf("  still building (%ds)...\n", waited); fflush(stdout); }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        vfsc_warn("The preference pane failed to build. Details: %s\n\n", PANE_BUILD_LOG);
+        return false;
+    }
+    return true;
+}
+
+static void ensure_pane_installed(void) {
+    if (g_force_cli_mode) return;
+    if (!isatty(STDIN_FILENO) || getenv("HTID_NO_PAUSE") != NULL) return;
+    struct passwd *pw = console_user_entry();
+    if (!pw) return;
+
+    char src[PATH_MAX], inst[PATH_MAX];
+    struct passwd *ipw = NULL;
+    bool have_bundle = pane_bundle_path(src, sizeof(src));
+    bool installed = installed_pane_path(inst, sizeof(inst), &ipw);
+
+    if (installed && !have_bundle) return;
+    if (installed && have_bundle) {
+        char vsrc[64], vinst[64];
+        /* Same version, or a version that cannot be read: leave the installed pane alone. */
+        if (!pane_bundle_version(src, vsrc, sizeof(vsrc)) ||
+            !pane_bundle_version(inst, vinst, sizeof(vinst)) || strcmp(vsrc, vinst) == 0) return;
+        printf("%sThe preference pane is out of date (%s, latest %s). Updating it...%s\n",
+               VFSC_CYAN, vinst, vsrc, VFSC_RESET);
+    }
+    if (!have_bundle) {
+        if (!build_pane_with_time_limit(pw) || !pane_bundle_path(src, sizeof(src))) return;
+    }
+    (void)do_install_pane();
 }
 
 /* Deploy installs/reinstalls hack-touchid-agent-install.sh, which handles
@@ -8176,6 +8284,7 @@ int main(int argc, char **argv) {
     /* Interactive start only: when the preference pane is installed, offer to open it instead of
      * the CLI menu. Updater and post-update runs never ask. */
     if (!g_check_updates_mode && !g_menu_updater_mode && !g_post_update_mode) {
+        ensure_pane_installed();
         if (offer_pane_instead_of_cli()) return 0;
     }
 
