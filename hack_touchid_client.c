@@ -2055,6 +2055,8 @@ static void print_usage(void) {
     printf("  --cli               Skip the preference pane question and start the CLI client\n");
     printf("  --pane              Open the installed preference pane instead of the CLI client\n");
     printf("  --list-fingers      Print the enrolled prints as JSON and exit (used by the Settings pane)\n");
+    printf("  --mmis-connect      Metallica MIS: open a session with the sensor and report (used by the Settings pane)\n");
+    printf("  --mmis-calibrate    Metallica MIS: run the calibration and report (used by the Settings pane)\n");
     printf("  --rename-finger     With --finger-id ID --finger-name NAME: rename a print and exit\n");
     printf("  --delete-finger     With --finger-id ID: remove a print and exit (not on Metallica MIS)\n");
     printf("  --host-product X    Metallica MIS: use X as the host product name instead of this Mac's\n");
@@ -3508,6 +3510,8 @@ static void do_rename_metallica(void) {
 #define HT_FINGERS_LIST   1
 #define HT_FINGERS_RENAME 2
 #define HT_FINGERS_DELETE 3
+#define HT_FINGERS_CONNECT   4   /* --mmis-connect: open a secure session, report how it went */
+#define HT_FINGERS_CALIBRATE 5   /* --mmis-calibrate: run the calibration, report how it went */
 static int g_fingers_cmd = HT_FINGERS_NONE;
 static const char *g_finger_id_arg = NULL;
 static const char *g_finger_name_arg = NULL;
@@ -3532,9 +3536,44 @@ static void ht_json_str(const char *s) {
     putchar('"');
 }
 
+/* The pane's "Details" button shows what the sensor code logged during this run. The Metallica
+ * code writes its diagnostics to MMIS_ENROLL_LOG_PATH (root only), so the client hands the new
+ * part of that log back inside the JSON. */
+static char g_ht_details[3200];
+static off_t g_ht_log_start = 0;
+
+static void ht_details_begin(void) {
+    struct stat st;
+    g_ht_log_start = (stat(MMIS_ENROLL_LOG_PATH, &st) == 0) ? st.st_size : 0;
+    g_ht_details[0] = '\0';
+}
+
+static void ht_details_collect(void) {
+    g_ht_details[0] = '\0';
+    FILE *f = fopen(MMIS_ENROLL_LOG_PATH, "r");
+    if (!f) return;
+    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    off_t end = ftello(f);
+    off_t from = g_ht_log_start;
+    if (from < 0 || from > end) from = 0;
+    if (end - from > (off_t)sizeof(g_ht_details) - 1) from = end - (off_t)(sizeof(g_ht_details) - 1);
+    if (fseeko(f, from, SEEK_SET) == 0) {
+        size_t n = fread(g_ht_details, 1, sizeof(g_ht_details) - 1, f);
+        g_ht_details[n] = '\0';
+    }
+    fclose(f);
+}
+
+static void ht_json_details(void) {
+    if (!g_ht_details[0]) return;
+    printf(",\"details\":");
+    ht_json_str(g_ht_details);
+}
+
 static int ht_json_fail(const char *msg) {
     printf("\nHTID-JSON-BEGIN\n{\"ok\":false,\"error\":");
     ht_json_str(msg);
+    ht_json_details();
     if (g_ht_err_code) {
         printf(",\"code\":");
         ht_json_str(g_ht_err_code);
@@ -3548,6 +3587,7 @@ static int ht_json_fail(const char *msg) {
 static int ht_json_done(const char *msg) {
     printf("\nHTID-JSON-BEGIN\n{\"ok\":true,\"message\":");
     ht_json_str(msg);
+    ht_json_details();
     printf("}\nHTID-JSON-END\n");
     fflush(stdout);
     return 0;
@@ -3769,7 +3809,61 @@ static int ht_delete_files(const char *id) {
 static void sensor_yield_begin(void);
 static void sensor_yield_end(void);
 
+/* --mmis-connect / --mmis-calibrate: the pane's Sensor page. Both run through the same host
+ * identity handling as everything else (default first, then the values the pane passes in). */
+static int mmis_calibrate_action(void) {
+    if (metallica_mis_open_device() != 0) return -1;
+    if (metallica_mis_send_init() != 0) { metallica_mis_close_device(); return -1; }
+    metallica_mis_tls_t tls;
+    if (metallica_mis_open_calibration_session(&tls) != 0) {
+        int rc = -1;
+        if (g_metallica_mis_session_fail == MMIS_FAIL_IDENTITY) rc = MMIS_SESSION_FAILED;
+        else if (g_metallica_mis_session_fail == MMIS_FAIL_HANDSHAKE) rc = MMIS_SESSION_HANDSHAKE;
+        metallica_mis_close_device();
+        return rc;
+    }
+    int rc = (metallica_mis_do_calibrate(&tls) == 0) ? 0 : -1;
+    metallica_mis_close_device();
+    return rc;
+}
+
+static int run_sensor_action_mode(void) {
+    if (!g_detected_sensor || !is_metallica_mis_sensor(g_detected_sensor))
+        return ht_json_fail("This page only applies to Metallica MIS / Prometheus sensors, and none was detected.");
+    bool calibrate = (g_fingers_cmd == HT_FINGERS_CALIBRATE);
+    g_ht_noninteractive = true;
+    g_mmis_need_identity = false;
+    g_mmis_stderr_to_log = true;
+    ht_details_begin();
+    int rc = -1;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        g_mmis_need_identity = false;
+        rc = mmis_run_with_host_identity(calibrate ? mmis_calibrate_action : mmis_list_action);
+        if (rc == 0 || g_mmis_need_identity) break;
+        if (attempt < 3) sleep(2);
+    }
+    g_mmis_stderr_to_log = false;
+    ht_details_collect();
+    if (rc == 0) {
+        ht_save_host_identity_if_asked();
+        char msg[160];
+        if (calibrate) snprintf(msg, sizeof(msg), "Calibration finished.");
+        else snprintf(msg, sizeof(msg), "Connected. The sensor holds %d print%s.", g_mmis_list_n, g_mmis_list_n == 1 ? "" : "s");
+        return ht_json_done(msg);
+    }
+    if (g_mmis_need_identity) {
+        g_ht_err_code = "need_host_identity";
+        return ht_json_fail("This sensor was paired on another operating system, so it needs this laptop's real "
+                            "product name and serial number.");
+    }
+    if (rc == MMIS_SESSION_HANDSHAKE)
+        return ht_json_fail("The sensor rejected the secure connection. Your host identity is fine. "
+                            "Wait about 10 seconds and try again.");
+    return ht_json_fail(calibrate ? "Calibration did not finish." : "Could not open a session with the sensor.");
+}
+
 static int run_fingers_mode(void) {
+    if (g_fingers_cmd == HT_FINGERS_CONNECT || g_fingers_cmd == HT_FINGERS_CALIBRATE) return run_sensor_action_mode();
     if (g_fingers_cmd == HT_FINGERS_LIST) return ht_list_fingers();
 
     if (!g_finger_id_arg) return ht_json_fail("Missing --finger-id.");
@@ -7858,6 +7952,14 @@ int main(int argc, char **argv) {
             g_fingers_cmd = HT_FINGERS_LIST;
             g_verbose_boot = false;
         }
+        if (strcmp(argv[i], "--mmis-connect") == 0) {
+            g_fingers_cmd = HT_FINGERS_CONNECT;
+            g_verbose_boot = false;
+        }
+        if (strcmp(argv[i], "--mmis-calibrate") == 0) {
+            g_fingers_cmd = HT_FINGERS_CALIBRATE;
+            g_verbose_boot = false;
+        }
         if (strcmp(argv[i], "--rename-finger") == 0) {
             g_fingers_cmd = HT_FINGERS_RENAME;
             g_verbose_boot = false;
@@ -7925,6 +8027,8 @@ int main(int argc, char **argv) {
         if (g_fingers_cmd == HT_FINGERS_LIST) sudo_argv[ai++] = "--list-fingers";
         if (g_fingers_cmd == HT_FINGERS_RENAME) sudo_argv[ai++] = "--rename-finger";
         if (g_fingers_cmd == HT_FINGERS_DELETE) sudo_argv[ai++] = "--delete-finger";
+        if (g_fingers_cmd == HT_FINGERS_CONNECT) sudo_argv[ai++] = "--mmis-connect";
+        if (g_fingers_cmd == HT_FINGERS_CALIBRATE) sudo_argv[ai++] = "--mmis-calibrate";
         if (g_finger_id_arg) { sudo_argv[ai++] = "--finger-id"; sudo_argv[ai++] = (char *)g_finger_id_arg; }
         if (g_finger_name_arg) { sudo_argv[ai++] = "--finger-name"; sudo_argv[ai++] = (char *)g_finger_name_arg; }
         if (g_metallica_mis_host_product_override) {
