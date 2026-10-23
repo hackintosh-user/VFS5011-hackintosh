@@ -293,6 +293,18 @@ class HackTouchIDPane: NSPreferencePane {
     private let fingersSpinner = NSProgressIndicator()
     private let fingerListHolder = NSStackView()
 
+    // Sensor tab state (Metallica MIS / Prometheus: connect and calibrate)
+    private var sensorPage: NSView?
+    private var sensorBusy = false
+    private var sensorDetails = ""
+    private let sensorStatus = label("Not run yet. Connect checks that this Mac can talk to the sensor.", secondary: true)
+    private let sensorSpinner = NSProgressIndicator()
+    private let sensorProduct = NSTextField()
+    private let sensorSerial = NSTextField()
+    private let sensorConnectButton = NSButton(title: "Connect", target: nil, action: nil)
+    private let sensorCalibrateButton = NSButton(title: "Calibrate", target: nil, action: nil)
+    private let sensorDetailsButton = NSButton(title: "Details", target: nil, action: nil)
+
     private var refreshTimer: Timer?
     private var observers: [NSObjectProtocol] = []
 
@@ -317,7 +329,7 @@ class HackTouchIDPane: NSPreferencePane {
 
         page.addArrangedSubview(buildHeader())
 
-        let seg = NSSegmentedControl(labels: ["General", "Fingerprints", "Updates", "About"], trackingMode: .selectOne,
+        let seg = NSSegmentedControl(labels: ["General", "Fingerprints", "Sensor", "Updates", "About"], trackingMode: .selectOne,
                                      target: self, action: #selector(pageChanged(_:)))
         seg.selectedSegment = 0
         page.addArrangedSubview(seg)
@@ -326,16 +338,19 @@ class HackTouchIDPane: NSPreferencePane {
         let general = buildGeneralPage()
         let fingersView = buildFingersPage()
         fingersView.isHidden = true
+        let sensorView = buildSensorPage()
+        sensorView.isHidden = true
         let updatesView = buildUpdatesPage()
         updatesView.isHidden = true
         let about = buildAboutPage()
         about.isHidden = true
-        for v in [general, fingersView, updatesView, about] {
+        for v in [general, fingersView, sensorView, updatesView, about] {
             page.addArrangedSubview(v)
             fillWidth(v, of: page)
         }
         generalPage = general
         fingersPage = fingersView
+        sensorPage = sensorView
         updatesPage = updatesView
         aboutPage = about
 
@@ -345,9 +360,9 @@ class HackTouchIDPane: NSPreferencePane {
     }
 
     @objc private func pageChanged(_ sender: NSSegmentedControl) {
-        let pages = [generalPage, fingersPage, updatesPage, aboutPage]
+        let pages = [generalPage, fingersPage, sensorPage, updatesPage, aboutPage]
         for (i, p) in pages.enumerated() { p?.isHidden = i != sender.selectedSegment }
-        if sender.selectedSegment == 2 && !updatesChecked { checkForUpdates() }
+        if sender.selectedSegment == 3 && !updatesChecked { checkForUpdates() }
     }
 
     override func mainViewDidLoad() {
@@ -778,6 +793,166 @@ class HackTouchIDPane: NSPreferencePane {
                 self.fingers.removeAll { $0.id == id }
                 self.rebuildFingerList()
             }
+        }
+        if let w = mainView.window { alert.beginSheetModal(for: w, completionHandler: finish) } else { finish(alert.runModal()) }
+    }
+
+    // MARK: Sensor page (Metallica MIS / Prometheus)
+
+    private func buildSensorPage() -> NSView {
+        let page = NSStackView()
+        page.orientation = .vertical
+        page.alignment = .leading
+        page.spacing = 16
+
+        for f in [sensorProduct, sensorSerial] {
+            f.translatesAutoresizingMaskIntoConstraints = false
+            f.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        }
+        sensorProduct.placeholderString = "Product name"
+        sensorSerial.placeholderString = "Serial number"
+        let identity = group("Host identity", rows: [
+            settingRow("Product name", control: sensorProduct),
+            settingRow("Serial number", control: sensorSerial),
+        ])
+
+        let hint = label("Only needed when Windows or Linux paired the sensor first. macOS cannot read the real "
+                         + "values on a Hackintosh, so copy them once and they are saved on this Mac.\n\n"
+                         + "Windows (PowerShell): Get-CimInstance Win32_ComputerSystemProduct | Select Name,IdentifyingNumber\n"
+                         + "Linux: cat /sys/class/dmi/id/product_name /sys/class/dmi/id/product_serial\n\n"
+                         + "Leave both boxes empty to try the saved values (or the default) first.", secondary: true)
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        hint.preferredMaxLayoutWidth = 560
+
+        sensorSpinner.style = .spinning
+        sensorSpinner.controlSize = .small
+        sensorSpinner.isDisplayedWhenStopped = false
+        sensorConnectButton.target = self
+        sensorConnectButton.action = #selector(sensorConnectTapped)
+        sensorCalibrateButton.target = self
+        sensorCalibrateButton.action = #selector(sensorCalibrateTapped)
+        sensorDetailsButton.target = self
+        sensorDetailsButton.action = #selector(sensorDetailsTapped)
+        sensorDetailsButton.isHidden = true
+        let connectControls = NSStackView(views: [sensorSpinner, sensorDetailsButton, sensorConnectButton])
+        connectControls.spacing = 8
+        let actions = group("Sensor", rows: [
+            settingRow("Connect", subtitle: sensorStatus, control: connectControls),
+            settingRow("Calibration", subtitle: label("Rewrites the sensor's calibration data. Keep your finger off the sensor.", secondary: true),
+                       control: sensorCalibrateButton),
+        ])
+
+        let note = label("These actions need your administrator password. The Details button shows what the "
+                         + "sensor code logged during the last run, so you can copy it into a bug report.", secondary: true)
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        note.preferredMaxLayoutWidth = 560
+
+        for v in [identity, hint, actions, note] { page.addArrangedSubview(v) }
+        fillWidth(identity, of: page)
+        fillWidth(actions, of: page)
+        return page
+    }
+
+    private func setSensorBusy(_ busy: Bool, message: String? = nil) {
+        sensorBusy = busy
+        if let m = message { sensorStatus.stringValue = m }
+        sensorConnectButton.isEnabled = !busy
+        sensorCalibrateButton.isEnabled = !busy
+        if busy { sensorSpinner.startAnimation(nil) } else { sensorSpinner.stopAnimation(nil) }
+    }
+
+    /// The two identity boxes as client arguments. nil means the values are not usable (a message is shown).
+    private func sensorIdentityArgs() -> [String]? {
+        let p = sensorProduct.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = sensorSerial.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if p.isEmpty && s.isEmpty { return [] }
+        if p.isEmpty || s.isEmpty || p.count > 120 || s.count > 120 || p.contains("\n") || s.contains("\n") {
+            sensorStatus.stringValue = "Fill in both boxes (up to 120 characters each), or leave both empty."
+            return nil
+        }
+        return ["--host-product", p, "--host-serial", s, "--save-host-identity"]
+    }
+
+    @objc private func sensorConnectTapped() {
+        guard !sensorBusy, let extra = sensorIdentityArgs() else { return }
+        runSensorAction(["--mmis-connect"] + extra, what: "Connect")
+    }
+
+    @objc private func sensorCalibrateTapped() {
+        guard !sensorBusy, let extra = sensorIdentityArgs() else { return }
+        let alert = NSAlert()
+        alert.messageText = "Calibrate the sensor?"
+        alert.informativeText = "This runs 3 capture passes and a blank capture, then erases and rewrites the sensor's "
+            + "calibration partition (flash partition 6). If the sensor is not paired yet, it can trigger a real pairing "
+            + "and a reboot of the sensor instead. Keep your finger off the sensor.\n\nType CALIBRATE to continue."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Calibrate")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "CALIBRATE"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            if field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) != "CALIBRATE" {
+                self.sensorStatus.stringValue = "Not started. Type CALIBRATE (all caps) to confirm."
+                return
+            }
+            self.runSensorAction(["--mmis-calibrate"] + extra, what: "Calibration")
+        }
+        if let w = mainView.window { alert.beginSheetModal(for: w, completionHandler: finish) } else { finish(alert.runModal()) }
+    }
+
+    private func runSensorAction(_ args: [String], what: String) {
+        setSensorBusy(true, message: "Waiting for your administrator password...")
+        sensorDetailsButton.isHidden = true
+        runClient(args) { [weak self] json, cancelled in
+            guard let self = self else { return }
+            self.setSensorBusy(false)
+            if cancelled { self.sensorStatus.stringValue = "Cancelled."; return }
+            guard let json = json else {
+                self.sensorDetails = "The client printed no result. Is it installed? Try sudo hack-touchid in Terminal."
+                self.sensorStatus.stringValue = "\(what) failed: could not run the client."
+                self.sensorDetailsButton.isHidden = false
+                return
+            }
+            let details = (json["details"] as? String) ?? ""
+            if (json["ok"] as? Bool) == true {
+                let msg = (json["message"] as? String) ?? "Done."
+                self.sensorStatus.stringValue = "Success: \(msg)"
+                self.sensorDetails = "Result: \(msg)\n\n" + (details.isEmpty ? "No sensor log lines for this run." : details)
+            } else {
+                var msg = (json["error"] as? String) ?? "\(what) failed."
+                if (json["code"] as? String) == "need_host_identity" {
+                    let refused = (json["refused"] as? Bool) ?? false
+                    msg = refused ? "The sensor refused those values. Check both against the other operating system."
+                                  : "This sensor needs this laptop's real product name and serial. Fill in both boxes above and press Connect."
+                }
+                self.sensorStatus.stringValue = "Failed: \(msg)"
+                self.sensorDetails = "Result: \(msg)\n\n" + (details.isEmpty ? "No sensor log lines for this run." : details)
+            }
+            self.sensorDetailsButton.isHidden = false
+        }
+    }
+
+    @objc private func sensorDetailsTapped() {
+        let alert = NSAlert()
+        alert.messageText = "What happened"
+        alert.informativeText = "The end of the sensor log from the last run."
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+        tv.isEditable = false
+        tv.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.string = sensorDetails
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+        scroll.hasVerticalScroller = true
+        scroll.documentView = tv
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Copy")
+        alert.addButton(withTitle: "Close")
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(self.sensorDetails, forType: .string)
         }
         if let w = mainView.window { alert.beginSheetModal(for: w, completionHandler: finish) } else { finish(alert.runModal()) }
     }
