@@ -217,6 +217,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Used by the client's [X] Uninstall: remove the login item, then
+        // exit without showing anything.
+        if CommandLine.arguments.contains("--unregister-login-item") {
+            try? SMAppService.mainApp.unregister()
+            NSLog("VFS5011MenuBar: login item unregistered by --unregister-login-item")
+            exit(0)
+        }
+
         // This is a menu bar-only utility -- no Dock icon, no main window.
         NSApp.setActivationPolicy(.accessory)
 
@@ -258,13 +266,72 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     // survive even after the person removes the login item in System
     // Settings, wrongly skipping re-registration forever after.
     private func registerAsLoginItemIfNeeded() {
-        guard SMAppService.mainApp.status != .enabled else { return }
+        guard SMAppService.mainApp.status != .enabled else {
+            writeSetupStatus()
+            return
+        }
 
         do {
             try SMAppService.mainApp.register()
             NSLog("VFS5011MenuBar: registered as a login item")
         } catch {
             NSLog("VFS5011MenuBar: failed to register as a login item: \(error.localizedDescription)")
+        }
+        writeSetupStatus()
+    }
+
+    // MARK: - Setup status file
+
+    // The client's Deploy reads this after launching the app, to tell the
+    // person whether notifications and the login item actually got set up.
+    // Location: ~/Library/Application Support/Hackintosh Touch-ID/setup.status
+    // Format: key=value lines (notifications=, loginitem=, version=).
+    // Rewritten after the login item registration and after the
+    // notification permission answer, so the last write is the full picture.
+    private func writeSetupStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { (settings: UNNotificationSettings) -> Void in
+            // Kept as small, fully typed steps on purpose: long interpolated
+            // strings and untyped multi-statement closures type-check very
+            // slowly on older machines (swiftc looked hung on the DV6).
+            var notifications: String = "unknown"
+            switch settings.authorizationStatus {
+            case .authorized:    notifications = "authorized"
+            case .provisional:   notifications = "provisional"
+            case .denied:        notifications = "denied"
+            case .notDetermined: notifications = "notDetermined"
+            default:             notifications = "unknown"
+            }
+
+            var loginItem: String = "unknown"
+            switch SMAppService.mainApp.status {
+            case .enabled:          loginItem = "enabled"
+            case .requiresApproval: loginItem = "requiresApproval"
+            case .notRegistered:    loginItem = "notRegistered"
+            case .notFound:         loginItem = "notFound"
+            default:                loginItem = "unknown"
+            }
+
+            var version: String = "unknown"
+            if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+                version = v
+            }
+
+            var text: String = ""
+            text += "notifications=" + notifications + "\n"
+            text += "loginitem=" + loginItem + "\n"
+            text += "version=" + version + "\n"
+
+            let fm: FileManager = FileManager.default
+            let bases: [URL] = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            guard let base: URL = bases.first else { return }
+            let dir: URL = base.appendingPathComponent("Hackintosh Touch-ID", isDirectory: true)
+            let file: URL = dir.appendingPathComponent("setup.status")
+            do {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+                try text.write(to: file, atomically: true, encoding: String.Encoding.utf8)
+            } catch {
+                NSLog("VFS5011MenuBar: could not write setup.status: " + error.localizedDescription)
+            }
         }
     }
 
@@ -519,12 +586,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+        center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             if let error = error {
                 NSLog("VFS5011MenuBar: notification permission error: \(error.localizedDescription)")
             } else if !granted {
                 NSLog("VFS5011MenuBar: notification permission denied by user")
             }
+            self?.writeSetupStatus()
         }
     }
 
