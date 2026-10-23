@@ -1967,6 +1967,7 @@ static void print_menu(void) {
     printf("\n");
     printf("%sUtilities%s\n", VFSC_DIM, VFSC_RESET);
     printf("%s[I]%s Install Preference Pane (System Settings)\n", VFSC_BOLD, VFSC_RESET);
+    printf("%s[M]%s Install / Repair Menu Bar App\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[D]%s Diagnose (generate a report for troubleshooting)\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[S]%s Settings\n", VFSC_BOLD, VFSC_RESET);
     printf("%s[A]%s About\n", VFSC_BOLD, VFSC_RESET);
@@ -2135,6 +2136,234 @@ static void do_fpbootd_stub(void) {
               "Coming in a follow-up update.\n\n");
 }
 
+/* ------------------------------------------------------------------ *
+ * Menu bar app as a Deploy dependency
+ * ------------------------------------------------------------------ *
+ * The pre-compiled app ships in shared/menubar/build/. Deploy [3] and the
+ * [M] menu option install it to /Applications, start it for the console
+ * user and report whether notifications and the login item got set up.
+ * The app registers its own login item (SMAppService) and asks for its own
+ * notification permission; it reports both in
+ *   ~/Library/Application Support/Hackintosh Touch-ID/setup.status
+ * which is polled here. The binary is only replaced when it differs, since
+ * an ad-hoc signed app can lose its notification permission when the
+ * binary changes. [X] Uninstall removes the app and its login item. */
+#define MENUBAR_APP_NAME      "Hackintosh Touch-ID.app"
+#define MENUBAR_APP_DEST      "/Applications/" MENUBAR_APP_NAME
+#define MENUBAR_BINARY_REL    "Contents/MacOS/HackintoshTouchID"
+#define MENUBAR_STATUS_DIR    "Library/Application Support/Hackintosh Touch-ID"
+#define MENUBAR_STATUS_FILE   "setup.status"
+#define MENUBAR_POLL_SECONDS  12
+/* The [H] makes the pattern not match the sh -c command line that carries it. */
+#define MENUBAR_PROC_PATTERN  "Hackintosh Touch-ID.app/Contents/MacOS/[H]ackintoshTouchID"
+
+static struct passwd *menubar_console_user(void) {
+    const char *sudo_user = getenv("SUDO_USER");
+    struct passwd *pw = NULL;
+    if (sudo_user && *sudo_user && strcmp(sudo_user, "root") != 0) pw = getpwnam(sudo_user);
+    if (!pw) pw = getpwuid(getuid());
+    if (!pw || !pw->pw_dir || !*pw->pw_dir) return NULL;
+    return pw;
+}
+
+static bool menubar_bundle_path(char *out, size_t out_size) {
+    snprintf(out, out_size, "%s/shared/menubar/build/%s", g_exec_dir, MENUBAR_APP_NAME);
+    struct stat st;
+    return stat(out, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool menubar_app_installed(void) {
+    return access(MENUBAR_APP_DEST "/" MENUBAR_BINARY_REL, X_OK) == 0;
+}
+
+static bool menubar_app_running(void) {
+    return system("pgrep -f '" MENUBAR_PROC_PATTERN "' >/dev/null 2>&1") == 0;
+}
+
+static void menubar_quit_app(void) {
+    system("pkill -f '" MENUBAR_PROC_PATTERN "' >/dev/null 2>&1");
+    for (int i = 0; i < 10 && menubar_app_running(); i++) usleep(300000);
+    if (menubar_app_running()) {
+        system("pkill -9 -f '" MENUBAR_PROC_PATTERN "' >/dev/null 2>&1");
+        usleep(300000);
+    }
+}
+
+/* Runs a command inside the console user's GUI session, as that user. */
+static int menubar_run_as_user(struct passwd *pw, const char *command) {
+    char cmd[PATH_MAX * 2 + 256];
+    snprintf(cmd, sizeof(cmd), "launchctl asuser %d sudo -u '%s' %s",
+             (int)pw->pw_uid, pw->pw_name, command);
+    return system(cmd);
+}
+
+static void menubar_status_path(struct passwd *pw, char *out, size_t out_size) {
+    snprintf(out, out_size, "%s/%s/%s", pw->pw_dir, MENUBAR_STATUS_DIR, MENUBAR_STATUS_FILE);
+}
+
+/* Reads one key from setup.status into value. Returns false if the file or key is missing. */
+static bool menubar_read_status(const char *path, const char *key, char *value, size_t value_size) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    char line[256];
+    size_t klen = strlen(key);
+    bool found = false;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            line[strcspn(line, "\r\n")] = '\0';
+            snprintf(value, value_size, "%s", line + klen + 1);
+            found = true;
+            break;
+        }
+    }
+    fclose(fp);
+    return found;
+}
+
+static bool do_install_menubar(void) {
+    char src[PATH_MAX];
+    if (!menubar_bundle_path(src, sizeof(src))) {
+        vfsc_err("Pre-compiled menu bar app not found:\n  %s/shared/menubar/build/%s\n"
+                 "Update the client, or run Hackintosh-TouchID-Menubar/build_menubar_app.sh.\n\n",
+                 g_exec_dir, MENUBAR_APP_NAME);
+        return false;
+    }
+    struct passwd *pw = menubar_console_user();
+    if (!pw) {
+        vfsc_err("Could not work out which user to install the menu bar app for.\n\n");
+        return false;
+    }
+
+    printf("%sInstalling the menu bar app for %s...%s\n", VFSC_CYAN, pw->pw_name, VFSC_RESET);
+
+    char cmd[PATH_MAX * 3 + 256];
+    char status_path[PATH_MAX];
+    menubar_status_path(pw, status_path, sizeof(status_path));
+
+    bool installed = menubar_app_installed();
+    bool same = false;
+    if (installed) {
+        snprintf(cmd, sizeof(cmd), "cmp -s \"%s/%s\" \"%s/%s\"",
+                 src, MENUBAR_BINARY_REL, MENUBAR_APP_DEST, MENUBAR_BINARY_REL);
+        same = system(cmd) == 0;
+    }
+
+    bool replaced = false;
+    if (same) {
+        vfsc_ok("Menu bar app is already up to date: %s\n", MENUBAR_APP_DEST);
+    } else {
+        if (menubar_app_running()) {
+            printf("Quitting the running menu bar app...\n");
+            menubar_quit_app();
+        }
+        snprintf(cmd, sizeof(cmd),
+                 "rm -rf \"%s\" && ditto \"%s\" \"%s\" && xattr -cr \"%s\" 2>/dev/null; "
+                 "test -x \"%s/%s\"",
+                 MENUBAR_APP_DEST, src, MENUBAR_APP_DEST, MENUBAR_APP_DEST,
+                 MENUBAR_APP_DEST, MENUBAR_BINARY_REL);
+        if (system(cmd) != 0) {
+            vfsc_err("Could not copy the menu bar app to /Applications.\n\n");
+            return false;
+        }
+        replaced = true;
+        vfsc_ok("%s menu bar app: %s\n", installed ? "Updated" : "Installed", MENUBAR_APP_DEST);
+    }
+
+    /* Launch when we just replaced it, or when it is not running. A healthy
+     * running app that did not change is left alone. */
+    bool running = menubar_app_running();
+    bool launched = false;
+    if (replaced || !running) {
+        unlink(status_path); /* so the poll below only sees this launch */
+        printf("Starting the menu bar app...\n");
+        if (menubar_run_as_user(pw, "/usr/bin/open \"" MENUBAR_APP_DEST "\" >/dev/null 2>&1") != 0) {
+            snprintf(cmd, sizeof(cmd), "sudo -u '%s' /usr/bin/open \"%s\" >/dev/null 2>&1",
+                     pw->pw_name, MENUBAR_APP_DEST);
+            if (system(cmd) != 0) {
+                vfsc_warn("Could not start the menu bar app. Open it from /Applications once.\n\n");
+                return true; /* installed, just not started: not fatal */
+            }
+        }
+        launched = true;
+    }
+
+    /* Wait for the app to report its notification and login item state. */
+    char notif[32] = {0}, login[32] = {0}, ver[32] = {0};
+    bool have_status = false;
+    int waited = 0;
+    if (launched) printf("Waiting for the app to report its setup status (up to %d s)...\n", MENUBAR_POLL_SECONDS);
+    do {
+        notif[0] = login[0] = '\0';
+        bool n = menubar_read_status(status_path, "notifications", notif, sizeof(notif));
+        bool l = menubar_read_status(status_path, "loginitem", login, sizeof(login));
+        have_status = n && l;
+        /* notDetermined means the permission prompt is still on screen. */
+        if (have_status && strcmp(notif, "notDetermined") != 0) break;
+        if (!launched) break;
+        sleep(1);
+    } while (++waited < MENUBAR_POLL_SECONDS);
+    menubar_read_status(status_path, "version", ver, sizeof(ver));
+
+    if (!have_status) {
+        vfsc_warn("The menu bar app did not report its status. It may still be starting;\n"
+                  "check that its icon is in the menu bar.\n\n");
+        return true;
+    }
+
+    if (ver[0]) printf("Menu bar app version: %s\n", ver);
+
+    if (strcmp(notif, "authorized") == 0 || strcmp(notif, "provisional") == 0) {
+        vfsc_ok("Notifications: allowed.\n");
+    } else if (strcmp(notif, "denied") == 0) {
+        vfsc_warn("Notifications: DENIED. Opening System Settings > Notifications.\n"
+                  "Find \"Hackintosh Touch-ID\" and turn on Allow Notifications.\n");
+        menubar_run_as_user(pw, "/usr/bin/open "
+            "\"x-apple.systempreferences:com.apple.Notifications-Settings.extension\" >/dev/null 2>&1");
+    } else {
+        vfsc_warn("Notifications: waiting for your answer to the permission prompt (state: %s).\n"
+                  "Click Allow on the prompt, or use [M] later to check again.\n", notif);
+    }
+
+    if (strcmp(login, "enabled") == 0) {
+        vfsc_ok("Login item: enabled (starts at login).\n");
+    } else if (strcmp(login, "requiresApproval") == 0) {
+        vfsc_warn("Login item: needs your approval. Opening System Settings > Login Items.\n"
+                  "Turn on \"Hackintosh Touch-ID\" under Allow in the Background.\n");
+        menubar_run_as_user(pw, "/usr/bin/open "
+            "\"x-apple.systempreferences:com.apple.LoginItems-Settings.extension\" >/dev/null 2>&1");
+    } else {
+        vfsc_warn("Login item: not enabled (state: %s). Check System Settings > General > Login Items.\n", login);
+    }
+    printf("\n");
+    return true;
+}
+
+/* Used by [X] Uninstall: remove the login item, quit the app, delete it. */
+static void remove_menubar_app(struct passwd *pw, int *problems) {
+    if (!menubar_app_installed() && access(MENUBAR_APP_DEST, F_OK) != 0) return;
+    if (pw && menubar_app_installed()) {
+        menubar_run_as_user(pw, "\"" MENUBAR_APP_DEST "/" MENUBAR_BINARY_REL "\" "
+                                "--unregister-login-item >/dev/null 2>&1");
+    }
+    menubar_quit_app();
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", MENUBAR_APP_DEST);
+    system(cmd);
+    if (access(MENUBAR_APP_DEST, F_OK) == 0) {
+        vfsc_err("Couldn't remove %s\n", MENUBAR_APP_DEST);
+        (*problems)++;
+    } else {
+        vfsc_ok("Removed %s and its login item.\n", MENUBAR_APP_DEST);
+    }
+    if (pw) {
+        char path[PATH_MAX], dir[PATH_MAX];
+        menubar_status_path(pw, path, sizeof(path));
+        unlink(path);
+        snprintf(dir, sizeof(dir), "%s/%s", pw->pw_dir, MENUBAR_STATUS_DIR);
+        rmdir(dir);
+    }
+}
+
 /* [X] Uninstall -- reverses do_deploy() for whichever sensor daemon(s)
  * are installed, natively (no per-sensor uninstall script exists).
  * Removes: the LaunchAgent registration + plist (console user's
@@ -2185,7 +2414,9 @@ static void do_uninstall(void) {
     bool agent_running = is_auth_service_deployed();
     bool log_present = access(HTID_AGENT_LOG_PATH, F_OK) == 0;
 
-    if (n_installed == 0 && !plist_present && !agent_running && !log_present) {
+    bool menubar_present = access(MENUBAR_APP_DEST, F_OK) == 0;
+
+    if (n_installed == 0 && !plist_present && !agent_running && !log_present && !menubar_present) {
         printf("Nothing to uninstall: no sensor daemon installed and no agent registered.\n\n");
         return;
     }
@@ -2195,6 +2426,7 @@ static void do_uninstall(void) {
     for (size_t i = 0; i < n_installed; i++) printf("  - delete daemon: %s\n", installed[i]);
     printf("  - remove its Accessibility (TCC) grant\n");
     printf("  - remove hack-touchid sudoers rule(s), if any\n");
+    if (menubar_present) printf("  - remove the menu bar app (%s) and its login item\n", MENUBAR_APP_DEST);
     if (log_present) printf("  - delete the agent log (%s)\n", HTID_AGENT_LOG_PATH);
     printf("Your enrolled fingers and the %s volume are NOT touched.\n", VOLUME_NAME);
     printf("Continue? [y/N]: ");
@@ -2262,6 +2494,9 @@ static void do_uninstall(void) {
         if (unlink(HTID_AGENT_LOG_PATH) == 0) vfsc_ok("Removed %s\n", HTID_AGENT_LOG_PATH);
         else { vfsc_err("Couldn't remove %s: %s\n", HTID_AGENT_LOG_PATH, strerror(errno)); problems++; }
     }
+
+    /* 5. Remove the menu bar app and its login item. */
+    if (menubar_present) remove_menubar_app(pw, &problems);
 
     /* Drop the install dir only if nothing else (config, fpbootd) lives there. */
     rmdir(HTID_INSTALL_DIR);
@@ -5428,6 +5663,17 @@ static bool do_deploy(void) {
         unmount_template_volume();
     }
 
+    /* Menu bar app: part of Deploy now. Non-fatal, a failure here never fails Deploy. */
+    {
+        char mb_src[PATH_MAX];
+        if (menubar_bundle_path(mb_src, sizeof(mb_src))) {
+            if (!do_install_menubar())
+                vfsc_warn("Menu bar app install failed. Deploy itself succeeded; retry with [M].\n\n");
+        } else {
+            vfsc_warn("Menu bar app bundle not found in shared/menubar/build, skipped.\n\n");
+        }
+    }
+
     /* Optional: offer the System Settings preference pane. Only when a person
      * is at a terminal (not for the menu bar updater / headless runs) and the
      * pre-compiled bundle is present. */
@@ -7913,7 +8159,7 @@ int main(int argc, char **argv) {
                 if (is_metallica_mis_sensor(g_detected_sensor)) {
                     do_pair_metallica_mis();
                 } else {
-                    printf("Unrecognized option '%s'. Choose 1, 2, 3, D, S, A, H, X, or Q.\n\n", line);
+                    printf("Unrecognized option '%s'. Choose 1, 2, 3, I, M, D, S, A, H, X, or Q.\n\n", line);
                     ran_action = false;
                 }
                 break;
@@ -7971,6 +8217,12 @@ int main(int argc, char **argv) {
                 break;
             case 'I': case 'i':
                 do_install_pane();
+                printf("Press Return to go back to the main menu...");
+                fflush(stdout);
+                getchar();
+                break;
+            case 'M': case 'm':
+                do_install_menubar();
                 printf("Press Return to go back to the main menu...");
                 fflush(stdout);
                 getchar();
