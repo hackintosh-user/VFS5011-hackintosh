@@ -15,6 +15,7 @@ int g_metallica_mis_force_pair = 0;
 const char *g_metallica_mis_host_product_override = NULL;
 const char *g_metallica_mis_host_serial_override = NULL;
 int g_metallica_mis_session_rebooted = 0;
+int g_metallica_mis_session_fail = 0;
 int g_metallica_mis_debug = 0;
 
 static void not_built(void) {
