@@ -11,7 +11,7 @@
   a real fingerprint sensor instead of a password.
   
   * Current version: ```v1.1.0```
-  * Current Menubar app version: ```v1.4.0```
+  * Current Menubar app version: ```v1.4.1```
   * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/CHANGELOG.md)
   * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development#supported-sensors)
   * Current Set ETA: **Mid October 2026**: Please keep in mind that this is only an ETA and not confirmed release date. Stuff could happen, it could release earlier or later on!
@@ -80,42 +80,51 @@ Features with Hackintosh Touch-ID:
 - **macOS Tahoe only**: Swipe to lock with the menubar app!
 
  
-## Menu Bar Companion App (optional)
+## Menu Bar Companion App
 
-
-`Hackintosh-TouchID-Menubar/` contains an optional menu bar app that surfaces the
-daemon's auth events as real notifications — useful since the sensor's
-LED can be too dim to notice on its own.
+`Hackintosh-TouchID-Menubar/` contains the menu bar app that surfaces the
+daemon's auth events as real notifications, useful since the sensor's
+LED can be too dim to notice on its own. It is installed by Deploy.
 
 - Notifies you the moment the daemon wants a swipe ("Swipe to
   authenticate! 🫆"), then whether it succeeded or failed
 - One-click toggle to pause/resume fingerprint auth without touching Terminal
 - Registers itself as a login item automatically on first launch (macOS
-  14+, via `SMAppService` — no manual LaunchAgent setup needed)
+  14+, via `SMAppService`, no manual LaunchAgent setup needed)
 - "About hackintosh Touch-ID" menu item with a short project summary and a link back
   here
 
-Completely optional — the daemon works identically with or without it
-running.
-
 ### Installing
-A Pre compiled app is in the [Releases page](https://github.com/hackintosh-user/VFS5011-hackintosh/releases/latest) but if you prefer to compile, here's the commands to run:
+
+A pre-compiled, ad-hoc signed x86_64 app is committed in
+`shared/menubar/build/`. The client installs it for you:
+
+- **[3] Deploy** copies it to `/Applications`, starts it, and checks that
+  notifications and the login item are set up. If macOS shows a
+  notification prompt, click Allow. If notifications were denied or the
+  login item needs approval, the client opens the right System Settings pane.
+- **[M] Install / Repair Menu Bar App** runs the same step on its own.
+- The app is only replaced when its binary differs from the installed one.
+- **[X] Uninstall** removes the app and its login item.
+
+If you prefer to compile it yourself:
 
 ```bash
 cd Hackintosh-TouchID-Menubar
 chmod +x build_menubar_app.sh
 ./build_menubar_app.sh
-open "build/Hackintosh Touch-ID.app"
 ```
 
+This writes the app to `shared/menubar/build/Hackintosh Touch-ID.app`.
 Requires Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
 and `iconutil`. No other dependencies. And it needs **macOS 14 Sonoma and later,** like the Daemon, Older versions may work but I don't know if they do you are on your own if you are on monterey and older.
 
 **IMPORTANT NOTE**: the Swipe to Lock feature is ment and will always be for **macOS 26 Tahoe only**.
 
-First launch will be blocked by Gatekeeper since this is ad-hoc signed,
-not notarized with a paid Apple Developer account — right-click the app →
-**Open** → **Open** again, or run `xattr -cr "Hackintosh Touch-ID.app"` once.
+The client clears the quarantine flag when it installs the app. If you
+copy the app by hand, the first launch is blocked by Gatekeeper since it is
+ad-hoc signed, not notarized: right-click the app, **Open**, **Open** again,
+or run `xattr -cr "Hackintosh Touch-ID.app"` once.
 
 ### Wiring it to the daemon
 
