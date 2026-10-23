@@ -115,7 +115,13 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
          * PAIRING ONLY: capture_quality_template() for this sensor
          * family still doesn't exist, so backend_available stays 0
          * until that's built -- Enroll/Verify/Deploy still refuse for
-         * this sensor exactly as before. */
+         * this sensor exactly as before.
+         * Oct 24: Enroll, Verify, lock screen and padlock unlock are now
+         * confirmed working on the X1C6 (06cb:009a), so this row is 1.
+         * The three Metallica MIS / Prometheus rows share one backend
+         * (is_metallica_mis_sensor() covers all of them), but the flag is
+         * per identity: each one flips to 1 only after real hardware
+         * has confirmed it. */
         .family              = "metallica",
         .deps_build          = HT_DEP_LIBUSB | HT_DEP_OPENSSL,
         .deps_runtime        = HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT,
@@ -124,7 +130,7 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
         .pid                  = 0x009a,
         .daemon_binary_name   = "metallica_mis_agent",
         .install_script_name  = "metallica/metallica_mis_agent_install.sh",
-        .backend_available    = 0,
+        .backend_available    = 1,
     },
     {
         /* Confirmed Aug 26 2026: python-validity's blobs_97.py is
@@ -141,7 +147,7 @@ static const hack_touchid_sensor_t HACK_TOUCHID_SENSORS[] = {
         .family              = "metallica",
         .deps_build          = HT_DEP_LIBUSB | HT_DEP_OPENSSL,
         .deps_runtime        = HT_DEP_LIBUSB | HT_DEP_OPENSSL | HT_DEP_INNOEXTRACT,
-        .display_name        = "Synaptics Metallica MIS",
+        .display_name        = "Synaptics Prometheus",
         .vid                  = 0x138a,
         .pid                  = 0x0097,
         .daemon_binary_name   = "metallica_mis_agent",
