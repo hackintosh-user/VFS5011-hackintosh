@@ -198,7 +198,7 @@ echo
 echo "Done. Binaries are built. Nothing has been deployed/installed yet."
 echo "Run the client and use Deploy [3] from the menu when you're ready:"
 echo "  sudo ./hack-touchid"
-echo "The preference pane (if built) is installed from the client too: [I] in the menu."
+echo "The preference pane (if built) is installed by the client on its first launch, and also with [I] in the menu."
 echo
 echo "If you're setting up Fpbootd (the pre-login daemon), that's a separate"
 echo "opt-in install, same reasoning as above -- run it yourself when ready:"
