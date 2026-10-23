@@ -616,7 +616,7 @@ class HackTouchIDPane: NSPreferencePane {
         fingersStatus.stringValue = status
 
         let rows: [NSView] = fingers.map { f in
-            let sub: NSTextField? = f.readonly ? label("Created in Windows", secondary: true)
+            let sub: NSTextField? = f.readonly ? label("Created on another OS", secondary: true)
                                                : (f.named ? nil : label("Not named yet", secondary: true))
             var buttons: [NSView] = []
             if !f.readonly {
