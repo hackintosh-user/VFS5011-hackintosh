@@ -24,6 +24,10 @@ extern int g_metallica_mis_force_pair;
 extern const char *g_metallica_mis_host_product_override;
 extern const char *g_metallica_mis_host_serial_override;
 extern int g_metallica_mis_session_rebooted;
+#define MMIS_FAIL_NONE      0
+#define MMIS_FAIL_IDENTITY  1
+#define MMIS_FAIL_HANDSHAKE 2
+extern int g_metallica_mis_session_fail;
 #define MMIS_SESSION_FAILED (-2)
 #define MMIS_SESSION_HANDSHAKE (-4)
 #define MMIS_ENROLL_CANCELLED (-3)
