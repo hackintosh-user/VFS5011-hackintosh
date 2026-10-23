@@ -3195,8 +3195,8 @@ static void mmis_print_label(int slot, char *out, size_t out_size) {
     const char *f = a ? NULL : metallica_mis_finger_name((uint16_t)slot);
     if (a) snprintf(out, out_size, "%s", a);
     else if (f) snprintf(out, out_size, "%s (not named)", f);
-    else if (slot == 245) snprintf(out, out_size, "Windows print");
-    else if (slot > 245 && slot <= 254) snprintf(out, out_size, "Windows print %d", slot - 244);
+    else if (slot == 245) snprintf(out, out_size, "Print from another OS");
+    else if (slot > 245 && slot <= 254) snprintf(out, out_size, "Print from another OS %d", slot - 244);
     else snprintf(out, out_size, "Print in slot %d (not named)", slot);
 }
 
@@ -3587,7 +3587,18 @@ static int ht_collect_metallica(void) {
     g_ht_noninteractive = true;
     g_mmis_need_identity = false;
     g_mmis_stderr_to_log = true;
-    int rc = mmis_run_with_host_identity(mmis_list_action);
+    /* The lock screen / padlock agent can still be holding the sensor when the pane asks for the
+     * prints (typing the admin password instead of using the finger leaves it mid-scan). The pane
+     * asks it to yield first (see run_fingers_mode's caller); if the sensor is still busy, give the
+     * agent a moment to let go and try again. A missing host identity is not a busy sensor, so
+     * that is never retried. */
+    int rc = -1;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        g_mmis_need_identity = false;
+        rc = mmis_run_with_host_identity(mmis_list_action);
+        if (rc == 0 || g_mmis_need_identity) break;
+        if (attempt < 3) sleep(2);
+    }
     g_mmis_stderr_to_log = false;
     if (rc == 0) ht_save_host_identity_if_asked();
     if (rc != 0 && g_mmis_need_identity) {
@@ -3599,8 +3610,9 @@ static int ht_collect_metallica(void) {
     }
     if (rc != 0) {
         snprintf(g_ht_err, sizeof(g_ht_err),
-                 "Could not read the prints from the sensor. If this Mac never opened the sensor, "
-                 "run the client once so it can ask for the host identity. Details: %s",
+                 "Could not read the prints from the sensor. It may still be busy, so wait a few "
+                 "seconds and press Load again. If this Mac never opened the sensor, run the client "
+                 "once so it can ask for the host identity. Details: %s",
                  MMIS_ENROLL_LOG_PATH);
         return -1;
     }
@@ -3615,13 +3627,14 @@ static int ht_collect_metallica(void) {
         const char *fname = metallica_mis_finger_name((uint16_t)slot);
         r->named = alias != NULL;
         r->readonly = false;
-        /* Windows Hello stores its prints as "unspecified finger" 0xF5 to 0xFE (245 to 254),
-         * outside the 1 to 10 range macOS uses, so they cannot carry a name here. */
+        /* Prints in slots 245 to 254 (0xF5 to 0xFE, "unspecified finger") are outside the 1 to 10
+         * range macOS uses, so they cannot carry a name here. They are most likely made by Windows
+         * Hello, but nothing on the sensor proves which OS made them, so the label stays neutral. */
         if (slot >= 245 && slot <= 254) {
             r->readonly = true;
             r->named = true;
-            if (slot == 245) snprintf(r->name, sizeof(r->name), "Windows print");
-            else snprintf(r->name, sizeof(r->name), "Windows print %d", slot - 244);
+            if (slot == 245) snprintf(r->name, sizeof(r->name), "Print from another OS");
+            else snprintf(r->name, sizeof(r->name), "Print from another OS %d", slot - 244);
         } else
         if (alias) snprintf(r->name, sizeof(r->name), "%s", alias);
         else if (fname) snprintf(r->name, sizeof(r->name), "%s", fname);
@@ -3752,6 +3765,9 @@ static int ht_delete_files(const char *id) {
     unmount_template_volume();
     return ok ? ht_json_done("Removed.") : ht_json_fail("Could not remove that print.");
 }
+
+static void sensor_yield_begin(void);
+static void sensor_yield_end(void);
 
 static int run_fingers_mode(void) {
     if (g_fingers_cmd == HT_FINGERS_LIST) return ht_list_fingers();
@@ -7739,9 +7755,12 @@ static void sensor_yield_end(void) {
 
 static void sensor_yield_begin(void) {
     if (g_sensor_yielded) return;
-    /* Swipe to Lock off (flag file absent) means the daemon is not holding the sensor. */
+    /* Swipe to Lock off (flag file absent) means the VFS5011 daemon is not holding the sensor.
+     * The Metallica lock screen / padlock agent holds it whenever a password prompt is up,
+     * whatever Swipe to Lock says, so for that sensor the flag file is not checked. */
+    bool yield_metallica = g_detected_sensor && is_metallica_mis_sensor(g_detected_sensor);
     struct stat yield_st;
-    if (stat("/Library/Application Support/VFS5011/lockswipe_enabled", &yield_st) != 0) return;
+    if (!yield_metallica && stat("/Library/Application Support/VFS5011/lockswipe_enabled", &yield_st) != 0) return;
     CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
     g_yield_ready_seen = false;
     CFNotificationCenterAddObserver(center, &g_yield_ready_seen, yield_ready_callback,
@@ -8031,7 +8050,13 @@ int main(int argc, char **argv) {
      * when it worked. */
     if (g_fingers_cmd != HT_FINGERS_NONE) {
         g_detected_sensor = detect_supported_sensor();
-        return run_fingers_mode();
+        /* Metallica reads and edits prints on the sensor itself, so the agent has to let go of it
+         * first. The other sensors only touch files. */
+        bool fingers_need_sensor = g_detected_sensor && is_metallica_mis_sensor(g_detected_sensor);
+        if (fingers_need_sensor) sensor_yield_begin();
+        int fingers_rc = run_fingers_mode();
+        if (fingers_need_sensor) sensor_yield_end();
+        return fingers_rc;
     }
 
     /* --deploy-agent short-circuits straight to run_deploy_agent_mode()
