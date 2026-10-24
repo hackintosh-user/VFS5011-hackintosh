@@ -1,9 +1,12 @@
 #!/bin/bash
 set -e
 APP_NAME="Hackintosh Touch-ID"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VFS5011MenuBar"
-ASSETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets"
-BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$SCRIPT_DIR/VFS5011MenuBar"
+ASSETS_DIR="$SCRIPT_DIR/Assets"
+# The pre-compiled app is committed to the repo and installed by the
+# client's Deploy [3] / [M], so it is built straight into shared/menubar/build.
+BUILD_DIR="$SCRIPT_DIR/../shared/menubar/build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
 echo "==> Cleaning old build"
