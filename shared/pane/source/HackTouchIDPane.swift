@@ -40,12 +40,12 @@ private enum Paths {
 }
 
 private enum Links {
-    static let website = "https://hackintosh-user.github.io/VFS5011-hackintosh/"
-    static let repo = "https://github.com/hackintosh-user/VFS5011-hackintosh"
-    static let releases = "https://github.com/hackintosh-user/VFS5011-hackintosh/releases"
-    static let issues = "https://github.com/hackintosh-user/VFS5011-hackintosh/issues"
-    static let rawBase = "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
-    static let releasesAPI = "https://api.github.com/repos/hackintosh-user/VFS5011-hackintosh/releases?per_page=30"
+    static let website = "https://hackintosh-user.github.io/hack-touchid/"
+    static let repo = "https://github.com/hackintosh-user/hack-touchid"
+    static let releases = "https://github.com/hackintosh-user/hack-touchid/releases"
+    static let issues = "https://github.com/hackintosh-user/hack-touchid/issues"
+    static let rawBase = "https://raw.githubusercontent.com/hackintosh-user/hack-touchid"
+    static let releasesAPI = "https://api.github.com/repos/hackintosh-user/hack-touchid/releases?per_page=30"
 }
 
 private let thresholdChoices = [20, 25, 30, 35, 40]
