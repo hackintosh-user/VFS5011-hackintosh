@@ -1,0 +1,4 @@
+VERSION=1.1.0
+BUILD=26B278
+BRANCH=active-development
+CRITICAL=false

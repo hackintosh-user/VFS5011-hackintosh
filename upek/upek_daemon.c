@@ -1,0 +1,919 @@
+/*
+ * upek_daemon.c
+ *
+ * Capture backend for the UPEK/AuthenTec TouchStrip Sensor-Only
+ * sensor (147e:2016), r/hackintosh-confirmed on a ThinkPad T420
+ * (Aug 16 2026). This fills in the "capture backend not built yet"
+ * gap noted against this sensor in supported_sensors.h.
+ *
+ * Ported from libfprint's upeksonly.c (Copyright 2008 Daniel Drake
+ * <dsd@gentoo.org>, LGPL 2.1) -- see upek_proto.h for the register
+ * tables and a note on where each one fits in the sequence below.
+ * libfprint's driver is async (libusb_transfer + callbacks running
+ * under a glib main loop, because it has to serve multiple sensors
+ * and share a process with other libfprint consumers). This project
+ * has no such constraint -- like vfs5011_daemon.c's capture path,
+ * this is a synchronous, blocking port: same register writes, same
+ * order, same thresholds, just via libusb_control_transfer() /
+ * libusb_bulk_transfer() / libusb_interrupt_transfer() called
+ * straight-line instead of submitted-and-awaited-via-callback. This
+ * is a substantially easier port than VFS5011 or Metallica MIS were:
+ * no blob playback, no ECDH, no firmware upload -- just 8-bit
+ * register read/write and one bulk stream.
+ *
+ * STATUS: capture function only, tested logic-only against the
+ * libfprint source (not yet run against real hardware -- Cold_
+ * Salamander7764 has a UPEK ThinkPad and is willing to test whenever
+ * he's free). NOT YET WIRED into hack_touchid_client.c's
+ * capture_fingerprint_image() dispatch or supported_sensors.h's
+ * backend_available flag -- that dispatch is currently hardcoded to
+ * VFS5011 (see hack_touchid_client.c around open_device() /
+ * capture_fingerprint_image()) and needs a small sensor-id branch
+ * added once this has a first real-hardware pass. Flagging that
+ * explicitly rather than flipping backend_available before hardware
+ * has actually confirmed it works, same policy this project already
+ * follows for Metallica MIS.
+ *
+ * Build (once wired into the client -- for now this compiles
+ * standalone via upek_capture_test_main() below for a first
+ * hardware smoke test):
+ *   clang upek_daemon.c -o upek_capture_test \
+ *       -I. -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <libusb.h>
+
+#include "upek_proto.h"
+
+/* ---- low-level register read/write, synchronous ---- */
+
+/* Oct 13: the first real report (Sonoma 14.8.9, 147e:2016) stalled the very first register write
+ * with LIBUSB_ERROR_PIPE. The request layout below is the one libfprint's upeksonly.c uses, but
+ * other layouts are tried by upek_probe_and_adapt() when it fails, and whichever works is kept
+ * for the rest of the session:
+ *   write 0: wValue=0,     wIndex=reg, 1 data byte (libfprint layout, default)
+ *   write 1: wValue=reg,   wIndex=0,   1 data byte
+ *   write 2: wValue=value, wIndex=reg, no data stage
+ *   read  0: wValue=0,     wIndex=reg, 8 bytes back (libfprint layout, default)
+ *   read  1: wValue=reg,   wIndex=0,   8 bytes back
+ *   read  2: wValue=0,     wIndex=reg, 1 byte back */
+static int g_upek_wr_layout = 0;
+static int g_upek_rd_layout = 0;
+/* Oct 24 (probe v2): which recipient bits are added to bmRequestType. 0 = device (libfprint),
+ * 1 = interface, 2 = endpoint. Only the probe changes this, and it keeps whichever works. */
+static int g_upek_recip = 0;
+#define UPEK_WR_REQTYPE (UPEK_CTRL_WRITE_REQTYPE | g_upek_recip)
+#define UPEK_RD_REQTYPE (UPEK_CTRL_READ_REQTYPE | g_upek_recip)
+
+static int upek_write_reg_layout(libusb_device_handle *handle, int layout, uint8_t reg, uint8_t value) {
+    unsigned char data = value;
+    int r;
+    switch (layout) {
+    case 1:
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
+                                    reg, 0, &data, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    case 2:
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
+                                    value, reg, NULL, 0, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    default:
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, &data, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    }
+    return r < 0 ? r : 0;
+}
+
+static int upek_read_reg_layout(libusb_device_handle *handle, int layout, uint8_t reg, uint8_t *out_value) {
+    unsigned char buf[UPEK_CTRL_READ_RESPONSE_LEN] = {0};
+    int r;
+    switch (layout) {
+    case 1:
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
+                                    reg, 0, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
+        break;
+    case 2:
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, buf, 1, UPEK_CTRL_TIMEOUT_MS);
+        break;
+    default:
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
+                                    0, reg, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
+        break;
+    }
+    if (r < 0) return r;
+    if (r < 1) return LIBUSB_ERROR_IO;
+    /* Only byte[0] of the response is meaningful, same as upeksonly.c's sm_read_reg_cb(). */
+    *out_value = buf[0];
+    return 0;
+}
+
+static int upek_read_reg(libusb_device_handle *handle, uint8_t reg, uint8_t *out_value) {
+    return upek_read_reg_layout(handle, g_upek_rd_layout, reg, out_value);
+}
+
+/* Mirrors sm_write_reg(). */
+static int upek_write_reg(libusb_device_handle *handle, uint8_t reg, uint8_t value) {
+    return upek_write_reg_layout(handle, g_upek_wr_layout, reg, value);
+}
+
+/* Mirrors sm_write_regs() -- writes a whole table in order, aborting
+ * on the first failure (same behavior as the original: one failed
+ * write tears down the whole sequence rather than skipping ahead). */
+static int upek_write_regs(libusb_device_handle *handle, const upek_regwrite_t *regs, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        int r = upek_write_reg(handle, regs[i].reg, regs[i].value);
+        if (r < 0) {
+            fprintf(stderr, "upek: write reg 0x%02x=0x%02x failed: %s\n",
+                    regs[i].reg, regs[i].value, libusb_error_name(r));
+            return r;
+        }
+    }
+    return 0;
+}
+
+/* ---- INITIALIZATION ---- */
+
+/* Mirrors initsm_run_state() end to end -- the writev table, then the
+ * four read-modify-write steps upek_proto.h documents but can't
+ * express as a static table. */
+static int upek_run_init(libusb_device_handle *handle) {
+    int r;
+    uint8_t val;
+
+    r = upek_write_regs(handle, UPEK_INIT_WRITEV_1, sizeof(UPEK_INIT_WRITEV_1) / sizeof(UPEK_INIT_WRITEV_1[0]));
+    if (r < 0) return r;
+
+    r = upek_read_reg(handle, 0x09, &val);
+    if (r < 0) return r;
+    r = upek_write_reg(handle, 0x09, (uint8_t)(val & ~0x08));
+    if (r < 0) return r;
+
+    r = upek_read_reg(handle, 0x13, &val);
+    if (r < 0) return r;
+    r = upek_write_reg(handle, 0x13, (uint8_t)(val & ~0x10));
+    if (r < 0) return r;
+
+    r = upek_write_reg(handle, 0x04, 0x00);
+    if (r < 0) return r;
+    r = upek_write_reg(handle, 0x05, 0x00);
+    if (r < 0) return r;
+
+    return 0;
+}
+
+/* ---- AWAIT FINGER ---- */
+
+/* Mirrors awfsm_run_state() end to end, finishing with a blocking
+ * interrupt read that only returns once a finger is actually on the
+ * sensor -- same trigger upeksonly.c uses instead of polling. */
+static int upek_await_finger(libusb_device_handle *handle) {
+    int r;
+    uint8_t val;
+
+    r = upek_write_regs(handle, UPEK_AWFSM_WRITEV_1, sizeof(UPEK_AWFSM_WRITEV_1) / sizeof(UPEK_AWFSM_WRITEV_1[0]));
+    if (r < 0) return r;
+
+    r = upek_read_reg(handle, 0x01, &val);
+    if (r < 0) return r;
+    r = upek_write_reg(handle, 0x01, (val != 0xc6) ? 0x46 : 0xc6);
+    if (r < 0) return r;
+
+    r = upek_write_regs(handle, UPEK_AWFSM_WRITEV_2, sizeof(UPEK_AWFSM_WRITEV_2) / sizeof(UPEK_AWFSM_WRITEV_2[0]));
+    if (r < 0) return r;
+
+    r = upek_read_reg(handle, 0x13, &val);
+    if (r < 0) return r;
+    r = upek_write_reg(handle, 0x13, (val != 0x45) ? 0x05 : 0x45);
+    if (r < 0) return r;
+
+    r = upek_write_regs(handle, UPEK_AWFSM_WRITEV_3, sizeof(UPEK_AWFSM_WRITEV_3) / sizeof(UPEK_AWFSM_WRITEV_3[0]));
+    if (r < 0) return r;
+
+    r = upek_read_reg(handle, 0x07, &val);
+    if (r < 0) return r;
+    if (val != 0x10 && val != 0x90) {
+        fprintf(stderr, "upek: warning: unexpected reg 0x07 value 0x%02x (expected 0x10 or 0x90)\n", val);
+    }
+    r = upek_write_reg(handle, 0x07, val);
+    if (r < 0) return r;
+
+    r = upek_write_regs(handle, UPEK_AWFSM_WRITEV_4, sizeof(UPEK_AWFSM_WRITEV_4) / sizeof(UPEK_AWFSM_WRITEV_4[0]));
+    if (r < 0) return r;
+
+    /* Blocking wait for the interrupt that signals finger-on-sensor.
+     * upeksonly.c logs the 4 interrupt bytes at debug level and
+     * otherwise ignores their content -- only the fact that the
+     * transfer completed matters. */
+    unsigned char intr_buf[4];
+    int transferred = 0;
+    r = libusb_interrupt_transfer(handle, UPEK_IN_ENDPOINT_INTR,
+        intr_buf, sizeof(intr_buf), &transferred, 0 /* no timeout: block until a finger arrives */);
+    if (r < 0) {
+        fprintf(stderr, "upek: interrupt wait failed: %s\n", libusb_error_name(r));
+        return r;
+    }
+    return 0;
+}
+
+/* ---- CAPTURE: row/image assembly state, mirrors struct sonly_dev's capture fields ---- */
+
+typedef struct {
+    unsigned char *rows[UPEK_MAX_ROWS];
+    size_t num_rows;
+
+    unsigned char *rowbuf;      /* IMG_WIDTH bytes, or NULL if not mid-row */
+    int rowbuf_offset;          /* -1 when rowbuf is inactive */
+
+    int wraparounds;
+    uint16_t last_seqnum;
+
+    int num_blank;
+    int finger_removed;
+} upek_capture_state_t;
+
+/* Mirrors compute_rows(): sum of absolute per-pixel differences (for
+ * "is this a new row"), and total brightness of the new row (for
+ * "has the finger lifted off"). */
+static void upek_compute_row_diff(const unsigned char *a, const unsigned char *b, int *out_diff, int *out_total) {
+    int diff = 0, total = 0;
+    for (int i = 0; i < UPEK_IMG_WIDTH; i++) {
+        diff += (a[i] > b[i]) ? (a[i] - b[i]) : (b[i] - a[i]);
+        total += b[i];
+    }
+    *out_diff = diff;
+    *out_total = total;
+}
+
+/* Mirrors row_complete(): decide whether the just-filled rowbuf is a
+ * genuinely new row worth keeping, a near-duplicate to discard, or
+ * evidence the finger has lifted off (via the blank-row run-length
+ * counter). Returns 1 if capture should stop (finger removed or row
+ * limit hit), 0 to keep going. Takes ownership of state->rowbuf on
+ * either path (keeps it in state->rows[], or frees it as a
+ * duplicate) and always clears rowbuf_offset back to -1 after. */
+static int upek_row_complete(upek_capture_state_t *state) {
+    state->rowbuf_offset = -1;
+
+    if (state->num_rows > 0) {
+        unsigned char *lastrow = state->rows[state->num_rows - 1];
+        int diff, total;
+        upek_compute_row_diff(lastrow, state->rowbuf, &diff, &total);
+
+        if (total < UPEK_ROW_BLANK_TOTAL_THRESHOLD) {
+            state->num_blank = 0;
+        } else {
+            state->num_blank++;
+            if (state->num_blank > UPEK_BLANK_ROWS_FOR_REMOVAL) {
+                state->finger_removed = 1;
+                free(state->rowbuf);
+                state->rowbuf = NULL;
+                return 1;
+            }
+        }
+
+        if (diff < UPEK_ROW_DIFF_THRESHOLD) {
+            /* Near-duplicate of the last row (slow part of the
+             * swipe) -- discard rather than keep, same as the
+             * original driver's early return here. */
+            free(state->rowbuf);
+            state->rowbuf = NULL;
+            return 0;
+        }
+    }
+
+    if (state->num_rows >= UPEK_MAX_ROWS) {
+        /* Shouldn't normally get here -- the caller checks the row
+         * count before starting a new row -- but guard anyway rather
+         * than overflow state->rows[]. */
+        free(state->rowbuf);
+        state->rowbuf = NULL;
+        return 1;
+    }
+
+    state->rows[state->num_rows++] = state->rowbuf;
+    state->rowbuf = NULL;
+
+    if (state->num_rows >= UPEK_MAX_ROWS) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Mirrors add_to_rowbuf(): append `size` bytes of packet payload
+ * (already past the 2-byte sequence header) into the in-progress
+ * row buffer. Returns 1 if capture should stop (via
+ * upek_row_complete), 0 to keep going. */
+static int upek_add_to_rowbuf(upek_capture_state_t *state, const unsigned char *data, int size) {
+    memcpy(state->rowbuf + state->rowbuf_offset, data, size);
+    state->rowbuf_offset += size;
+    if (state->rowbuf_offset >= UPEK_IMG_WIDTH) {
+        return upek_row_complete(state);
+    }
+    return 0;
+}
+
+/* Mirrors start_new_row(): a packet that starts a new row doesn't
+ * necessarily start it at byte 0 of that row (62 doesn't evenly
+ * divide 288), so the tail of the PREVIOUS row's last 2 bytes get
+ * folded in at the end of the new buffer before the new packet's
+ * data is copied in after them. This looks backwards at a glance but
+ * is exactly what upeksonly.c does -- kept as-is since it works. */
+static void upek_start_new_row(upek_capture_state_t *state, const unsigned char *data, int size) {
+    if (!state->rowbuf) {
+        state->rowbuf = malloc(UPEK_IMG_WIDTH);
+    }
+    memcpy(state->rowbuf + UPEK_IMG_WIDTH - 2, data, 2);
+    memcpy(state->rowbuf, data + 2, size - 2);
+    state->rowbuf_offset = size;
+}
+
+/* Mirrors rowbuf_remaining(): -1 if no row is in progress, else how
+ * many bytes of the NEXT packet still belong to the current row
+ * (capped to a full packet's 62 data bytes). */
+static int upek_rowbuf_remaining(const upek_capture_state_t *state) {
+    if (state->rowbuf_offset == -1) return -1;
+    int r = UPEK_IMG_WIDTH - state->rowbuf_offset;
+    return (r > UPEK_PACKET_DATA_SIZE) ? UPEK_PACKET_DATA_SIZE : r;
+}
+
+/* Mirrors handle_packet(): one 64-byte packet in, dispatched to
+ * whichever of the three cases above applies based on the running
+ * absolute byte address (sequence number * 62, adjusted for 14-bit
+ * wraparound). Returns 1 if capture should stop. */
+static int upek_handle_packet(upek_capture_state_t *state, const unsigned char *packet) {
+    uint16_t seqnum = (uint16_t)((packet[0] << 8) | packet[1]);
+    const unsigned char *data = packet + UPEK_PACKET_HEADER_SIZE;
+
+    if (seqnum <= state->last_seqnum) {
+        state->wraparounds++;
+    }
+    state->last_seqnum = seqnum;
+
+    long abs_seqnum = (long)seqnum + (long)state->wraparounds * UPEK_SEQNUM_WRAP;
+    long abs_base_addr = abs_seqnum * UPEK_PACKET_DATA_SIZE;
+
+    int for_rowbuf = upek_rowbuf_remaining(state);
+    if (for_rowbuf != -1) {
+        return upek_add_to_rowbuf(state, data, for_rowbuf);
+    }
+
+    if (abs_base_addr % UPEK_IMG_WIDTH == 0) {
+        upek_start_new_row(state, data, UPEK_PACKET_DATA_SIZE);
+        return 0;
+    }
+
+    long next_row_addr = ((abs_base_addr / UPEK_IMG_WIDTH) + 1) * UPEK_IMG_WIDTH;
+    long diff = next_row_addr - abs_base_addr;
+    if (diff < UPEK_PACKET_DATA_SIZE) {
+        upek_start_new_row(state, data + diff, (int)(UPEK_PACKET_DATA_SIZE - diff));
+    }
+    return 0;
+}
+
+/* ---- CAPTURE: full swipe, synchronous bulk-read loop ---- */
+
+/* Mirrors capsm_run_state() + the bulk transfer callback loop, minus
+ * the async transfer juggling (no need for it single-threaded and
+ * blocking). Returns a malloc'd UPEK_IMG_WIDTH x *out_height
+ * grayscale image on success (caller frees it), or NULL on failure.
+ * Shaped to match vfs5011's capture_fingerprint_image() so it can be
+ * wired into the same dispatch point once tested. */
+static unsigned char *upek_capture_swipe(libusb_device_handle *handle, int *out_height) {
+    int r;
+
+    r = upek_write_reg(handle, UPEK_CAPSM_PRE_WRITE_15, UPEK_CAPSM_PRE_WRITE_15_VAL);
+    if (r < 0) return NULL;
+    r = upek_write_reg(handle, UPEK_CAPSM_PRE_WRITE_30, UPEK_CAPSM_PRE_WRITE_30_VAL);
+    if (r < 0) return NULL;
+    r = upek_write_regs(handle, UPEK_CAPSM_WRITEV, sizeof(UPEK_CAPSM_WRITEV) / sizeof(UPEK_CAPSM_WRITEV[0]));
+    if (r < 0) return NULL;
+
+    upek_capture_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.rowbuf_offset = -1;
+    state.wraparounds = -1;
+    state.last_seqnum = UPEK_SEQNUM_WRAP - 1;
+
+    unsigned char *buf = malloc(UPEK_BULK_TRANSFER_SIZE);
+    if (!buf) return NULL;
+
+    int stop = 0;
+    while (!stop) {
+        int transferred = 0;
+        r = libusb_bulk_transfer(handle, UPEK_IN_ENDPOINT_BULK, buf,
+            UPEK_BULK_TRANSFER_SIZE, &transferred, UPEK_CTRL_TIMEOUT_MS * 5);
+        if (r < 0) {
+            fprintf(stderr, "upek: bulk read failed: %s\n", libusb_error_name(r));
+            break;
+        }
+        if (transferred != UPEK_BULK_TRANSFER_SIZE) {
+            fprintf(stderr, "upek: short bulk read (%d of %d bytes) -- treating as a dropped frame, continuing\n",
+                    transferred, UPEK_BULK_TRANSFER_SIZE);
+            continue;
+        }
+
+        for (int i = 0; i < UPEK_PACKETS_PER_TRANSFER; i++) {
+            stop = upek_handle_packet(&state, buf + i * UPEK_PACKET_SIZE);
+            if (stop) break;
+        }
+    }
+    free(buf);
+    if (state.rowbuf) free(state.rowbuf);
+
+    if (state.num_rows == 0) {
+        fprintf(stderr, "upek: no rows captured\n");
+        for (size_t i = 0; i < state.num_rows; i++) free(state.rows[i]);
+        return NULL;
+    }
+
+    /* upeksonly.c's handoff_img() builds rows[] as a reverse-order
+     * (most-recent-first) singly-linked list via g_slist_prepend and
+     * walks it once at the end, which produces the image in the
+     * correct top-to-bottom order despite the prepend. This port
+     * appends to an array in capture order instead, which already IS
+     * top-to-bottom -- so unlike the original, no reversal is needed
+     * here. */
+    unsigned char *image = malloc((size_t)UPEK_IMG_WIDTH * state.num_rows);
+    if (!image) {
+        for (size_t i = 0; i < state.num_rows; i++) free(state.rows[i]);
+        return NULL;
+    }
+    for (size_t i = 0; i < state.num_rows; i++) {
+        memcpy(image + i * UPEK_IMG_WIDTH, state.rows[i], UPEK_IMG_WIDTH);
+        free(state.rows[i]);
+    }
+
+    *out_height = (int)state.num_rows;
+    return image;
+}
+
+/* ---- DEINITIALIZATION ---- */
+
+static int upek_run_deinit(libusb_device_handle *handle) {
+    return upek_write_regs(handle, UPEK_DEINIT_WRITEV, sizeof(UPEK_DEINIT_WRITEV) / sizeof(UPEK_DEINIT_WRITEV[0]));
+}
+
+/* ---- Control-pipe probe (first-hardware-report diagnostics) ---- */
+
+#include <stdarg.h>
+
+#define UPEK_PROBE_REPORT_PATH "/tmp/htid-upek-probe.txt"
+static FILE *g_upek_report = NULL;
+
+static void upek_rep(const char *fmt, ...) {
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "upek: probe: %s\n", line);
+    if (g_upek_report) { fprintf(g_upek_report, "%s\n", line); fflush(g_upek_report); }
+}
+
+static void upek_probe_descriptors(libusb_device_handle *h) {
+    libusb_device *dev = libusb_get_device(h);
+    struct libusb_device_descriptor d;
+    if (libusb_get_device_descriptor(dev, &d) == 0) {
+        upek_rep("device %04x:%04x bcdUSB=%04x bcdDevice=%04x class=%u ep0max=%u configs=%u",
+                 d.idVendor, d.idProduct, d.bcdUSB, d.bcdDevice, d.bDeviceClass,
+                 d.bMaxPacketSize0, d.bNumConfigurations);
+    }
+    struct libusb_config_descriptor *cfg = NULL;
+    int r = libusb_get_active_config_descriptor(dev, &cfg);
+    if (r != 0 || !cfg) {
+        upek_rep("active config descriptor unavailable: %s", libusb_error_name(r));
+        return;
+    }
+    upek_rep("active config value=%u interfaces=%u maxpower=%umA", cfg->bConfigurationValue,
+             cfg->bNumInterfaces, cfg->MaxPower * 2);
+    bool has_bulk = false, has_intr = false;
+    for (int i = 0; i < cfg->bNumInterfaces; i++) {
+        for (int a = 0; a < cfg->interface[i].num_altsetting; a++) {
+            const struct libusb_interface_descriptor *id = &cfg->interface[i].altsetting[a];
+            upek_rep("  interface %u alt %u class=%02x/%02x/%02x endpoints=%u", id->bInterfaceNumber,
+                     id->bAlternateSetting, id->bInterfaceClass, id->bInterfaceSubClass,
+                     id->bInterfaceProtocol, id->bNumEndpoints);
+            for (int e = 0; e < id->bNumEndpoints; e++) {
+                const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
+                upek_rep("    endpoint 0x%02x attr=%02x maxpacket=%u interval=%u", ep->bEndpointAddress,
+                         ep->bmAttributes, ep->wMaxPacketSize, ep->bInterval);
+                if (ep->bEndpointAddress == UPEK_IN_ENDPOINT_BULK) has_bulk = true;
+                if (ep->bEndpointAddress == UPEK_IN_ENDPOINT_INTR) has_intr = true;
+            }
+        }
+    }
+    upek_rep("expected endpoints: bulk IN 0x%02x %s, interrupt IN 0x%02x %s", UPEK_IN_ENDPOINT_BULK,
+             has_bulk ? "present" : "MISSING", UPEK_IN_ENDPOINT_INTR, has_intr ? "present" : "MISSING");
+    libusb_free_config_descriptor(cfg);
+}
+
+static void upek_probe_standard(libusb_device_handle *h) {
+    unsigned char buf[18] = {0};
+    int r = libusb_control_transfer(h, 0x80, 0x00, 0, 0, buf, 2, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_STATUS: %s", libusb_error_name(r));
+    else upek_rep("standard GET_STATUS: ok, %02x %02x", buf[0], buf[1]);
+    r = libusb_control_transfer(h, 0x80, 0x08, 0, 0, buf, 1, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_CONFIGURATION: %s", libusb_error_name(r));
+    else upek_rep("standard GET_CONFIGURATION: ok, %u", buf[0]);
+    r = libusb_control_transfer(h, 0x80, 0x06, 0x0100, 0, buf, 18, UPEK_CTRL_TIMEOUT_MS);
+    if (r < 0) upek_rep("standard GET_DESCRIPTOR(device): %s", libusb_error_name(r));
+    else upek_rep("standard GET_DESCRIPTOR(device): ok, %d bytes (EP0 itself works)", r);
+}
+
+/* Tries every read and write layout once. Returns true when at least one write layout worked and
+ * adopts the first working write and read layout. */
+static bool upek_probe_layouts(libusb_device_handle *h, const char *stage) {
+    bool wr_ok = false;
+    upek_rep("-- register layouts (%s) --", stage);
+    for (int l = 0; l < 3; l++) {
+        uint8_t v = 0;
+        int r = upek_read_reg_layout(h, l, 0x09, &v);
+        if (r < 0) upek_rep("read layout %d (reg 0x09): %s", l, libusb_error_name(r));
+        else {
+            upek_rep("read layout %d (reg 0x09): ok, value 0x%02x", l, v);
+            if (g_upek_rd_layout == 0 || l < g_upek_rd_layout) g_upek_rd_layout = l;
+        }
+        (void)libusb_clear_halt(h, 0x00);
+        (void)libusb_clear_halt(h, 0x80);
+    }
+    for (int l = 0; l < 3; l++) {
+        int r = upek_write_reg_layout(h, l, 0x49, 0x00);
+        if (r < 0) upek_rep("write layout %d (reg 0x49=0x00): %s", l, libusb_error_name(r));
+        else {
+            upek_rep("write layout %d (reg 0x49=0x00): ok", l);
+            if (!wr_ok) { g_upek_wr_layout = l; wr_ok = true; }
+        }
+        (void)libusb_clear_halt(h, 0x00);
+    }
+    return wr_ok;
+}
+
+/* ---- Probe v2 (Oct 24) ----
+ * Round one showed: every vendor register write stalls, only read layout 1 (wValue=reg) answers
+ * (always 0x00), and a reset changes nothing. The register tables and request layout match
+ * libfprint's upeksonly 2016 driver exactly, so the next questions are about state and variant:
+ * which strings and speed does this unit report, does a different recipient or bRequest answer,
+ * does the sensor emit anything on its own, and does it react to an alternate-setting or
+ * clear-halt. Everything here is a read or a harmless repeat of the first init write (0x49=0x00). */
+
+static void upek_probe_identity(libusb_device_handle *h) {
+    libusb_device *dev = libusb_get_device(h);
+    struct libusb_device_descriptor d;
+    if (libusb_get_device_descriptor(dev, &d) != 0) return;
+    unsigned char s[128];
+    const struct { const char *name; uint8_t idx; } strs[] = {
+        { "manufacturer", d.iManufacturer }, { "product", d.iProduct }, { "serial", d.iSerialNumber },
+    };
+    for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
+        if (!strs[i].idx) { upek_rep("string %s: none", strs[i].name); continue; }
+        int r = libusb_get_string_descriptor_ascii(h, strs[i].idx, s, sizeof(s) - 1);
+        if (r < 0) upek_rep("string %s: %s", strs[i].name, libusb_error_name(r));
+        else { s[r] = '\0'; upek_rep("string %s: \"%s\"", strs[i].name, s); }
+    }
+    static const char *speeds[] = { "unknown", "low", "full", "high", "super", "super+" };
+    int sp = libusb_get_device_speed(dev);
+    upek_rep("bus %u address %u speed %s", libusb_get_bus_number(dev), libusb_get_device_address(dev),
+             (sp >= 0 && sp <= 5) ? speeds[sp] : "unknown");
+    uint8_t ports[8];
+    int np = libusb_get_port_numbers(dev, ports, sizeof(ports));
+    if (np > 0) {
+        char pbuf[64] = {0};
+        for (int i = 0; i < np; i++) {
+            char t[8];
+            snprintf(t, sizeof(t), i ? ".%u" : "%u", ports[i]);
+            strncat(pbuf, t, sizeof(pbuf) - strlen(pbuf) - 1);
+        }
+        upek_rep("port path %s", pbuf);
+    }
+    unsigned char b = 0xff;
+    int r = libusb_control_transfer(h, 0x81, 0x0a, 0, 0, &b, 1, 300);
+    if (r < 0) upek_rep("standard GET_INTERFACE(0): %s", libusb_error_name(r));
+    else upek_rep("standard GET_INTERFACE(0): alt %u", b);
+}
+
+/* Write (0x49 = 0x00, the first init write) with every recipient x layout. Keeps the first
+ * combination that gets through and then picks a matching read layout. */
+static bool upek_probe_recipients(libusb_device_handle *h, const char *stage) {
+    static const char *names[] = { "device", "interface", "endpoint" };
+    upek_rep("-- recipient sweep (%s) --", stage);
+    for (int rc = 0; rc < 3; rc++) {
+        g_upek_recip = rc;
+        for (int l = 0; l < 3; l++) {
+            int r = upek_write_reg_layout(h, l, 0x49, 0x00);
+            upek_rep("write recipient=%s layout %d: %s", names[rc], l, r < 0 ? libusb_error_name(r) : "ok");
+            (void)libusb_clear_halt(h, 0x00);
+            if (r >= 0) {
+                g_upek_wr_layout = l;
+                for (int rl = 0; rl < 3; rl++) {
+                    uint8_t v = 0;
+                    if (upek_read_reg_layout(h, rl, 0x09, &v) >= 0) {
+                        g_upek_rd_layout = rl;
+                        upek_rep("read recipient=%s layout %d (reg 0x09): ok, 0x%02x", names[rc], rl, v);
+                        break;
+                    }
+                    (void)libusb_clear_halt(h, 0x00);
+                    (void)libusb_clear_halt(h, 0x80);
+                }
+                return true;
+            }
+        }
+    }
+    g_upek_recip = 0;
+    return false;
+}
+
+/* Which vendor bRequest values does the device answer at all (device-to-host, 8 bytes back)? */
+static void upek_probe_request_sweep(libusb_device_handle *h) {
+    upek_rep("-- vendor read sweep: bRequest 0x00-0x3f, wValue=0, wIndex=0 --");
+    int answered = 0;
+    for (int req = 0; req < 0x40; req++) {
+        unsigned char buf[8] = {0};
+        int r = libusb_control_transfer(h, 0xc0, (uint8_t)req, 0, 0, buf, sizeof(buf), 300);
+        if (r >= 0) {
+            answered++;
+            upek_rep("bRequest 0x%02x answered %d bytes: %02x %02x %02x %02x %02x %02x %02x %02x", req, r,
+                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+        } else if (r != LIBUSB_ERROR_PIPE) {
+            upek_rep("bRequest 0x%02x: %s", req, libusb_error_name(r));
+        }
+        (void)libusb_clear_halt(h, 0x80);
+    }
+    if (!answered) upek_rep("no vendor bRequest in 0x00-0x3f answered a read");
+}
+
+/* Does the sensor say anything on its own, and does it react to alt setting 0 or clear-halt? */
+static void upek_probe_endpoints(libusb_device_handle *h) {
+    upek_rep("-- endpoint listen --");
+    int r = libusb_set_interface_alt_setting(h, 0, 0);
+    upek_rep("set_interface_alt_setting(0,0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    const uint8_t eps[] = { UPEK_IN_ENDPOINT_BULK, 0x02, UPEK_IN_ENDPOINT_INTR };
+    for (size_t i = 0; i < sizeof(eps); i++) {
+        r = libusb_clear_halt(h, eps[i]);
+        upek_rep("clear_halt(0x%02x): %s", eps[i], r == 0 ? "ok" : libusb_error_name(r));
+    }
+    unsigned char buf[UPEK_BULK_TRANSFER_SIZE];
+    int got = 0;
+    r = libusb_interrupt_transfer(h, UPEK_IN_ENDPOINT_INTR, buf, 8, &got, 400);
+    if (r == 0) upek_rep("interrupt IN 0x83: %d bytes, first %02x %02x %02x %02x", got, buf[0], buf[1], buf[2], buf[3]);
+    else upek_rep("interrupt IN 0x83: %s", libusb_error_name(r));
+    r = libusb_bulk_transfer(h, UPEK_IN_ENDPOINT_BULK, buf, sizeof(buf), &got, 300);
+    if (r == 0) upek_rep("bulk IN 0x81: %d bytes, first %02x %02x %02x %02x", got, buf[0], buf[1], buf[2], buf[3]);
+    else upek_rep("bulk IN 0x81: %s", libusb_error_name(r));
+}
+
+/* Returns 0 when some layout let a register write through (g_upek_*_layout are set), -1 when
+ * nothing worked. Everything it learns goes to stderr and to UPEK_PROBE_REPORT_PATH. */
+static int upek_probe_and_adapt(libusb_device_handle *h) {
+    g_upek_report = fopen(UPEK_PROBE_REPORT_PATH, "w");
+    upek_rep("UPEK control-pipe probe (macOS libusb %u.%u.%u)", libusb_get_version()->major,
+             libusb_get_version()->minor, libusb_get_version()->micro);
+    upek_rep("probe v2, Oct 24. Run it once right after a reboot, before anything else touches the sensor.");
+    upek_probe_descriptors(h);
+    upek_probe_standard(h);
+    upek_probe_identity(h);
+
+    int result = -1;
+    if (upek_probe_layouts(h, "as opened")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "as opened")) { result = 0; goto out; }
+    upek_probe_request_sweep(h);
+    upek_probe_endpoints(h);
+
+    /* Re-apply the configuration, then try again. */
+    upek_rep("-- re-applying configuration 1 --");
+    (void)libusb_release_interface(h, 0);
+    int r = libusb_set_configuration(h, 1);
+    upek_rep("set_configuration(1): %s", r == 0 ? "ok" : libusb_error_name(r));
+    r = libusb_claim_interface(h, 0);
+    upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    usleep(300000);
+    if (upek_probe_layouts(h, "after set_configuration")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "after set_configuration")) { result = 0; goto out; }
+
+    /* Last resort: full device reset. */
+    upek_rep("-- resetting the device --");
+    r = libusb_reset_device(h);
+    upek_rep("reset_device: %s", r == 0 ? "ok" : libusb_error_name(r));
+    usleep(1000000);
+    r = libusb_claim_interface(h, 0);
+    upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    if (upek_probe_layouts(h, "after reset")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "after reset")) { result = 0; goto out; }
+
+    upek_rep("RESULT: every register request layout was stalled by the sensor");
+out:
+    if (result == 0) upek_rep("RESULT: using write layout %d, read layout %d, recipient %d", g_upek_wr_layout, g_upek_rd_layout, g_upek_recip);
+    fprintf(stderr, "upek: probe report saved to %s, please send it\n", UPEK_PROBE_REPORT_PATH);
+    if (g_upek_report) { fclose(g_upek_report); g_upek_report = NULL; }
+    return result;
+}
+
+/* ---- Public capture entry point ---- */
+
+/* Full one-swipe capture: init -> await finger -> capture -> deinit.
+ * This is the function to call from hack_touchid_client.c's dispatch
+ * once wired in -- same shape as VFS5011's
+ * capture_fingerprint_image(), so integration should just be a
+ * VID:PID branch there rather than anything structural. Assumes the
+ * caller has already opened the device and claimed interface 0 (same
+ * division of responsibility as VFS5011's open_device(); this
+ * doesn't duplicate that step since it's identical across sensors --
+ * only the actual capture protocol differs). */
+unsigned char *upek_capture_fingerprint_image(libusb_device_handle *handle, int *out_height) {
+    int init_r = upek_run_init(handle);
+    if (init_r < 0) {
+        /* First report from real hardware (Oct 11): the very first register write (0x49) stalls
+         * with LIBUSB_ERROR_PIPE, the diagnostic read fails the same way and a reset does not
+         * help. Probe the control pipe, adopt a request layout that works if there is one, and
+         * leave a report for the next round. */
+        fprintf(stderr, "upek: init sequence failed (%s), probing the control pipe...\n", libusb_error_name(init_r));
+        if (upek_probe_and_adapt(handle) != 0) return NULL;
+        init_r = upek_run_init(handle);
+        if (init_r < 0) {
+            fprintf(stderr, "upek: init sequence failed again with the adopted layout (%s)\n", libusb_error_name(init_r));
+            return NULL;
+        }
+        fprintf(stderr, "upek: init worked with the adopted request layout\n");
+    }
+    if (upek_await_finger(handle) < 0) {
+        fprintf(stderr, "upek: await-finger sequence failed\n");
+        return NULL;
+    }
+
+    unsigned char *image = upek_capture_swipe(handle, out_height);
+
+    /* Run deinit regardless of whether capture succeeded, same as
+     * the original driver always tearing down cleanly -- an image
+     * capture failure shouldn't leave the sensor stuck in capture
+     * mode for the next attempt. */
+    if (upek_run_deinit(handle) < 0) {
+        fprintf(stderr, "upek: warning: deinit sequence failed (non-fatal)\n");
+    }
+
+    return image;
+}
+
+/* ---- device open/close/presence, promoted out of main() below into
+ * standalone functions (Aug 29) so they match the shape
+ * vfs5011_daemon.c's own open_device()/close_device()/
+ * vfs5011_sensor_is_present() already have -- this is prep for the
+ * eventual shared daemon core (see hack_touchid_client.c's capture
+ * dispatch comment and the project's own notes on that refactor),
+ * which expects every sensor backend to expose exactly this shape:
+ * backend_open_device(), backend_close_device(),
+ * backend_sensor_is_present(), backend_image_width(). Naming these
+ * with the upek_ prefix rather than backend_ for now since this file
+ * isn't linked into that shared core yet -- rename is a 1-line sed
+ * away whenever that wiring actually happens. */
+
+static libusb_context *g_upek_ctx = NULL;
+static libusb_device_handle *g_upek_handle = NULL;
+
+/* Same retry-with-backoff shape as vfs5011_daemon.c's open_device() --
+ * copied deliberately rather than reinvented, since that logic exists
+ * specifically to paper over real macOS/IOKit timing quirks seen on
+ * real hardware (a device not being immediately re-openable right
+ * after a previous close, IOKit holding the interface exclusively for
+ * a brief moment after enumeration). UPEK hasn't been run against
+ * real hardware yet, so there's no confirmation these same quirks
+ * apply here too -- but there's no reason to assume a T420's USB
+ * stack behaves any better than a DV6's, so start with the same
+ * defensiveness rather than adding it reactively after a tester hits
+ * the same "Claim failed" problem VFS5011 already solved. */
+int upek_open_device(void) {
+    if (libusb_init(&g_upek_ctx) < 0) return -1;
+    libusb_set_option(g_upek_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    for (int i = 0; i < 5; i++) {
+        g_upek_handle = libusb_open_device_with_vid_pid(g_upek_ctx, UPEK_VID, UPEK_PID);
+        if (g_upek_handle) break;
+        usleep(300000);
+    }
+    if (!g_upek_handle) {
+        fprintf(stderr, "upek: device not found\n");
+        return -1;
+    }
+
+    libusb_set_auto_detach_kernel_driver(g_upek_handle, 1);
+
+    if (libusb_claim_interface(g_upek_handle, 0) == 0) return 0;
+
+    for (int i = 0; i < 3; i++) {
+        usleep(150000);
+        if (libusb_claim_interface(g_upek_handle, 0) == 0) return 0;
+    }
+
+    fprintf(stderr, "upek: claim failed, resetting device and retrying...\n");
+    int reset_r = libusb_reset_device(g_upek_handle);
+    if (reset_r != 0) {
+        fprintf(stderr, "upek: device reset failed: %s\n", libusb_error_name(reset_r));
+    }
+    usleep(500000);
+
+    if (libusb_claim_interface(g_upek_handle, 0) != 0) {
+        fprintf(stderr, "upek: claim failed again after reset\n");
+        return -1;
+    }
+    return 0;
+}
+
+void upek_close_device(void) {
+    if (g_upek_handle) {
+        /* UPEK has no bulk OUT endpoint like VFS5011 -- just the bulk
+         * IN image stream and a separate interrupt IN for finger
+         * presence, both already given endpoint macros in
+         * upek_proto.h (see hack_touchid_client.c's close_device(),
+         * which already clears these same two for the client's own
+         * UPEK path). */
+        libusb_clear_halt(g_upek_handle, UPEK_IN_ENDPOINT_BULK);
+        libusb_clear_halt(g_upek_handle, UPEK_IN_ENDPOINT_INTR);
+        libusb_release_interface(g_upek_handle, 0);
+        libusb_close(g_upek_handle);
+    }
+    if (g_upek_ctx) libusb_exit(g_upek_ctx);
+}
+
+/* Same non-invasive presence-check shape as
+ * vfs5011_sensor_is_present() -- its own short-lived context, never
+ * opens/claims, safe to call speculatively without disturbing an
+ * in-flight capture on g_upek_ctx/g_upek_handle. */
+bool upek_sensor_is_present(void) {
+    libusb_context *probe_ctx = NULL;
+    if (libusb_init(&probe_ctx) < 0) return true;
+    libusb_set_option(probe_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_NONE);
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(probe_ctx, &list);
+    bool found = false;
+    for (ssize_t i = 0; i < count; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) continue;
+        if (desc.idVendor == UPEK_VID && desc.idProduct == UPEK_PID) {
+            found = true;
+            break;
+        }
+    }
+    if (list) libusb_free_device_list(list, 1);
+    libusb_exit(probe_ctx);
+    return found;
+}
+
+int upek_image_width(void) {
+    return UPEK_IMG_WIDTH;
+}
+
+/* ---- Standalone smoke-test harness ----
+ *
+ * Not part of the real client integration -- this exists so a first
+ * real-hardware pass can happen (swipe once, confirm a PGM comes out
+ * looking like a fingerprint) before wiring this into
+ * hack_touchid_client.c properly. Delete once that wiring lands and
+ * the real Enroll/Verify path is what's actually being tested.
+ *
+ * Build: clang upek_daemon.c -o upek_capture_test -I. \
+ *   -I/usr/local/include/libusb-1.0 -L/usr/local/lib -lusb-1.0
+ * Run: sudo ./upek_capture_test out.pgm
+ */
+#ifdef UPEK_STANDALONE_TEST
+int main(int argc, char **argv) {
+    const char *out_path = (argc > 1) ? argv[1] : "upek_capture.pgm";
+
+    if (upek_open_device() != 0) {
+        return 1;
+    }
+
+    printf("Swipe your finger now...\n");
+    int height = 0;
+    unsigned char *image = upek_capture_fingerprint_image(g_upek_handle, &height);
+
+    upek_close_device();
+
+    if (!image) {
+        fprintf(stderr, "Capture failed\n");
+        return 1;
+    }
+
+    printf("Captured %d rows x %d columns\n", height, upek_image_width());
+
+    FILE *f = fopen(out_path, "wb");
+    if (!f) {
+        fprintf(stderr, "Could not open %s for writing\n", out_path);
+        free(image);
+        return 1;
+    }
+    fprintf(f, "P5\n%d %d\n255\n", upek_image_width(), height);
+    fwrite(image, 1, (size_t)upek_image_width() * height, f);
+    fclose(f);
+    free(image);
+
+    printf("Wrote %s -- open it to sanity-check it looks like a fingerprint swipe.\n", out_path);
+    return 0;
+}
+#endif

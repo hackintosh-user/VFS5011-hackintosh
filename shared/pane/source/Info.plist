@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>HackTouchID</string>
+	<key>CFBundleDisplayName</key>
+	<string>HackTouchID</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.vfs5011.hackintosh.prefpane</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleExecutable</key>
+	<string>HackTouchID</string>
+	<key>CFBundleIconFile</key>
+	<string>PaneIcon</string>
+	<key>NSPrefPaneIconFile</key>
+	<string>PaneIcon.tiff</string>
+	<key>NSPrefPaneIconLabel</key>
+	<string>HackTouchID</string>
+	<key>NSPrincipalClass</key>
+	<string>HackTouchIDPane</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>BSD 3-Clause, matches VFS5011-hackintosh main project license.</string>
+</dict>
+</plist>
