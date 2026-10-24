@@ -5660,15 +5660,33 @@ static bool offer_pane_instead_of_cli(void) {
  *   2. if there is none, it is compiled with build_prefpane.sh as the console user, with a
  *      time limit (the updater once hung for good inside that swiftc step);
  *   3. it is copied to ~/Library/PreferencePanes when it is missing or its version differs.
+ * Freshness: build_prefpane.sh stamps HTIDPaneSourceHash (a hash of the Swift source and the plist template) and HTIDPaneBuildDate into the bundle. The client recomputes the hash with
+ * "build_prefpane.sh --source-hash": a built bundle whose stamp differs (or is missing) is rebuilt, and an
+ * installed pane whose stamp differs from the bundle is reinstalled.
  * Any failure prints one line and the client carries on with the CLI. --cli skips all of this. */
 #define PANE_BUILD_LIMIT_SECONDS 240
 #define PANE_BUILD_LOG "/tmp/htid-pane-build.log"
 
-static bool pane_bundle_version(const char *bundle, char *out, size_t cap) {
-    char cmd[PATH_MAX + 160];
+static bool pane_bundle_key(const char *bundle, const char *key, char *out, size_t cap) {
+    char cmd[PATH_MAX + 200];
     snprintf(cmd, sizeof(cmd),
-             "/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \"%s/Contents/Info.plist\" 2>/dev/null",
-             bundle);
+             "/usr/libexec/PlistBuddy -c 'Print :%s' \"%s/Contents/Info.plist\" 2>/dev/null", key, bundle);
+    out[0] = '\0';
+    FILE *p = popen(cmd, "r");
+    if (!p) return false;
+    if (!fgets(out, (int)cap, p)) out[0] = '\0';
+    pclose(p);
+    out[strcspn(out, "\r\n")] = '\0';
+    return out[0] != '\0';
+}
+
+/* Fingerprint of the pane's current source (the build script prints it, so the client and the
+ * build can never disagree about how it is computed). */
+static bool pane_source_hash(char *out, size_t cap) {
+    char script[PATH_MAX], cmd[PATH_MAX + 64];
+    snprintf(script, sizeof(script), "%s/shared/pane/source/build_prefpane.sh", g_exec_dir);
+    if (access(script, R_OK) != 0) return false;
+    snprintf(cmd, sizeof(cmd), "/bin/bash \"%s\" --source-hash 2>/dev/null", script);
     out[0] = '\0';
     FILE *p = popen(cmd, "r");
     if (!p) return false;
@@ -5744,17 +5762,46 @@ static void ensure_pane_installed(void) {
     bool have_bundle = pane_bundle_path(src, sizeof(src));
     bool installed = installed_pane_path(inst, sizeof(inst), &ipw);
 
-    if (installed && !have_bundle) return;
-    if (installed && have_bundle) {
-        char vsrc[64], vinst[64];
-        /* Same version, or a version that cannot be read: leave the installed pane alone. */
-        if (!pane_bundle_version(src, vsrc, sizeof(vsrc)) ||
-            !pane_bundle_version(inst, vinst, sizeof(vinst)) || strcmp(vsrc, vinst) == 0) return;
-        printf("%sThe preference pane is out of date (%s, latest %s). Updating it...%s\n",
-               VFSC_CYAN, vinst, vsrc, VFSC_RESET);
+    /* 1. Is the built bundle current? Its stamped source hash must match the source on disk.
+     * A bundle without the stamp (built before this check existed) counts as out of date. */
+    char want[80] = "", built[80] = "", builtdate[40] = "";
+    bool can_hash = pane_source_hash(want, sizeof(want));
+    bool stale = false;
+    if (have_bundle && can_hash)
+        stale = !pane_bundle_key(src, "HTIDPaneSourceHash", built, sizeof(built)) || strcmp(built, want) != 0;
+    if (installed && !have_bundle && can_hash) {
+        char ih[80];
+        stale = !pane_bundle_key(inst, "HTIDPaneSourceHash", ih, sizeof(ih)) || strcmp(ih, want) != 0;
+        if (!stale) return; /* nothing built, but the installed pane is current */
     }
-    if (!have_bundle) {
-        if (!build_pane_with_time_limit(pw) || !pane_bundle_path(src, sizeof(src))) return;
+    if (!have_bundle || stale) {
+        if (have_bundle) {
+            (void)pane_bundle_key(src, "HTIDPaneBuildDate", builtdate, sizeof(builtdate));
+            printf("%sThe preference pane build is out of date (built %s, the source has changed). Rebuilding...%s\n",
+                   VFSC_CYAN, builtdate[0] ? builtdate : "before build stamps existed", VFSC_RESET);
+        }
+        bool ok = build_pane_with_time_limit(pw) && pane_bundle_path(src, sizeof(src));
+        if (!ok) {
+            if (!have_bundle) return;
+            vfsc_warn("Could not rebuild the preference pane, using the existing build.\n\n");
+        }
+    }
+
+    /* 2. Is the installed pane the same build as the bundle? */
+    if (installed) {
+        char bh[80] = "", ih[80] = "";
+        bool b_has = pane_bundle_key(src, "HTIDPaneSourceHash", bh, sizeof(bh));
+        bool i_has = pane_bundle_key(inst, "HTIDPaneSourceHash", ih, sizeof(ih));
+        if (b_has && i_has && strcmp(bh, ih) == 0) return;
+        if (!b_has) { /* an old bundle with no stamp: fall back to the version number */
+            char bv[64] = "", iv[64] = "";
+            if (!pane_bundle_key(src, "CFBundleVersion", bv, sizeof(bv)) ||
+                !pane_bundle_key(inst, "CFBundleVersion", iv, sizeof(iv)) || strcmp(bv, iv) == 0) return;
+        }
+        char bd[40] = "";
+        (void)pane_bundle_key(src, "HTIDPaneBuildDate", bd, sizeof(bd));
+        printf("%sThe installed preference pane is out of date. Updating it%s%s%s...%s\n", VFSC_CYAN,
+               bd[0] ? " to the build of " : "", bd, "", VFSC_RESET);
     }
     (void)do_install_pane();
 }
