@@ -57,7 +57,7 @@ private let daemonMissingCategoryID = "com.vfs5011.hackintosh.daemon_missing"
 private let clientUpdateActionID = "com.vfs5011.hackintosh.update_client"
 private let clientUpdateCategoryID = "com.vfs5011.hackintosh.client_update"
 private let clientSymlinkPath = "/usr/local/bin/hack-touchid"
-private let clientRawVersionBaseURL = "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
+private let clientRawVersionBaseURL = "https://raw.githubusercontent.com/hackintosh-user/hack-touchid"
 private let clientUpdateCheckInterval: TimeInterval = 60 * 60
 private let clientUpdateFirstCheckDelay: TimeInterval = 15
 // UserDefaults key: the last "version|build" we already notified about,
@@ -508,7 +508,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         body.frame = NSRect(x: 24, y: 70, width: 312, height: 110)
         content.addSubview(body)
 
-        let link = NSTextField(labelWithString: "github.com/hackintosh-user/VFS5011-hackintosh")
+        let link = NSTextField(labelWithString: "github.com/hackintosh-user/hack-touchid")
         link.font = NSFont.systemFont(ofSize: 11)
         link.textColor = .linkColor
         link.alignment = .center
@@ -522,7 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     @objc private func openProjectPage() {
-        if let url = URL(string: "https://github.com/hackintosh-user/VFS5011-hackintosh") {
+        if let url = URL(string: "https://github.com/hackintosh-user/hack-touchid") {
             NSWorkspace.shared.open(url)
         }
     }
