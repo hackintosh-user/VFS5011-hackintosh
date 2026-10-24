@@ -12,10 +12,10 @@
   
   * Current version: ```v1.1.0```
   * Current Menubar app version: ```v1.4.1```
-  * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/CHANGELOG.md)
-  * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development#supported-sensors)
+  * If you want to see the changes that happen to the code, please head into the Change log with [This link](https://github.com/hackintosh-user/hack-touchid/blob/main/CHANGELOG.md)
+  * Please refrence the Table that has the Supported sensors to make sure you can use this tool. [This link should take you there](https://github.com/hackintosh-user/hack-touchid/tree/main#supported-sensors)
   * Current Set ETA: **Mid October 2026**: Please keep in mind that this is only an ETA and not confirmed release date. Stuff could happen, it could release earlier or later on!
-  * [link to the GitHub page](https://hackintosh-user.github.io/VFS5011-hackintosh/index.html)
+  * [link to the GitHub page](https://hackintosh-user.github.io/hack-touchid/index.html)
 </p>
 
 ---
@@ -76,7 +76,7 @@ Features with Hackintosh Touch-ID:
 -  Auto Updating Client that auto extracts, runs chmod, re-launches new update, and deletes the old files
 - [D] Diagnose option for debugging issues, and opening issues on github
 - Multi operating system (macOS) support on one APFS encrypted volume
-- Multiple Launch-arguments for easier access like --q or --diag-pid, there's more [Read about them here](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
+- Multiple Launch-arguments for easier access like --q or --diag-pid, there's more [Read about them here](https://github.com/hackintosh-user/hack-touchid/blob/main/README.md#launch-arguments)
 - **macOS Tahoe only**: Swipe to lock with the menubar app!
 
  
@@ -132,7 +132,7 @@ The menu bar app talks to the daemon over macOS distributed
 notifications — the same mechanism the daemon already uses for its own
 `screenIsLocked`/`screenIsUnlocked` handling. **The daemon needs a small
 patch to actually send those events**; see
-[it's own README](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/Hackintosh-TouchID-Menubar/daemon-patch/README.md)
+[it's own README](https://github.com/hackintosh-user/hack-touchid/blob/main/Hackintosh-TouchID-Menubar/daemon-patch/README.md)
 
 for the exact 6-line diff against `vfs5011_daemon.c`. Without the patch,
 the app runs standalone and just never receives anything — harmless, but
@@ -164,8 +164,8 @@ Known limitations:
 ## Building
 
 ```bash
-git clone https://github.com/hackintosh-user/VFS5011-hackintosh.git
-cd /path/to/vfs5011-hackintosh-active-development
+git clone https://github.com/hackintosh-user/hack-touchid.git
+cd hack-touchid
 chmod +x prep_and_build.sh
 ./prep_and_build.sh                    # detects your sensor over USB
 ./prep_and_build.sh --sensor vfs5011   # or name it: vfs5011, upek, metallica, or a VID:PID
@@ -226,7 +226,7 @@ sudo ./hack-touchid
 ```bash
 sudo hack-touchid
 ```
-or with its [launch-arguments!](https://github.com/hackintosh-user/VFS5011-hackintosh/blob/active-development/README.md#launch-arguments)
+or with its [launch-arguments!](https://github.com/hackintosh-user/hack-touchid/blob/main/README.md#launch-arguments)
 
 Then, you should be greeted with this **interactive CLI menu for Hackintosh Touch-ID client**
 ```
@@ -364,6 +364,6 @@ driver exists.
 
 ## License
 
-Released under the BSD 3-Clause License. See [LICENSE](https://github.com/hackintosh-user/VFS5011-hackintosh/tree/active-development?tab=License-1-ov-file) for
+Released under the BSD 3-Clause License. See [LICENSE](https://github.com/hackintosh-user/hack-touchid/tree/main?tab=License-1-ov-file) for
 the full text, including third-party attribution for NBIS and the
 VFS5011 capture protocol.
