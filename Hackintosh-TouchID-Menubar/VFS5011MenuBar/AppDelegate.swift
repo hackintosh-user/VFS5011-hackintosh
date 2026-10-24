@@ -164,6 +164,14 @@ enum MacOSInfo {
 
     /// Darwin 25 == macOS 26 Tahoe. Uses the kernel's own report, so a
     /// spoofed product version does not fool the feature gate.
+    /// The Metallica agent creates this file while it runs on a macOS version where it offers
+    /// Touch to Lock (the touch sensor's version of Swipe to Lock). Beta: Sequoia and newer for now.
+    static var touchLockAvailable: Bool {
+        FileManager.default.fileExists(atPath: "/Library/Application Support/VFS5011/touch_lock_available")
+    }
+
+    static var lockFeatureName: String { touchLockAvailable ? "Touch to Lock" : "Swipe to Lock" }
+
     static var isTahoeOrNewer: Bool {
         guard let rel = sysctlString("kern.osrelease"),
               let major = Int(rel.split(separator: ".").first ?? "") else { return false }
@@ -383,11 +391,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         toggleItem.tag = 100 // used to find + relabel this item later
         menu.addItem(toggleItem)
 
-        // Swipe-to-lock is a macOS Tahoe feature, so the item only
-        // exists there.
-        if MacOSInfo.isTahoeOrNewer {
+        // Swipe-to-lock is a macOS Tahoe feature, so the item only exists there, except that the
+        // Metallica agent (Touch to Lock, beta) also offers it on Sequoia while it is running.
+        if MacOSInfo.isTahoeOrNewer || MacOSInfo.touchLockAvailable {
             let lockItem = NSMenuItem(
-                title: lockSwipeEnabled ? "Disable Swipe to Lock" : "Enable Swipe to Lock",
+                title: lockSwipeEnabled ? "Disable \(MacOSInfo.lockFeatureName)" : "Enable \(MacOSInfo.lockFeatureName)",
                 action: #selector(toggleLockSwipeTapped),
                 keyEquivalent: ""
             )
@@ -435,7 +443,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             : "Enable Fingerprint Authentication"
 
         if let lockItem = menu.item(withTag: 101) {
-            lockItem.title = lockSwipeEnabled ? "Disable Swipe to Lock" : "Enable Swipe to Lock"
+            lockItem.title = lockSwipeEnabled ? "Disable \(MacOSInfo.lockFeatureName)" : "Enable \(MacOSInfo.lockFeatureName)"
             lockItem.state = lockSwipeEnabled ? .on : .off
         }
 
