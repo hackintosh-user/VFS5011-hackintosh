@@ -6321,11 +6321,16 @@ static bool download_build_and_swap_update(const char *branch, bool relaunch,
      * pre-compiled in the branch and the copy below installs it, so the
      * updater must not wait on a swiftc build after "Build complete"
      * (it sat at 100% for minutes on older Macs). */
-    const char *build_family = (g_detected_sensor && g_detected_sensor->family)
-                                   ? g_detected_sensor->family : "all";
+    /* Oct 24: when no sensor family is known, do NOT pass "--sensor all". An explicit "all" builds
+     * every family and fails on Homebrew packages the machine never needed (openssl@3 and
+     * innoextract belong to Metallica only). Without --sensor, prep_and_build.sh auto-detects, and
+     * when it detects nothing it builds all families but skips the ones whose packages are missing. */
+    char sensor_arg[96] = "";
+    if (g_detected_sensor && g_detected_sensor->family)
+        snprintf(sensor_arg, sizeof(sensor_arg), "--sensor %s ", g_detected_sensor->family);
     snprintf(cmd, sizeof(cmd),
-             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh --sensor %s --yes --no-install --no-pane 2>&1 </dev/null",
-             src_dir, build_family);
+             "cd \"%s\" && chmod +x *.sh && sh prep_and_build.sh %s--yes --no-install --no-pane 2>&1 </dev/null",
+             src_dir, sensor_arg);
     FILE *bp = popen(cmd, "r");
     if (!bp) {
         fclose(log_fp);
