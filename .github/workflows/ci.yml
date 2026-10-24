@@ -206,12 +206,30 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remember the committed bundle's Info.plist
+        # The build below overwrites shared/menubar/build, so keep a copy first.
+        run: |
+          APP="shared/menubar/build/Hackintosh Touch-ID.app"
+          if [ -f "$APP/Contents/Info.plist" ]; then
+            cp "$APP/Contents/Info.plist" /tmp/committed-Info.plist
+          fi
       - name: Build
         run: |
           chmod +x Hackintosh-TouchID-Menubar/build_menubar_app.sh
           ./Hackintosh-TouchID-Menubar/build_menubar_app.sh
       - name: Verify app bundle was produced
         run: |
-          test -d "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app"
-          test -x "Hackintosh-TouchID-Menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
+          test -d "shared/menubar/build/Hackintosh Touch-ID.app"
+          test -x "shared/menubar/build/Hackintosh Touch-ID.app/Contents/MacOS/HackintoshTouchID"
           echo "Menu bar app built successfully."
+      - name: Upload the built app (download it to commit as the pre-built bundle)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hackintosh-Touch-ID-app
+          path: shared/menubar/build
+      - name: Committed bundle must match the source (Info.plist version)
+        run: |
+          test -f /tmp/committed-Info.plist || { echo "::error::No committed menu bar app in shared/menubar/build. Download the Hackintosh-Touch-ID-app artifact from this run and commit it."; exit 1; }
+          cmp /tmp/committed-Info.plist Hackintosh-TouchID-Menubar/VFS5011MenuBar/Info.plist \
+            || { echo "::error::Committed app's Info.plist differs from the source one. Commit the freshly built app from the Hackintosh-Touch-ID-app artifact."; exit 1; }
+          echo "Committed bundle matches the source Info.plist."
