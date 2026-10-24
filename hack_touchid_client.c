@@ -5994,8 +5994,8 @@ static void check_macos_version_warning(void) {
  * subject to the REST API's per-hour rate limit, unlike the tags API
  * this used to hit. */
 
-#define UPDATE_REPO_URL "https://github.com/hackintosh-user/VFS5011-hackintosh"
-#define UPDATE_RAW_BASE_URL "https://raw.githubusercontent.com/hackintosh-user/VFS5011-hackintosh"
+#define UPDATE_REPO_URL "https://github.com/hackintosh-user/hack-touchid"
+#define UPDATE_RAW_BASE_URL "https://raw.githubusercontent.com/hackintosh-user/hack-touchid"
 
 /* Fetches <branch>'s VERSION.txt fresh from GitHub -- deliberately the
  * SAME branch the local copy says it's on (local.branch), so someone
