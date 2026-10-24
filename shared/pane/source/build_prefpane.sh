@@ -15,6 +15,18 @@ ASSETS_DIR="$HERE/../../../Hackintosh-TouchID-Menubar/Assets"   # optional, icon
 BUILD_DIR="$HERE/../build"   # shared/pane/build/
 PANE="$BUILD_DIR/HackTouchID.prefPane"
 
+# Fingerprint of what goes into the pane: the Swift source and the Info.plist template. The client
+# version is left out on purpose, so a VERSION.txt bump alone never makes a committed bundle look stale.
+# It is stamped into the bundle (HTIDPaneSourceHash) so the client can tell whether the committed or the
+# installed pane was built from the current source. "--source-hash" prints it and exits.
+source_hash() {
+    cat "$SRC_DIR/HackTouchIDPane.swift" "$SRC_DIR/Info.plist" | shasum -a 256 | cut -c1-16
+}
+if [ "${1:-}" = "--source-hash" ]; then
+    source_hash
+    exit 0
+fi
+
 echo "==> Cleaning old pane bundle"
 rm -rf "$PANE"
 mkdir -p "$PANE/Contents/MacOS" "$PANE/Contents/Resources"
@@ -49,6 +61,14 @@ if [ -n "$CLIENT_VERSION" ]; then
 else
     echo "    warning: no VERSION= in $VERSION_FILE, keeping the version from Info.plist"
 fi
+
+echo "==> Stamping the source hash and build date"
+PBS=/usr/libexec/PlistBuddy
+for kv in "HTIDPaneSourceHash:$(source_hash)" "HTIDPaneBuildDate:$(date -u +%Y-%m-%d)"; do
+    key="${kv%%:*}"; val="${kv#*:}"
+    "$PBS" -c "Set :$key $val" "$PANE/Contents/Info.plist" 2>/dev/null || \
+        "$PBS" -c "Add :$key string $val" "$PANE/Contents/Info.plist"
+done
 
 echo "==> Building the pane icon from the menu bar app icon set"
 if [ -f "$ASSETS_DIR/AppIcon.iconset/icon_128x128.png" ]; then
