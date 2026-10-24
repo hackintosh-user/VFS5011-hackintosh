@@ -41,7 +41,7 @@ This Table will have the currently Supported Sensors or sensors in **Development
 | Sensor Name / Model    | VID  | PID  | Support status                                                    | Supported Features |
 |------------------------|------|------|------------------------------------------------------------------ |--------------------|
 | Validity VFS5011       | 138A | 0018 | **Supported & Confirmed working on a DV6-7070ex with VFS5011**    | **Fully Supported**| 
-| Synaptics Metallica MIS| 006cb| 009a | **Supported & Confirmed working on a X1C6 (Thanks u/p0cketl1nt)** |                    |
+| Synaptics Metallica MIS| 06cb | 009a | **Supported & Confirmed working on a X1C6 (Thanks u/p0cketl1nt)** |                    |
 | Prometheus 97          | 138A | 0097 | **Developing & planned testing**                                  |                    |
 | Prometheus 9d          | 138A | 009d | **Developing / Supposed to work according to python-validty**     |                    |
 | UPEK TouchStrip        | 147e | 2016 | **Developing & actively Testing**                                 |                    | 
@@ -359,7 +359,7 @@ driver exists.
 
 * @Hackintosh-user: Main Lead developer
 * @ilikehackintosh: Documentation handler
-* [u/p0cketl1nt](https://www.reddit.com/user/p0cketl1nt/): Main tester for Metallica MIS 006cb:009a & Prometheus 97 138a:0097 (massive thank you!)
+* [u/p0cketl1nt](https://www.reddit.com/user/p0cketl1nt/): Main tester for Metallica MIS 06cb:009a & Prometheus 97 138a:0097 (massive thank you!)
 * [u/dCold_Salamander7764](https://www.reddit.com/user/Cold_Salamander7764/): Main tester for UPEK touch-Strip 147e:2016 (massive thank you!)
 
 ## License
