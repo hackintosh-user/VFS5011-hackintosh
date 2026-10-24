@@ -65,21 +65,26 @@
  *   read  2: wValue=0,     wIndex=reg, 1 byte back */
 static int g_upek_wr_layout = 0;
 static int g_upek_rd_layout = 0;
+/* Oct 24 (probe v2): which recipient bits are added to bmRequestType. 0 = device (libfprint),
+ * 1 = interface, 2 = endpoint. Only the probe changes this, and it keeps whichever works. */
+static int g_upek_recip = 0;
+#define UPEK_WR_REQTYPE (UPEK_CTRL_WRITE_REQTYPE | g_upek_recip)
+#define UPEK_RD_REQTYPE (UPEK_CTRL_READ_REQTYPE | g_upek_recip)
 
 static int upek_write_reg_layout(libusb_device_handle *handle, int layout, uint8_t reg, uint8_t value) {
     unsigned char data = value;
     int r;
     switch (layout) {
     case 1:
-        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
                                     reg, 0, &data, 1, UPEK_CTRL_TIMEOUT_MS);
         break;
     case 2:
-        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
                                     value, reg, NULL, 0, UPEK_CTRL_TIMEOUT_MS);
         break;
     default:
-        r = libusb_control_transfer(handle, UPEK_CTRL_WRITE_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_WR_REQTYPE, UPEK_CTRL_REQUEST,
                                     0, reg, &data, 1, UPEK_CTRL_TIMEOUT_MS);
         break;
     }
@@ -91,15 +96,15 @@ static int upek_read_reg_layout(libusb_device_handle *handle, int layout, uint8_
     int r;
     switch (layout) {
     case 1:
-        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
                                     reg, 0, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
         break;
     case 2:
-        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
                                     0, reg, buf, 1, UPEK_CTRL_TIMEOUT_MS);
         break;
     default:
-        r = libusb_control_transfer(handle, UPEK_CTRL_READ_REQTYPE, UPEK_CTRL_REQUEST,
+        r = libusb_control_transfer(handle, UPEK_RD_REQTYPE, UPEK_CTRL_REQUEST,
                                     0, reg, buf, sizeof(buf), UPEK_CTRL_TIMEOUT_MS);
         break;
     }
@@ -551,17 +556,135 @@ static bool upek_probe_layouts(libusb_device_handle *h, const char *stage) {
     return wr_ok;
 }
 
+/* ---- Probe v2 (Oct 24) ----
+ * Round one showed: every vendor register write stalls, only read layout 1 (wValue=reg) answers
+ * (always 0x00), and a reset changes nothing. The register tables and request layout match
+ * libfprint's upeksonly 2016 driver exactly, so the next questions are about state and variant:
+ * which strings and speed does this unit report, does a different recipient or bRequest answer,
+ * does the sensor emit anything on its own, and does it react to an alternate-setting or
+ * clear-halt. Everything here is a read or a harmless repeat of the first init write (0x49=0x00). */
+
+static void upek_probe_identity(libusb_device_handle *h) {
+    libusb_device *dev = libusb_get_device(h);
+    struct libusb_device_descriptor d;
+    if (libusb_get_device_descriptor(dev, &d) != 0) return;
+    unsigned char s[128];
+    const struct { const char *name; uint8_t idx; } strs[] = {
+        { "manufacturer", d.iManufacturer }, { "product", d.iProduct }, { "serial", d.iSerialNumber },
+    };
+    for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
+        if (!strs[i].idx) { upek_rep("string %s: none", strs[i].name); continue; }
+        int r = libusb_get_string_descriptor_ascii(h, strs[i].idx, s, sizeof(s) - 1);
+        if (r < 0) upek_rep("string %s: %s", strs[i].name, libusb_error_name(r));
+        else { s[r] = '\0'; upek_rep("string %s: \"%s\"", strs[i].name, s); }
+    }
+    static const char *speeds[] = { "unknown", "low", "full", "high", "super", "super+" };
+    int sp = libusb_get_device_speed(dev);
+    upek_rep("bus %u address %u speed %s", libusb_get_bus_number(dev), libusb_get_device_address(dev),
+             (sp >= 0 && sp <= 5) ? speeds[sp] : "unknown");
+    uint8_t ports[8];
+    int np = libusb_get_port_numbers(dev, ports, sizeof(ports));
+    if (np > 0) {
+        char pbuf[64] = {0};
+        for (int i = 0; i < np; i++) {
+            char t[8];
+            snprintf(t, sizeof(t), i ? ".%u" : "%u", ports[i]);
+            strncat(pbuf, t, sizeof(pbuf) - strlen(pbuf) - 1);
+        }
+        upek_rep("port path %s", pbuf);
+    }
+    unsigned char b = 0xff;
+    int r = libusb_control_transfer(h, 0x81, 0x0a, 0, 0, &b, 1, 300);
+    if (r < 0) upek_rep("standard GET_INTERFACE(0): %s", libusb_error_name(r));
+    else upek_rep("standard GET_INTERFACE(0): alt %u", b);
+}
+
+/* Write (0x49 = 0x00, the first init write) with every recipient x layout. Keeps the first
+ * combination that gets through and then picks a matching read layout. */
+static bool upek_probe_recipients(libusb_device_handle *h, const char *stage) {
+    static const char *names[] = { "device", "interface", "endpoint" };
+    upek_rep("-- recipient sweep (%s) --", stage);
+    for (int rc = 0; rc < 3; rc++) {
+        g_upek_recip = rc;
+        for (int l = 0; l < 3; l++) {
+            int r = upek_write_reg_layout(h, l, 0x49, 0x00);
+            upek_rep("write recipient=%s layout %d: %s", names[rc], l, r < 0 ? libusb_error_name(r) : "ok");
+            (void)libusb_clear_halt(h, 0x00);
+            if (r >= 0) {
+                g_upek_wr_layout = l;
+                for (int rl = 0; rl < 3; rl++) {
+                    uint8_t v = 0;
+                    if (upek_read_reg_layout(h, rl, 0x09, &v) >= 0) {
+                        g_upek_rd_layout = rl;
+                        upek_rep("read recipient=%s layout %d (reg 0x09): ok, 0x%02x", names[rc], rl, v);
+                        break;
+                    }
+                    (void)libusb_clear_halt(h, 0x00);
+                    (void)libusb_clear_halt(h, 0x80);
+                }
+                return true;
+            }
+        }
+    }
+    g_upek_recip = 0;
+    return false;
+}
+
+/* Which vendor bRequest values does the device answer at all (device-to-host, 8 bytes back)? */
+static void upek_probe_request_sweep(libusb_device_handle *h) {
+    upek_rep("-- vendor read sweep: bRequest 0x00-0x3f, wValue=0, wIndex=0 --");
+    int answered = 0;
+    for (int req = 0; req < 0x40; req++) {
+        unsigned char buf[8] = {0};
+        int r = libusb_control_transfer(h, 0xc0, (uint8_t)req, 0, 0, buf, sizeof(buf), 300);
+        if (r >= 0) {
+            answered++;
+            upek_rep("bRequest 0x%02x answered %d bytes: %02x %02x %02x %02x %02x %02x %02x %02x", req, r,
+                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+        } else if (r != LIBUSB_ERROR_PIPE) {
+            upek_rep("bRequest 0x%02x: %s", req, libusb_error_name(r));
+        }
+        (void)libusb_clear_halt(h, 0x80);
+    }
+    if (!answered) upek_rep("no vendor bRequest in 0x00-0x3f answered a read");
+}
+
+/* Does the sensor say anything on its own, and does it react to alt setting 0 or clear-halt? */
+static void upek_probe_endpoints(libusb_device_handle *h) {
+    upek_rep("-- endpoint listen --");
+    int r = libusb_set_interface_alt_setting(h, 0, 0);
+    upek_rep("set_interface_alt_setting(0,0): %s", r == 0 ? "ok" : libusb_error_name(r));
+    const uint8_t eps[] = { UPEK_IN_ENDPOINT_BULK, 0x02, UPEK_IN_ENDPOINT_INTR };
+    for (size_t i = 0; i < sizeof(eps); i++) {
+        r = libusb_clear_halt(h, eps[i]);
+        upek_rep("clear_halt(0x%02x): %s", eps[i], r == 0 ? "ok" : libusb_error_name(r));
+    }
+    unsigned char buf[UPEK_BULK_TRANSFER_SIZE];
+    int got = 0;
+    r = libusb_interrupt_transfer(h, UPEK_IN_ENDPOINT_INTR, buf, 8, &got, 400);
+    if (r == 0) upek_rep("interrupt IN 0x83: %d bytes, first %02x %02x %02x %02x", got, buf[0], buf[1], buf[2], buf[3]);
+    else upek_rep("interrupt IN 0x83: %s", libusb_error_name(r));
+    r = libusb_bulk_transfer(h, UPEK_IN_ENDPOINT_BULK, buf, sizeof(buf), &got, 300);
+    if (r == 0) upek_rep("bulk IN 0x81: %d bytes, first %02x %02x %02x %02x", got, buf[0], buf[1], buf[2], buf[3]);
+    else upek_rep("bulk IN 0x81: %s", libusb_error_name(r));
+}
+
 /* Returns 0 when some layout let a register write through (g_upek_*_layout are set), -1 when
  * nothing worked. Everything it learns goes to stderr and to UPEK_PROBE_REPORT_PATH. */
 static int upek_probe_and_adapt(libusb_device_handle *h) {
     g_upek_report = fopen(UPEK_PROBE_REPORT_PATH, "w");
     upek_rep("UPEK control-pipe probe (macOS libusb %u.%u.%u)", libusb_get_version()->major,
              libusb_get_version()->minor, libusb_get_version()->micro);
+    upek_rep("probe v2, Oct 24. Run it once right after a reboot, before anything else touches the sensor.");
     upek_probe_descriptors(h);
     upek_probe_standard(h);
+    upek_probe_identity(h);
 
     int result = -1;
     if (upek_probe_layouts(h, "as opened")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "as opened")) { result = 0; goto out; }
+    upek_probe_request_sweep(h);
+    upek_probe_endpoints(h);
 
     /* Re-apply the configuration, then try again. */
     upek_rep("-- re-applying configuration 1 --");
@@ -572,6 +695,7 @@ static int upek_probe_and_adapt(libusb_device_handle *h) {
     upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
     usleep(300000);
     if (upek_probe_layouts(h, "after set_configuration")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "after set_configuration")) { result = 0; goto out; }
 
     /* Last resort: full device reset. */
     upek_rep("-- resetting the device --");
@@ -581,10 +705,11 @@ static int upek_probe_and_adapt(libusb_device_handle *h) {
     r = libusb_claim_interface(h, 0);
     upek_rep("claim_interface(0): %s", r == 0 ? "ok" : libusb_error_name(r));
     if (upek_probe_layouts(h, "after reset")) { result = 0; goto out; }
+    if (upek_probe_recipients(h, "after reset")) { result = 0; goto out; }
 
     upek_rep("RESULT: every register request layout was stalled by the sensor");
 out:
-    if (result == 0) upek_rep("RESULT: using write layout %d, read layout %d", g_upek_wr_layout, g_upek_rd_layout);
+    if (result == 0) upek_rep("RESULT: using write layout %d, read layout %d, recipient %d", g_upek_wr_layout, g_upek_rd_layout, g_upek_recip);
     fprintf(stderr, "upek: probe report saved to %s, please send it\n", UPEK_PROBE_REPORT_PATH);
     if (g_upek_report) { fclose(g_upek_report); g_upek_report = NULL; }
     return result;
