@@ -15,8 +15,10 @@
  *   - the sensor session (TLS) is opened when an episode starts and closed
  *     when it ends, through the daemon API in metallica_mis_enroll.h
  *     (metallica_mis_agent_open / _identify / _close)
- *   - Swipe to Lock is not available: this sensor is a touch sensor with no
- *     swipe image, so there is nothing to measure a swipe with
+ *   - there is no swipe image, so Swipe to Lock becomes "Touch to Lock": while the
+ *     screen is unlocked and the setting is on, a touch from an enrolled finger locks
+ *     the screen (Control-Command-Q). Beta: offered from macOS Sequoia for testing,
+ *     switch LOCKTOUCH_MIN_DARWIN to 25 to make it Tahoe only.
  *
  * UNTESTED ON REAL HARDWARE. Ported from the VFS5011 daemon and checked by
  * reading and static analysis only. Ships behind the Deploy gate in the
@@ -38,6 +40,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <libusb.h>
@@ -186,10 +189,16 @@ static void unmount_template_volume(void) {
 
 typedef enum {
     STATE_IDLE,
-    STATE_POLLING   /* a lock screen or padlock episode is active: the sensor is being polled */
+    STATE_POLLING,   /* a lock screen or padlock episode is active: the sensor is being polled */
+    STATE_LOCK_ARMED /* Touch to Lock is on and the screen is unlocked: a matching touch locks it */
 } daemon_state_t;
 
 static atomic_int g_state = STATE_IDLE;
+/* The state the polling thread opened its current wait for. abort_wait_cb() stops the wait
+ * as soon as the real state differs (armed -> lock screen, armed -> idle, ...). */
+static atomic_int g_wait_state = STATE_IDLE;
+static void lockswipe_try_arm(void);
+static void lockswipe_disarm(void);
 static atomic_int g_running = 1;
 
 /* Auth triggers, same as the VFS5011 daemon: the lock screen, or a
@@ -393,28 +402,40 @@ static void on_yield_request(bool begin) {
         atomic_store(&g_yield_ack_pending, true);
         print_timestamp();
         printf("Sensor yielded to the client.\n");
+        lockswipe_disarm();
     } else {
         if (!atomic_exchange(&g_yield_active, false)) return;
         atomic_store(&g_yield_ack_pending, false);
         print_timestamp();
         printf("Client finished, taking the sensor back.\n");
+        lockswipe_try_arm(); /* only re-arms if Touch to Lock is on */
     }
 }
 
-/* Swipe to Lock needs a swipe image, which this touch sensor does not give.
- * The menu bar can still flip the flag file; the agent just never arms. */
+/* Called from the menu bar IPC (main run loop) on enable/disable. */
 static void on_lockswipe_setting_changed(bool enabled) {
-    if (!enabled) return;
-    print_timestamp();
-    printf("Swipe to Lock was requested, but it is not available for the Metallica MIS sensor.\n");
+    if (enabled) lockswipe_try_arm(); else lockswipe_disarm();
 }
 
-static void settle_to_idle(void) { atomic_store(&g_state, STATE_IDLE); }
+/* After an episode or an unlock the finger that just touched the sensor is probably still on it,
+ * so Touch to Lock waits a few seconds before it arms again. */
+#define LOCKTOUCH_GRACE_SEC 4
+static _Atomic long long g_arm_not_before = 0;
+
+static void lockswipe_set_grace(int seconds) {
+    atomic_store(&g_arm_not_before, (long long)time(NULL) + seconds);
+}
+
+static void settle_to_idle(void) {
+    atomic_store(&g_state, STATE_IDLE);
+    lockswipe_set_grace(LOCKTOUCH_GRACE_SEC);
+    lockswipe_try_arm();
+}
 
 /* Polled by the daemon API while it waits for a finger (about every 300 ms):
  * stop waiting when the episode ended, the client wants the sensor, or we quit. */
 static int abort_wait_cb(void) {
-    return atomic_load(&g_state) != STATE_POLLING || yield_is_active() || !atomic_load(&g_running);
+    return atomic_load(&g_state) != atomic_load(&g_wait_state) || yield_is_active() || !atomic_load(&g_running);
 }
 
 
@@ -426,6 +447,111 @@ static bool screen_is_locked_now(void) {
     bool locked = (v != NULL && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)v));
     CFRelease(session);
     return locked;
+}
+
+/* ------------------------------------------------------------------ *
+ * Touch to Lock (beta)
+ * ------------------------------------------------------------------ *
+ * While the screen is unlocked and the setting is on, the agent keeps a sensor session open and
+ * asks the sensor to match every touch. A match locks the screen with Control-Command-Q, the same
+ * keystroke the VFS5011 daemon uses. A touch that does not match does nothing. */
+#define LOCKTOUCH_MIN_DARWIN 24 /* 24 = Sequoia (testing). Set to 25 for Tahoe only once it is confirmed. */
+#define TOUCHLOCK_MARKER "/Library/Application Support/VFS5011/touch_lock_available"
+
+static bool os_allows_touch_lock(void) {
+    char rel[32] = "";
+    size_t len = sizeof(rel);
+    if (sysctlbyname("kern.osrelease", rel, &len, NULL, 0) != 0) return false;
+    return atoi(rel) >= LOCKTOUCH_MIN_DARWIN;
+}
+
+/* The menu bar app and the Settings pane show the toggle when this file exists. */
+static void touch_lock_publish(bool available) {
+    if (!available || !os_allows_touch_lock()) { unlink(TOUCHLOCK_MARKER); return; }
+    mkdir("/Library/Application Support/VFS5011", 0755);
+    FILE *f = fopen(TOUCHLOCK_MARKER, "w");
+    if (!f) return;
+    fputs("1\n", f);
+    fclose(f);
+    chmod(TOUCHLOCK_MARKER, 0644);
+}
+
+/* Logs why arming was skipped, only when the reason changes (the 2 s self-heal would spam it). */
+static void lockswipe_note_skip(const char *why) {
+    static const char *last = NULL;
+    if (last == why) return;
+    last = why;
+    if (!why) return;
+    print_timestamp();
+    printf("Touch to Lock not armed: %s\n", why);
+}
+
+static void lockswipe_try_arm(void) {
+    if (!vfs5011_lockswipe_is_enabled()) return;
+    if (yield_is_active()) return; /* the client has the sensor */
+    if (!os_allows_touch_lock()) { lockswipe_note_skip("this macOS version is not supported for Touch to Lock"); return; }
+    if (!vfs5011_scanning_is_enabled()) { lockswipe_note_skip("scanning is paused"); return; }
+    if ((long long)time(NULL) < atomic_load(&g_arm_not_before)) { lockswipe_note_skip("waiting for the finger to lift"); return; }
+    if (screen_is_locked_now()) { lockswipe_note_skip("screen is locked"); return; }
+    if (!metallica_sensor_is_present()) { lockswipe_note_skip("no Metallica MIS sensor present"); return; }
+    int cur = atomic_load(&g_state);
+    if (cur != STATE_IDLE && cur != STATE_LOCK_ARMED) { lockswipe_note_skip("another auth episode is active"); return; }
+    int expected = STATE_IDLE;
+    if (atomic_compare_exchange_strong(&g_state, &expected, STATE_LOCK_ARMED)) {
+        lockswipe_note_skip(NULL);
+        print_timestamp();
+        printf("Touch to Lock armed.\n");
+    }
+}
+
+static void lockswipe_disarm(void) {
+    int expected = STATE_LOCK_ARMED;
+    if (atomic_compare_exchange_strong(&g_state, &expected, STATE_IDLE)) {
+        print_timestamp();
+        printf("Touch to Lock disarmed.\n");
+    }
+}
+
+/* The sensor session cannot be used (no prints, refused identity, repeated errors): stop arming
+ * for a while instead of retrying in a tight loop. The setting itself stays on. */
+static void lockswipe_pause(const char *why, int seconds) {
+    lockswipe_set_grace(seconds);
+    int expected = STATE_LOCK_ARMED;
+    if (atomic_compare_exchange_strong(&g_state, &expected, STATE_IDLE)) {
+        print_timestamp();
+        printf("Touch to Lock paused for %d s: %s\n", seconds, why);
+    }
+}
+
+static void post_lock_keystroke(void) {
+    const CGKeyCode kVK_ANSI_Q = 0x0C;
+    CGEventFlags flags = kCGEventFlagMaskControl | kCGEventFlagMaskCommand;
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, kVK_ANSI_Q, true);
+    CGEventSetFlags(down, flags);
+    CGEventPost(kCGSessionEventTap, down);
+    CFRelease(down);
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, kVK_ANSI_Q, false);
+    CGEventSetFlags(up, flags);
+    CGEventPost(kCGSessionEventTap, up);
+    CFRelease(up);
+}
+
+static void trigger_touch_lock(void) {
+    if (screen_is_locked_now()) return;
+    /* Drop to IDLE first: on_screen_locked() arms the lock-screen episode from IDLE or LOCK_ARMED,
+     * and the CAS also catches the state having changed under us (a padlock just appeared). */
+    int expected = STATE_LOCK_ARMED;
+    if (!atomic_compare_exchange_strong(&g_state, &expected, STATE_IDLE)) return;
+    lockswipe_set_grace(LOCKTOUCH_GRACE_SEC);
+    print_timestamp();
+    printf("Touch to Lock: matched touch -> locking the screen (Ctrl+Cmd+Q).\n");
+    post_lock_keystroke();
+    usleep(1000000);
+    if (!screen_is_locked_now() && atomic_load(&g_state) == STATE_IDLE) {
+        print_timestamp();
+        printf("Touch to Lock: the screen did not lock (is Accessibility granted to the agent?). Re-arming.\n");
+        lockswipe_try_arm();
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -649,13 +775,15 @@ static void arm_polling_for_trigger(trigger_source_t source, pid_t target_pid,
                                      AXUIElementRef secure_field, const char *label);
 
 static void on_screen_locked(void) {
-    if (atomic_load(&g_state) != STATE_IDLE) return; /* don't interrupt an episode */
+    int st0 = atomic_load(&g_state);
+    if (st0 != STATE_IDLE && st0 != STATE_LOCK_ARMED) return; /* don't interrupt an episode */
     atomic_store(&g_lock_screen_since_ms, monotonic_ms());
     arm_polling_for_trigger(TRIGGER_LOCK_SCREEN, 0, NULL, "Screen lock");
 }
 
 static void on_screen_unlocked(void) {
     atomic_store(&g_state, STATE_IDLE);
+    lockswipe_set_grace(LOCKTOUCH_GRACE_SEC); /* the unlocking finger may still be on the sensor */
     atomic_store(&g_trigger_source, TRIGGER_NONE);
     atomic_store(&g_lock_screen_since_ms, 0);
     atomic_store(&g_failed_swipes, 0);
@@ -893,7 +1021,12 @@ static void auth_prompt_poll_callback(CFRunLoopTimerRef timer, void *info) {
     }
     not_locked_ticks = 0;
 
-    if (st != STATE_IDLE) return; /* already mid-episode elsewhere */
+    /* Self-heal for Touch to Lock: arms again after the post-unlock wait, after a pause, or when
+     * the setting was switched on while the screen was locked. About every 2 s. */
+    static int heal_ticks = 0;
+    if (st == STATE_IDLE && ++heal_ticks >= 7) { heal_ticks = 0; lockswipe_try_arm(); }
+
+    if (st != STATE_IDLE && st != STATE_LOCK_ARMED) return; /* already mid-episode elsewhere */
 
     pid_t candidates[8];
     int candidate_count = get_auth_candidate_pids(candidates, 8);
@@ -1095,7 +1228,8 @@ static void *polling_thread_main(void *arg) {
         /* A client yield is only confirmed once no session is held. */
         if (!session_open && atomic_exchange(&g_yield_ack_pending, false)) vfs5011_notify_yield_ready();
 
-        bool want_session = atomic_load(&g_state) == STATE_POLLING && !yield_is_active();
+        int st = atomic_load(&g_state);
+        bool want_session = (st == STATE_POLLING || st == STATE_LOCK_ARMED) && !yield_is_active();
         if (!want_session) {
             if (session_open) { metallica_mis_agent_close(); session_open = false; }
             open_failures = 0;
@@ -1109,16 +1243,23 @@ static void *polling_thread_main(void *arg) {
             if (rc == 0) {
                 if (metallica_mis_agent_prints() == 0) {
                     metallica_mis_agent_close();
+                    if (st == STATE_LOCK_ARMED) { lockswipe_pause("no fingerprints are stored on the sensor", 300); continue; }
                     abandon_episode("No fingerprints are stored on the sensor -- enroll one with [1] Enroll first. Staying IDLE.");
                     continue;
                 }
                 session_open = true;
                 open_failures = 0;
             } else if (rc == MMIS_SESSION_FAILED) {
+                if (st == STATE_LOCK_ARMED) { lockswipe_pause("the sensor refused the session (host identity)", 300); continue; }
                 abandon_episode("The sensor refused the session: the saved host identity does not match the one it was paired with. Run [2] Verify in the client once to enter it. Staying IDLE.");
                 continue;
             } else {
-                if (++open_failures >= MAX_OPEN_FAILURES) {
+                if (st == STATE_LOCK_ARMED && ++open_failures >= MAX_OPEN_FAILURES) {
+                    lockswipe_pause("could not open a session with the sensor", 60);
+                    open_failures = 0;
+                } else if (st == STATE_LOCK_ARMED) {
+                    usleep(1000000);
+                } else if (++open_failures >= MAX_OPEN_FAILURES) {
                     abandon_episode("Could not open a session with the sensor several times in a row. Staying IDLE.");
                 } else {
                     print_timestamp();
@@ -1131,7 +1272,28 @@ static void *polling_thread_main(void *arg) {
 
         uint32_t user_id = 0;
         uint16_t subtype = 0;
+        atomic_store(&g_wait_state, st);
         int r = metallica_mis_agent_identify(&user_id, &subtype);
+        if (st == STATE_LOCK_ARMED) {
+            /* Touch to Lock: a match locks the screen, anything else is ignored. If the state moved
+             * on while waiting (the screen locked first), trigger_touch_lock() sees that and does nothing. */
+            if (r == MMIS_AGENT_MATCH) {
+                error_streak = 0;
+                trigger_touch_lock();
+            } else if (r == MMIS_AGENT_NO_MATCH || r == MMIS_AGENT_NO_FINGER) {
+                error_streak = 0;
+            } else {
+                metallica_mis_agent_close();
+                session_open = false;
+                if (r == MMIS_AGENT_ERROR && ++error_streak >= MAX_OPEN_FAILURES) {
+                    lockswipe_pause("the sensor kept returning errors", 60);
+                    error_streak = 0;
+                } else if (r == MMIS_AGENT_ERROR) {
+                    usleep(500000);
+                }
+            }
+            continue;
+        }
         if (r == MMIS_AGENT_MATCH) {
             error_streak = 0;
             print_timestamp();
@@ -1350,8 +1512,11 @@ int main(int argc, char **argv) {
     vfs5011_set_lockswipe_handler(on_lockswipe_setting_changed);
     vfs5011_set_yield_handler(on_yield_request);
     vfs5011_menubar_ipc_init();
+    touch_lock_publish(true);
+    lockswipe_try_arm(); /* restores Touch to Lock after an agent restart */
 
     CFRunLoopRun();
+    touch_lock_publish(false);
 
     atomic_store(&g_running, 0);
     pthread_join(poll_thread, NULL);
