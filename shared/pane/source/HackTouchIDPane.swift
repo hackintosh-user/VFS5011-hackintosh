@@ -242,6 +242,12 @@ private func label(_ text: String, bold: Bool = false, secondary: Bool = false) 
 
 private func macOSMajor() -> Int { ProcessInfo.processInfo.operatingSystemVersion.majorVersion }
 
+/// The Metallica agent creates this file while it runs on a macOS version where it offers Touch to
+/// Lock (the touch sensor's version of Swipe to Lock). Beta: Sequoia and newer for now.
+private func touchLockAvailable() -> Bool {
+    FileManager.default.fileExists(atPath: "/Library/Application Support/VFS5011/touch_lock_available")
+}
+
 // MARK: - The pane
 
 @objc(HackTouchIDPane)
@@ -540,10 +546,11 @@ class HackTouchIDPane: NSPreferencePane {
 
         lockSwipeSwitch.target = self
         lockSwipeSwitch.action = #selector(lockSwipeChanged)
-        let tahoeGroup = group("macOS Tahoe", rows: [
-            settingRow("Swipe to Lock", subtitle: lockSwipeHint, control: lockSwipeSwitch),
+        let touchLock = touchLockAvailable()
+        let tahoeGroup = group(macOSMajor() >= 26 ? "macOS Tahoe" : "Lock (beta)", rows: [
+            settingRow(touchLock ? "Touch to Lock" : "Swipe to Lock", subtitle: lockSwipeHint, control: lockSwipeSwitch),
         ])
-        tahoeGroup.isHidden = macOSMajor() < 26
+        tahoeGroup.isHidden = macOSMajor() < 26 && !touchLock
         tahoeBox = tahoeGroup
 
         for g in [authGroup, statusGroup, thresholdGroup, actionsGroup, tahoeGroup] {
@@ -1239,9 +1246,11 @@ class HackTouchIDPane: NSPreferencePane {
         thresholdHint.stringValue = "Lower accepts more swipes, higher is stricter. Default \(thresholdDefault)."
 
         // Tahoe section
-        tahoeBox?.isHidden = macOSMajor() < 26
+        tahoeBox?.isHidden = macOSMajor() < 26 && !touchLockAvailable()
         lockSwipeSwitch.state = fileExists(Paths.lockSwipeFlag) ? .on : .off
-        lockSwipeHint.stringValue = "Arm the sensor and lock the screen with a swipe (Control-Command-Q)."
+        lockSwipeHint.stringValue = touchLockAvailable()
+            ? "Touch the sensor with an enrolled finger to lock the screen (Control-Command-Q). Lift your finger right after unlocking."
+            : "Arm the sensor and lock the screen with a swipe (Control-Command-Q)."
     }
 
     private func currentThreshold() -> Int {
